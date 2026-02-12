@@ -115,7 +115,7 @@ class HummingLayer(torch.nn.Module):
         self.locks = torch.nn.Buffer(torch.zeros(1024, dtype=torch.int32))
 
         mma_type = "mma"
-        if mma_type is None and torch.cuda.get_device_capability()[0] == 9:
+        if mma_type is not None and torch.cuda.get_device_capability()[0] == 9:
             mma_type = "wgmma"
         mma_type = mma_type.lower()
         self.mma_type = mma_type
@@ -162,6 +162,8 @@ class HummingLayer(torch.nn.Module):
             bias=getattr(self, self.bias_name, None),
             global_scale=getattr(self, self.global_scale_name, None),
             locks=self.locks,
+            num_sms=kwargs.get("num_sms", None),
+            num_ctas_per_sm=kwargs.get("num_ctas_per_sm", None),
         )
 
     def set_param_data(
