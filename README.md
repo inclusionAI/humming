@@ -8,15 +8,12 @@ Humming is a high-performance, lightweight, and highly flexible JIT (Just-In-Tim
 
 - **High Flexibility**
     - Supports inference for any weight type under 8-bit across **FP16 / BF16 / FP8 / FP4 / INT8 / INT4** activations (provided the activation's dynamic range covers the weight type).
-    - Supports various channel-wise and group-wise quantization (with group size = 8/ 16/ 32/ 64/ 128/ 256, ...).
+    - Supports various quantation strategies.
     - Supports various scale types (BF16, FP16, E4M3, E5M2, and UE8M0).
     - Supports both **Dense GEMM** and **MoE GEMM**.
-
 - **High Compatibility**: supports all NVIDIA GPUs from **SM75+** (Turing architecture) and beyond.
-
 - **High Performance**
     * Delivers State-of-the-Art (SOTA) throughput and efficiency across a wide range of computational scenarios.
-
 - **Ultra-Lightweight**
     * Minimal dependencies: Requires only **PyTorch** and **NVCC**.
     * Compact footprint: The package size is less than **100KB**.
