@@ -28,7 +28,7 @@ template <
     class ElementA, class ElementB, class ElementC, class ElementBS,
     class SchedulerConfig, class PipelineConfig, class EpilogueConfig,
     class QuantParamConfig, class MoEConfig>
-__global__ __launch_bounds__(PipelineConfig::kNumThreads) void humming(
+__global__ __launch_bounds__(PipelineConfig::kNumThreads, PipelineConfig::kNumCtasPerSm) void humming(
     const __grid_constant__ typename KernelTensorParamType<PipelineConfig::kUseTmaA>::Type A,
     const __grid_constant__ typename KernelTensorParamType<PipelineConfig::kUseTmaB>::Type B,
     const __grid_constant__ typename KernelTensorParamType<PipelineConfig::kUseTmaC>::Type C,

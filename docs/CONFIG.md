@@ -77,7 +77,7 @@ See support matrix in `README.md`.
 
 ## Pipeline Config
 
-- `num_stages`: Num stages for multi-stages pipeline. Higher value requires larger shared memory requirement.
+- `num_stages`: Num stages for multi-stages pipeline. Higher value requires larger shared memory.
 
 - `use_warp_spec`: Enable warp specialization or not. Requires SM90+.
 
@@ -107,7 +107,7 @@ See support matrix in `README.md`.
 Notes for GLU activation (`silu_glu` and `custom_glu`)
 
 1. If you use glu activation and stream k is enabled. The `outputs` tensor still need to have shape `(m, n)`, but after kernel execution, you can reshape it to `(m * 2, n // 2)` and only take the `(m, n // 2)`.
-2. The weight `up_proj` and `gate_proj` must be interleaved, that is, `weight[..., 1::2]` should be `up_proj`, `weight[..., 1::2]` should be `gate_proj`.
+2. The weight `up_proj` and `gate_proj` must be interleaved, that is, `weight[..., ::2]` should be `up_proj`, `weight[..., 1::2]` should be `gate_proj`.
 
 ## MoE Config
 

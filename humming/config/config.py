@@ -16,6 +16,7 @@ class PipelineConfig(BaseHummingConfigClass):
     use_warp_spec: Optional[bool] = None
     num_stages: int = 2
     num_threads: Optional[int] = None
+    num_ctas_per_sm: int = 1
     num_math_threads: Optional[int] = None
     num_load_threads: Optional[int] = None
     use_mbarrier: Optional[bool] = None

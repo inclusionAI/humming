@@ -8,7 +8,7 @@ Humming is a high-performance, lightweight, and highly flexible JIT (Just-In-Tim
 
 - **High Flexibility**
     - Supports inference for any weight type under 8-bit across **FP16 / BF16 / FP8 / FP4 / INT8 / INT4** activations (provided the activation's dynamic range covers the weight type).
-    - Supports various quantation strategies.
+    - Supports various quantization strategies.
     - Supports various scale types (BF16, FP16, E4M3, E5M2, and UE8M0).
     - Supports both **Dense GEMM** and **MoE GEMM**.
 - **High Compatibility**: supports all NVIDIA GPUs from **SM75+** (Turing architecture) and beyond.
@@ -88,12 +88,14 @@ outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch.float16)
 torch.testing.assert_close(outputs, outputs_ref, atol=0.1, rtol=0.01)
 ```
 
-For more config options, see [Config Options](./docs/CONFIG.md)
+For more config options, see [Config Options](./docs/CONFIG.md).
+
+For performance tuning example, see `examples` dir.
 
 ## Roadmap
 
 - [ ] Technical Analysis
-- [ ] Config Tunning
+- [ ] Config Tuning
 - [ ] Kernel Bench
 - [ ] NVCC-free Runtime
 - [ ] UMMA Support
