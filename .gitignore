@@ -1,0 +1,12 @@
+*.ipynb
+*.cubin
+*.tmp
+*.pyc
+*.tar
+*.egg-info
+tmp
+__pycache__
+.ipynb_checkpoints
+.git_old/
+dist
+build
