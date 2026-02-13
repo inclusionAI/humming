@@ -173,7 +173,7 @@ def test_activation(activation):
     elif activation == "custom":
         outputs_ref = outputs_ref.tanh() * 2.33 + 0.666
     elif activation == "silu_glu":
-        outputs_ref = outputs_ref[:, ::2] / (1 + torch.exp(-outputs_ref[:, 1::2]))
+        outputs_ref = outputs_ref[:, ::2] * torch.nn.SiLU()(outputs_ref[:, 1::2])
     elif activation == "custom_glu":
         outputs_ref = outputs_ref.abs()
         outputs_ref = (outputs_ref[:, ::2] - outputs_ref[:, 1::2]) * 0.123

@@ -8,7 +8,6 @@ a_dtypes = [dtypes.float16, dtypes.float8e4m3]
 b_dtypes = [dtypes.uint3, dtypes.uint4, dtypes.uint5]
 
 
-
 def run_example(group_size, a_dtype, b_dtype):
     layer = HummingLayer(
         shape_n=8192,
@@ -19,7 +18,7 @@ def run_example(group_size, a_dtype, b_dtype):
         bs_dtype=dtypes.float16,
         input_scale_group_size=0,
         weight_scale_group_size=group_size,
-        mma_type="wgmma",
+        mma_type="mma",
     ).cuda()
 
     random_weight_data = generate_random_weight(
@@ -54,19 +53,21 @@ def run_example(group_size, a_dtype, b_dtype):
         layer(
             inputs=inputs,
             input_scale=input_scale,
-            block_shape=(64, 128, 128),
+            block_shape=(64, 256, 128),
             warp_shape=(64, 32, 128),
             use_warp_spec=False,
             use_tma=False,
             use_cp_async=True,
             use_mbarrier=False,
-            num_stages=4,
-            num_ctas_per_sm=3,
+            num_stages=3,
+            num_ctas_per_sm=1,
         )
 
     if a_dtype == dtypes.float16:
+        run_fp16()
         t = triton.testing.do_bench_cudagraph(run_fp16, rep=50)
     else:
+        run_fp8()
         t = triton.testing.do_bench_cudagraph(run_fp8, rep=50)
 
     tflops = 8192 * 8192 * 8192 * 2 / t / 1e9
@@ -80,16 +81,16 @@ for group_size in [0, 128]:
             run_example(group_size, a_dtype, b_dtype)
 
 
-# H20 TFLOPS: 148 (FP16) / 296 (FP8)
-# 0 float16 uint3 140.77
-# 0 float16 uint4 140.71
-# 0 float16 uint5 140.77
-# 0 float8e4m3 uint3 282.12
-# 0 float8e4m3 uint4 282.16
-# 0 float8e4m3 uint5 281.54
-# 128 float16 uint3 140.51
-# 128 float16 uint4 140.51
-# 128 float16 uint5 140.47
-# 128 float8e4m3 uint3 275.24
-# 128 float8e4m3 uint4 275.48
-# 128 float8e4m3 uint5 275.24
+# 4090 TFLOPS: 165 (FP16) / 330 (FP8) (F32 Accumultor)
+# 0 float16 uint3 170.04
+# 0 float16 uint4 176.84
+# 0 float16 uint5 175.96
+# 0 float8e4m3 uint3 339.05
+# 0 float8e4m3 uint4 337.24
+# 0 float8e4m3 uint5 327.75
+# 128 float16 uint3 175.43
+# 128 float16 uint4 175.19
+# 128 float16 uint5 174.56
+# 128 float8e4m3 uint3 329.95
+# 128 float8e4m3 uint4 331.01
+# 128 float8e4m3 uint5 327.46

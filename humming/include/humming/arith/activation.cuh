@@ -56,5 +56,5 @@ CUDA_INLINE float activation_func<ActivationType::SILU>(const float a) {
 
 template <>
 CUDA_INLINE float activation_func<ActivationType::SILU_GLU>(const float2 a) {
-  return __fdividef(a.x, 1.0f + __expf(-a.y));
+  return a.x * __fdividef(a.y, 1.0f + __expf(-a.y));
 }
