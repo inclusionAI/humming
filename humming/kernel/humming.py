@@ -101,6 +101,8 @@ class HummingKernel(KernelRuntime):
     def __init__(
         self, problem_shape, block_shape, warp_shape, a_dtype, b_dtype, c_dtype, bs_dtype, **kwargs
     ):
+        if hasattr(self, "sm_version"):
+            return
         sm_version = kwargs.get("sm_version", None)
         device_index = kwargs.get("device_index", None)
         self._set_sm_version(sm_version, device_index)
@@ -173,6 +175,10 @@ class HummingKernel(KernelRuntime):
         )
         self.arg_types += (ctypes.c_void_p,) * 6 + (ctypes.c_uint32,)
         self.smem_size = self.get_cubin_symbol_value("SMEM_SIZE")
+        self.sm_count_map = {
+            x: torch.cuda.get_device_properties(x).multi_processor_count
+            for x in range(torch.cuda.device_count())
+        }
 
     def select_mma_op_class(self):
         if self.a_dtype in [dtypes.int4, dtypes.int8]:
@@ -423,7 +429,7 @@ class HummingKernel(KernelRuntime):
         topk_weights: Optional[torch.Tensor] = None,
         sorted_token_ids: Optional[torch.Tensor] = None,
         expert_ids: Optional[torch.Tensor] = None,
-        num_tokens_past_padded: Optional[torch.Tensor] = None,
+        num_tokens_post_padded: Optional[torch.Tensor] = None,
         locks: Optional[torch.Tensor] = None,
         num_ctas_per_sm: int = 1,
         num_sms: Optional[int] = None,
@@ -437,10 +443,10 @@ class HummingKernel(KernelRuntime):
         if self.moe_config.is_moe:
             assert sorted_token_ids is not None
             assert expert_ids is not None
-            assert num_tokens_past_padded is not None
+            assert num_tokens_post_padded is not None
             sorted_token_ids.device == device
             expert_ids.device == device
-            num_tokens_past_padded.device == device
+            num_tokens_post_padded.device == device
 
             if self.moe_config.is_moe_down:
                 assert topk_weights is not None
@@ -448,7 +454,7 @@ class HummingKernel(KernelRuntime):
 
         if self.scheduler_config.use_stream_k:
             assert locks is not None
-            locks.device == device
+            assert locks.device == device
 
         if outputs is None:
             output_shape_m = shape_m
@@ -470,13 +476,13 @@ class HummingKernel(KernelRuntime):
             0 if topk_weights is None else topk_weights.data_ptr(),
             0 if sorted_token_ids is None else sorted_token_ids.data_ptr(),
             0 if expert_ids is None else expert_ids.data_ptr(),
-            0 if num_tokens_past_padded is None else num_tokens_past_padded.data_ptr(),
+            0 if num_tokens_post_padded is None else num_tokens_post_padded.data_ptr(),
             0 if locks is None else locks.data_ptr(),
             shape_m,
         )
 
         if num_sms is None:
-            num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+            num_sms = self.sm_count_map[device.index]
 
         config = cbd.CUlaunchConfig()
         config.gridDimX = num_ctas_per_sm * num_sms

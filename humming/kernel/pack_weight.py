@@ -16,6 +16,8 @@ class PackWeightKernel(KernelRuntime):
     name = "pack_weight"
 
     def __init__(self, num_bits, sm_version=None, device_index=None):
+        if hasattr(self, "sm_version"):
+            return
         self._set_sm_version(sm_version, device_index)
         self.num_bits = num_bits
         self.code = CODE_TEMPLATE.format(num_bits=num_bits)

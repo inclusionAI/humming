@@ -34,6 +34,8 @@ class WeightRepackKernel(KernelRuntime):
         sm_version=None,
         device_index=None,
     ):
+        if hasattr(self, "sm_version"):
+            return
         self._set_sm_version(sm_version, device_index)
         self.weight_bits = weight_bits
         self.activation_bits = activation_bits

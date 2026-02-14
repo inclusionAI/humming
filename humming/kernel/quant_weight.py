@@ -33,6 +33,8 @@ class QuantWeightKernel(KernelRuntime):
         sm_version=None,
         device_index=None,
     ):
+        if hasattr(self, "sm_version"):
+            return
         self._set_sm_version(sm_version, device_index)
         self.group_size = group_size
         self.has_scale = has_scale

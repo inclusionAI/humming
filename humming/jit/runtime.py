@@ -9,7 +9,7 @@ class KernelRuntime(object):
     _instances = {}
 
     def __new__(cls, *args, **kwargs):
-        key = (str(cls), args, tuple(sorted(kwargs.items())))
+        key = (str(cls), str(args), str(kwargs))
         if key not in cls._instances:
             instance = super().__new__(cls)
             cls._instances[key] = instance

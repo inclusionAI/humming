@@ -99,7 +99,11 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   constexpr uint32_t diff_exp_bits = (TargetType::kSignBits + TargetType::kExponentBits) -
                                      (SourceType::kSignBits + SourceType::kExponentBits);
 
-  return lop3_and_or(val, signbit_mask, (val & mask) >> diff_exp_bits);
+  if constexpr (std::is_same<SourceType, Float8E8M0>::value && std::is_same<TargetType, BFloat16>::value) {
+    return lop3_and_or(val, 0, (val & 0xFF00FF00) >> 1);
+  } else {
+    return lop3_and_or(val, signbit_mask, (val & mask) >> diff_exp_bits);
+  }
 };
 
 

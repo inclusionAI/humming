@@ -40,7 +40,7 @@ __global__ __launch_bounds__(PipelineConfig::kNumThreads, PipelineConfig::kNumCt
     const uint32_t *topk_weights_ptr,
     const uint32_t *sorted_token_ids_ptr,
     const uint32_t *expert_ids_ptr,
-    const uint32_t *num_tokens_past_padded_ptr,
+    const uint32_t *num_tokens_post_padded_ptr,
     int32_t *locks,
     uint32_t shape_m) {
 
@@ -83,7 +83,7 @@ __global__ __launch_bounds__(PipelineConfig::kNumThreads, PipelineConfig::kNumCt
   auto pbs = [&]() {if constexpr (PipelineConfig::kUseTmaBS) return &BS; else return BS; };
   auto pbzp = [&]() {if constexpr (PipelineConfig::kUseTmaBZP) return &BZP; else return BZP; };
   auto pbias = [&]() {if constexpr (PipelineConfig::kUseTmaBias) return &Bias; else return Bias; };
-  uint32_t block_padded_shape_m = MoEConfig::kIsMoE ? num_tokens_past_padded_ptr[0] : shape_m;
+  uint32_t block_padded_shape_m = MoEConfig::kIsMoE ? num_tokens_post_padded_ptr[0] : shape_m;
   auto scheduler = Scheduler(smem, sorted_token_ids_ptr, expert_ids_ptr, block_padded_shape_m);
   auto mainloop_arith = MainloopArithmetic();
   auto epilogue_arith = EpilogueArithmetic();

@@ -122,7 +122,8 @@ class HummingMethod(torch.nn.Module):
             cls.set_param(layer, meta.global_scale_name, global_scale)
 
         if meta.has_bias:
-            bias = torch.empty(bias_shape, dtype=torch.float32)
+            torch_dtype = dtypes.torch_dtype_map[meta.c_dtype]
+            bias = torch.empty(bias_shape, dtype=torch_dtype)
             cls.set_param(layer, meta.bias_name, bias)
 
         layer.locks = torch.nn.Buffer(torch.zeros(1024, dtype=torch.int32))
@@ -187,10 +188,10 @@ class HummingMethod(torch.nn.Module):
             if meta.num_experts is not None and expert_id is None:
                 shape = (meta.num_experts,) + shape
             packed_shape = shape[:-1] + (meta.shape_k * meta.b_dtype.num_bits // 32,)
+
             assert weight.shape == (packed_shape if packed else shape)
 
             offset = (offset_n or 0) * meta.shape_k * meta.b_dtype.num_bits // 32
-            print(offset_n, offset, meta.shape_k, meta.shape_n)
 
             if not packed:
                 kernel = PackWeightKernel(meta.b_dtype.num_bits)
@@ -207,7 +208,7 @@ class HummingMethod(torch.nn.Module):
                 shape = (meta.num_experts,) + shape
             assert weight_scale.shape == shape
             weight_scale = weight_scale.to(device=weight_scale_param.device)
-            if weight_scale.element_size == 1 or weight_scale_param.element_size == 1:
+            if weight_scale.element_size() == 1 or weight_scale_param.element_size() == 1:
                 assert weight_scale.dtype == weight_scale_param.dtype
             else:
                 assert weight_scale.dtype in [torch.float16, torch.bfloat16, torch.float32]
@@ -215,7 +216,6 @@ class HummingMethod(torch.nn.Module):
                 weight_scale = weight_scale.to(dtype=weight_scale_param.dtype)
 
             offset = (offset_n or 0) * num_groups
-            print(offset_n, offset)
 
             cls.set_param_data(layer, meta.weight_scale_name, weight_scale, offset, expert_id)
 
@@ -223,14 +223,22 @@ class HummingMethod(torch.nn.Module):
             zero_point_param = getattr(layer, meta.zero_point_name)
             zero_point = zero_point.to(device=zero_point_param.device)
 
+            if packed:
+                expected_shape_n = zero_point.size(-2) * 32 // meta.b_dtype.num_bits
+            else:
+                expected_shape_n = zero_point.size(-2)
+            expected_shape_n = meta.shape_n if offset_n is None else expected_shape_n
+
             num_groups = zero_point_param.size(-2)
-            shape = (meta.shape_n, num_groups)
-            packed_shape = (meta.shape_n * meta.b_dtype.num_bits // 32, num_groups)
+            shape = (expected_shape_n, num_groups)
+            packed_shape = (expected_shape_n * meta.b_dtype.num_bits // 32, num_groups)
             if meta.num_experts is not None and expert_id is None:
                 shape = (meta.num_experts,) + shape
                 packed_shape = (meta.num_experts,) + packed_shape
 
-            if zero_point.shape == shape:
+            assert zero_point.shape == (packed_shape if packed else shape)
+            if not packed:
+                zero_point = zero_point.cuda()
                 zero_point = zero_point.transpose(-1, -2).contiguous()
                 zero_point = zero_point.squeeze().view(*zero_point.shape)
                 kernel = PackWeightKernel(meta.b_dtype.num_bits)
@@ -238,7 +246,6 @@ class HummingMethod(torch.nn.Module):
                 zero_point = zero_point.transpose(-1, -2).contiguous()
                 zero_point = zero_point.squeeze().view(*zero_point.shape)
 
-            assert zero_point.shape == packed_shape
             assert zero_point.dtype == torch.int32
             offset = (offset_n or 0) * meta.b_dtype.num_bits // 32 * num_groups
             cls.set_param_data(layer, meta.zero_point_name, zero_point, offset, expert_id)
@@ -254,10 +261,11 @@ class HummingMethod(torch.nn.Module):
         if bias is not None:
             bias_param = getattr(layer, meta.bias_name, None)
             expected_shape_n = meta.shape_n if offset_n is None else bias.size(-1)
-            shape = (expected_shape_n, weight_scale_param.size(-1))
+            shape = (expected_shape_n,)
             if meta.num_experts is not None and expert_id is None:
                 shape = (meta.num_experts,) + shape
-            assert weight_scale.shape == shape
+            assert bias.shape == shape
+            assert bias.dtype in [torch.float16, torch.bfloat16, torch.float32]
             bias = bias.to(device=bias_param.device, dtype=bias_param.dtype)
             cls.set_param_data(layer, meta.bias_name, bias, offset_n, expert_id)
 
@@ -271,7 +279,7 @@ class HummingMethod(torch.nn.Module):
 
         num_experts = meta.num_experts or 1
         weight = weight.view(num_experts, meta.shape_n, -1)
-        if zero_point is not None:
+        if zero_point is not None and zero_point.size(0):
             num_groups = zero_point.size(-2)
             padded_bits = 4 if meta.b_dtype.num_bits <= 4 else 8
             zero_point = zero_point.view(padded_bits, -1)[: meta.b_dtype.num_bits]
@@ -289,7 +297,7 @@ class HummingMethod(torch.nn.Module):
 
         cls.set_param_data(layer, meta.weight_name, weight)
 
-        if weight_scale is not None:
+        if weight_scale is not None and weight_scale.size(0):
             weight_scale_group_size = meta.weight_scale_group_size
 
             if meta.mma_type == "mma":
@@ -304,7 +312,7 @@ class HummingMethod(torch.nn.Module):
 
             cls.set_param_data(layer, meta.weight_scale_name, weight_scale)
 
-        if zero_point is not None:
+        if zero_point is not None and zero_point.size(0):
             b_dtype = meta.b_dtype
             zero_point = prepare_humming_zero_point(
                 zero_point,
@@ -313,7 +321,7 @@ class HummingMethod(torch.nn.Module):
             )
             cls.set_param_data(layer, meta.zero_point_name, zero_point)
 
-        if bias is not None:
+        if bias is not None and bias.size(0):
             bias = prepare_humming_bias(bias)
             cls.set_param_data(layer, meta.bias_name, bias)
 
@@ -327,7 +335,7 @@ class HummingMethod(torch.nn.Module):
         topk_weights: Optional[torch.Tensor] = None,
         sorted_token_ids: Optional[torch.Tensor] = None,
         expert_ids: Optional[torch.Tensor] = None,
-        num_tokens_past_padded: Optional[torch.Tensor] = None,
+        num_tokens_post_padded: Optional[torch.Tensor] = None,
         sublayer_name: str = "",
         **kwargs,
     ):
@@ -365,7 +373,7 @@ class HummingMethod(torch.nn.Module):
             topk_weights=topk_weights,
             sorted_token_ids=sorted_token_ids,
             expert_ids=expert_ids,
-            num_tokens_past_padded=num_tokens_past_padded,
+            num_tokens_post_padded=num_tokens_post_padded,
             num_sms=kwargs.get("num_sms", None),
         )
 
