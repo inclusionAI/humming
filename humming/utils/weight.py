@@ -124,7 +124,7 @@ def prepare_humming_weight(
     assert padded_shape_k % (2 * packed_block_size_k) == 0
 
     should_preprocess_for_int2fp = False
-    has_dynamic_zero_point = zero_point is not None
+    has_dynamic_zero_point = zero_point is not None and zero_point.nelement()
     if b_dtype.is_integer_type and a_dtype.is_floating_point_type:
         if a_dtype.num_bits < 16:
             should_preprocess_for_int2fp = True

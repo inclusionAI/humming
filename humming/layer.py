@@ -283,7 +283,8 @@ class HummingMethod(torch.nn.Module):
         if zero_point is not None and zero_point.size(0):
             num_groups = zero_point.size(-2)
             padded_bits = 4 if meta.b_dtype.num_bits <= 4 else 8
-            zero_point = zero_point.view(padded_bits, -1)[: meta.b_dtype.num_bits]
+            zero_point = zero_point.view(num_experts, padded_bits, -1)
+            zero_point = zero_point[:, : meta.b_dtype.num_bits].contiguous()
             zero_point = zero_point.view(num_experts, -1, num_groups)
         if weight_scale is not None:
             weight_scale = weight_scale.view(num_experts, meta.shape_n, -1)
