@@ -52,7 +52,7 @@ def generate_random_inputs(
             if dtype == dtypes.int4:
                 inputs = inputs.to(torch.uint8) & 0xF
                 inputs = inputs[..., 1::2] * 16 + inputs[..., ::2]
-                inputs = inputs.view(torch.int8)
+                inputs = inputs.view(torch.uint8)
         elif dtype == dtypes.float4e2m1:
             inputs = inputs.to(torch.uint8)
             inputs = inputs[..., 1::2] * 16 + inputs[..., ::2]

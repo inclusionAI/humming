@@ -64,15 +64,15 @@ layer = HummingLayer(
 
 
 random_weight_data = generate_random_weight(
-    n=layer.shape_n,
-    k=layer.shape_k,
-    group_size=layer.weight_scale_group_size,
-    dtype=layer.b_dtype,
-    scale_dtype=layer.bs_dtype,
+    n=layer.meta.shape_n,
+    k=layer.meta.shape_k,
+    group_size=layer.meta.weight_scale_group_size,
+    dtype=layer.meta.b_dtype,
+    scale_dtype=layer.meta.bs_dtype,
 )
 
 _, weight_ref, weight, weight_scale, _, _ = random_weight_data
-_, inputs_ref, inputs, _ = generate_random_inputs(1234, layer.shape_k, dtype=dtypes.float16)
+_, inputs_ref, inputs, _ = generate_random_inputs(1234, layer.meta.shape_k, dtype=dtypes.float16)
 
 # Tensors can be loaded simultaneously or sequentially.
 # For MoE models, you have the flexibility to load only a specific expert
@@ -83,7 +83,7 @@ layer.finish_load()
 
 # Currently, you need to manually input block_shape and warp_shape to run.
 # Auto-tuning features is coming soon.
-outputs = layer(inputs=inputs, block_shape=(64, 256, 64), warp_shape=(64, 64, 64))
+outputs = layer(inputs=inputs)
 outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch.float16)
 torch.testing.assert_close(outputs, outputs_ref, atol=0.1, rtol=0.01)
 ```

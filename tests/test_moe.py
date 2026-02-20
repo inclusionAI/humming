@@ -51,6 +51,8 @@ def test_moe(m, num_experts, top_k, is_moe_down):
         group_size=0,
         dtype=a_dtype,
     )
+    if is_moe_down:
+        inputs = inputs.view(m, top_k, -1)
 
     humming_kernel = HummingKernel(
         problem_shape=(0, 1024, 1024),
@@ -73,7 +75,7 @@ def test_moe(m, num_experts, top_k, is_moe_down):
     )
 
     torch_dtype = dtypes.torch_dtype_map[c_dtype]
-    outputs = torch.empty((m * top_k, 1024), dtype=torch_dtype, device=inputs.device)
+    outputs = torch.empty((m, top_k, 1024), dtype=torch_dtype, device=inputs.device)
 
     outputs = humming_kernel(
         inputs=inputs,
@@ -87,6 +89,7 @@ def test_moe(m, num_experts, top_k, is_moe_down):
         sorted_token_ids=sorted_token_ids,
     )
 
+    outputs = outputs.view(-1, outputs.size(-1))
     outputs_ref = torch.empty_like(outputs)
 
     for expert_id in range(num_experts):

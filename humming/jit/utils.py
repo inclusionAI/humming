@@ -3,6 +3,9 @@ import functools
 import struct
 import re
 import hashlib
+import importlib
+import sys
+from pathlib import Path
 import subprocess
 from elftools.elf.elffile import ELFFile
 
@@ -46,7 +49,7 @@ def find_kernel_name_in_cubin(filename, func_keyword):
 def hash_to_hex(s: str) -> str:
     md5 = hashlib.md5()
     md5.update(s.encode("utf-8"))
-    return md5.hexdigest()[0:12]
+    return md5.hexdigest()[0:16]
 
 
 @functools.lru_cache(maxsize=1)
@@ -88,11 +91,11 @@ def get_cuda_nvcc_version(nvcc_path):
 
 
 @functools.lru_cache(maxsize=1)
-def get_humming_tmp_dir():
-    tmp_dir = os.getenv("HUMMING_TMP_DIR")
+def get_humming_module_cache_dir():
+    tmp_dir = os.getenv("HUMMING_MODULE_DIR")
     if tmp_dir is not None:
         return tmp_dir
-    return os.path.join(os.path.expanduser("~"), ".humming/tmp/")
+    return os.path.join(os.path.expanduser("~"), ".humming/cache/module/")
 
 
 @functools.lru_cache(maxsize=1)
@@ -101,3 +104,32 @@ def get_humming_cache_dir():
     if cache_dir is not None:
         return cache_dir
     return os.path.join(os.path.expanduser("~"), ".humming/cache/")
+
+
+def is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def make_humming_module(func_name, result):
+    dirname = get_humming_module_cache_dir()
+    if dirname not in sys.path:
+        sys.path.append(dirname)
+
+    content = f"def {func_name}():\n    return {result}\n"
+    module_name = "humming_module_" + hash_to_hex(content)
+    filename = module_name + ".py"
+    Path(dirname).mkdir(exist_ok=True, parents=True)
+    if (Path(dirname) / filename).exists():
+        return importlib.import_module(module_name)
+
+    with open(Path(dirname) / filename, "w") as f:
+        f.write(content)
+        f.flush()
+
+    importlib.invalidate_caches()
+
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        print(sys.path)
+        raise

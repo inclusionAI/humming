@@ -17,7 +17,7 @@ class DequantKernel(KernelRuntime):
     name = "dequant_unpacked_fp_type"
 
     def __init__(self, sm_version=None, device_index=None):
-        if hasattr(self, "sm_version"):
+        if self.inited:
             return
         self._set_sm_version(sm_version, device_index)
         self.code = CODE_TEMPLATE
@@ -30,6 +30,7 @@ class DequantKernel(KernelRuntime):
             ctypes.c_bool,
         )
         self.prepare()
+        self.inited = True
 
     def __call__(
         self,

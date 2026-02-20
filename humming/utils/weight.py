@@ -104,10 +104,11 @@ def prepare_humming_weight(
     padded_shape_n=None,
     padded_shape_k=None,
 ):
-    weight = weight.unsqueeze(0) if weight.ndim == 2 else weight
+    is_moe = weight.ndim == 3
+    weight = weight.unsqueeze(0) if not is_moe else weight
     if zero_point is not None:
         zero_point = zero_point.unsqueeze(0) if zero_point.ndim == 2 else zero_point
-    num_experts = 1 if weight.ndim == 2 else weight.size(0)
+    num_experts = 1 if not is_moe else weight.size(0)
     shape_n = weight.size(-2)
     if packed:
         assert weight.size(-1) * 32 % b_dtype.num_bits == 0
@@ -160,10 +161,7 @@ def prepare_humming_weight(
         padded_shape_k=padded_shape_k,
     )
 
-    if weight.ndim == 2:
-        repacked_weight = repacked_weight.squeeze(0)
-
-    return repacked_weight
+    return repacked_weight if is_moe else repacked_weight.squeeze(0)
 
 
 def prepare_humming_weight_scale(weight_scale, to_apply_on_c=False):
@@ -209,4 +207,4 @@ def prepare_humming_zero_point(zero_point, dtype, packed=False):
 def prepare_humming_bias(bias):
     if bias is None:
         return
-    return prepare_humming_weight_scale(bias.unsqueeze(-1), True)
+    return prepare_humming_weight_scale(bias.unsqueeze(-1), True).squeeze(0)

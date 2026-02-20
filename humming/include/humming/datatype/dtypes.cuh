@@ -3,6 +3,16 @@
 #include <humming/utils/all.cuh>
 
 
+constexpr uint32_t get_dtype_id(
+    uint32_t base_type_id, bool is_signed,
+    uint32_t num_bits, uint32_t exponent_bits, uint32_t mantissa_bits) {
+
+  uint32_t dtype_id = base_type_id * 10000000 + is_signed * 1000000;
+  dtype_id += num_bits * 10000 + exponent_bits * 100 + mantissa_bits;
+  return dtype_id;
+}
+
+
 template <bool kIsSigned_, uint32_t kNumBits_>
 class IntegerType {
 public:
@@ -11,6 +21,7 @@ public:
   static constexpr bool kIsSigned = kIsSigned_;
   static constexpr uint32_t kBits = kNumBits_;
   static constexpr uint32_t kNumBits = kNumBits_;
+  static constexpr uint32_t kId = get_dtype_id(1, kIsSigned, kNumBits_, 0, 0);
 };
 
 template <uint32_t kNumBits_, uint32_t kExponentBits_, uint32_t kMantissaBits_>
@@ -25,6 +36,7 @@ public:
   static constexpr bool kIsSigned = kSignBits != 0;
   static constexpr uint32_t kExponentBits = kExponentBits_;
   static constexpr uint32_t kMantissaBits = kMantissaBits_;
+  static constexpr uint32_t kId = get_dtype_id(2, kIsSigned, kNumBits_, kExponentBits, kMantissaBits);
 };
 
 using UInt1 = IntegerType<false, 1>;

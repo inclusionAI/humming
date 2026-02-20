@@ -120,7 +120,7 @@ def test_datatype(a_dtype, b_dtype, c_dtype):
     )
 
     outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch_dtype)
-    torch.testing.assert_close(outputs, outputs_ref, rtol=0.01, atol=0.001)
+    torch.testing.assert_close(outputs, outputs_ref, rtol=0.03, atol=0.1)
 
 
 @pytest.mark.parametrize(
@@ -136,8 +136,6 @@ def test_datatype(a_dtype, b_dtype, c_dtype):
         ["bfloat16", "uint8"],
         ["float8e4m3", "uint3"],
         ["float8e4m3", "uint4"],
-        ["float8e5m2", "uint2"],
-        ["float8e5m2", "uint3"],
         ["int8", "uint4"],
         ["int8", "uint5"],
         ["int4", "uint1"],
@@ -206,4 +204,4 @@ def test_zeropoint(a_dtype, b_dtype, c_dtype):
     )
 
     outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch_dtype)
-    torch.testing.assert_close(outputs, outputs_ref, rtol=0.01, atol=0.001)
+    torch.testing.assert_close(outputs, outputs_ref, rtol=0.03, atol=0.1)

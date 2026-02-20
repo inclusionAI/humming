@@ -1,9 +1,13 @@
 import ctypes
 import math
+import os
 from typing import Optional
 
-import cuda.bindings.driver as cbd
 import torch
+import zlib
+
+import torch.utils.cpp_extension
+from humming.jit.utils import make_humming_module
 
 import humming.dtypes as dtypes
 from humming.config import (
@@ -18,8 +22,7 @@ from humming.config.enum import MmaType
 from humming.config.mma import MmaOpClass
 from humming.dtypes import DataType
 from humming.jit.runtime import KernelRuntime
-from humming.utils import is_power_of_two
-from humming.utils.tma import make_tma_desc
+import humming.jit.utils as jit_utils
 
 CODE_TEMPLATE = """
 #if {use_warp_spec}
@@ -72,11 +75,6 @@ using SharedStorageType = SharedStorage<
     QuantParamConfig,
     MoEConfig>;
 
-extern "C" __constant__ uint32_t SMEM_SIZE = sizeof(SharedStorageType);
-extern "C" __constant__ uint32_t SMEM_SIZE_A = sizeof(SharedStorageType::a);
-extern "C" __constant__ uint32_t SMEM_SIZE_B = sizeof(SharedStorageType::b);
-extern "C" __constant__ uint32_t SMEM_SIZE_REDUCE = sizeof(SharedStorageType::reduce);
-
 auto ptr = reinterpret_cast<void*>(&humming<
     MmaOpClass,
     Shape<{shape_m}, {shape_n}, {shape_k}>,
@@ -92,16 +90,78 @@ auto ptr = reinterpret_cast<void*>(&humming<
     QuantParamConfig,
     MoEConfig>);
 
+
+extern "C" __constant__ uint32_t SMEM_SIZE = sizeof(SharedStorageType);
+extern "C" __constant__ uint32_t SMEM_SIZE_A = sizeof(SharedStorageType::a);
+extern "C" __constant__ uint32_t SMEM_SIZE_B = sizeof(SharedStorageType::b);
+extern "C" __constant__ uint32_t SMEM_SIZE_REDUCE = sizeof(SharedStorageType::reduce);
+
+extern "C" __constant__ uint32_t PROBLEM_SHAPE_M = {shape_m};
+extern "C" __constant__ uint32_t PROBLEM_SHAPE_N = {shape_n};
+extern "C" __constant__ uint32_t PROBLEM_SHAPE_K = {shape_k};
+
+extern "C" __constant__ uint32_t BLOCK_SHAPE_M = {block_m};
+extern "C" __constant__ uint32_t BLOCK_SHAPE_N = {block_n};
+extern "C" __constant__ uint32_t BLOCK_SHAPE_K = {block_k};
+
+extern "C" __constant__ uint32_t WARP_SHAPE_M = {warp_m};
+extern "C" __constant__ uint32_t WARP_SHAPE_N = {warp_n};
+extern "C" __constant__ uint32_t WARP_SHAPE_K = {warp_k};
+
+extern "C" __constant__ uint32_t A_DTYPE_ID = {a_dtype}::kId;
+extern "C" __constant__ uint32_t B_DTYPE_ID = {b_dtype}::kId;
+extern "C" __constant__ uint32_t C_DTYPE_ID = {c_dtype}::kId;
+extern "C" __constant__ uint32_t BS_DTYPE_ID = {bs_dtype}::kId;
+
+extern "C" __constant__ uint32_t IS_GLU_ACTIVATION = {is_glu_activation};
+
+{scheduler_config_extern}
+
+{pipeline_config_extern}
+
+{epilogue_config_extern}
+
+{quant_param_config_extern}
+
+{moe_config_extern}
+
 """
+
+
+def init_humming_launcher():
+    dirname = os.path.dirname(__file__)
+    filename = os.path.join(dirname, "../csrc/launcher/launcher.cpp")
+    filename = os.path.abspath(filename)
+
+    torch.utils.cpp_extension.load(
+        name="humming_extension",
+        sources=[filename],
+        extra_include_paths=["/usr/local/cuda/include"],
+        extra_ldflags=[
+            "-lcuda",
+            "-L/usr/local/cuda/lib64",
+            "-lc10_cuda",
+            "-ltorch_cuda",
+        ],
+        extra_cflags=["-O3"],
+    )
 
 
 class HummingKernel(KernelRuntime):
     name = "humming"
 
     def __init__(
-        self, problem_shape, block_shape, warp_shape, a_dtype, b_dtype, c_dtype, bs_dtype, **kwargs
+        self,
+        problem_shape,
+        block_shape,
+        warp_shape,
+        a_dtype,
+        b_dtype,
+        c_dtype,
+        bs_dtype,
+        **kwargs,
     ):
-        if hasattr(self, "sm_version"):
+        if self.inited:
             return
         sm_version = kwargs.get("sm_version", None)
         device_index = kwargs.get("device_index", None)
@@ -138,7 +198,7 @@ class HummingKernel(KernelRuntime):
             kwargs.get("custom_activation_func_impl", None)
         )
         self.custom_activation_func = custom_activation_func
-
+        is_glu_activation = "_glu" in str(self.epilogue_config.activation_type).lower()
         self.code = CODE_TEMPLATE.format(
             use_warp_spec=int(self.pipeline_config.use_warp_spec),
             mma_op_class=self.mma_op_class.to_cpp_str(),
@@ -159,11 +219,17 @@ class HummingKernel(KernelRuntime):
             pipeline_config=self.pipeline_config.to_cpp_str(),
             epilogue_config=self.epilogue_config.to_cpp_str(),
             quant_param_config=self.quant_param_config.to_cpp_str(),
-            custom_activation_func=custom_activation_func,
             moe_config=self.moe_config.to_cpp_str(),
+            scheduler_config_extern=self.scheduler_config.to_extern_cpp_str(),
+            pipeline_config_extern=self.pipeline_config.to_extern_cpp_str(),
+            epilogue_config_extern=self.epilogue_config.to_extern_cpp_str(),
+            quant_param_config_extern=self.quant_param_config.to_extern_cpp_str(),
+            moe_config_extern=self.moe_config.to_extern_cpp_str(),
+            is_glu_activation=int(is_glu_activation),
+            custom_activation_func=custom_activation_func,
         )
 
-        self.prepare()
+        init_humming_launcher()
         self.arg_types = (
             None if self.pipeline_config.use_tma_a else ctypes.c_void_p,
             None if self.pipeline_config.use_tma_b else ctypes.c_void_p,
@@ -174,11 +240,18 @@ class HummingKernel(KernelRuntime):
             None if self.pipeline_config.use_tma_bias else ctypes.c_void_p,
         )
         self.arg_types += (ctypes.c_void_p,) * 6 + (ctypes.c_uint32,)
+        self.torch_dtype = dtypes.torch_dtype_map[self.c_dtype]
+        self.prepare()
         self.smem_size = self.get_cubin_symbol_value("SMEM_SIZE")
-        self.sm_count_map = {
-            x: torch.cuda.get_device_properties(x).multi_processor_count
-            for x in range(torch.cuda.device_count())
-        }
+
+    def load_cubin(self, kernel_filename, kernel_name):
+        self.kernel_id = torch.ops.humming.register_kernel(kernel_filename, kernel_name)
+        self.kernel_dirname = os.path.dirname(kernel_filename)
+        ref_kernel_id = zlib.crc32(kernel_filename.encode()) << 30
+        ref_kernel_id += zlib.crc32(kernel_name.encode())
+        assert ref_kernel_id == self.kernel_id
+        module = make_humming_module("get_kernel_id", self.kernel_id)
+        self.get_kernel_id = module.get_kernel_id
 
     def select_mma_op_class(self):
         if self.a_dtype in [dtypes.int4, dtypes.int8]:
@@ -221,13 +294,13 @@ class HummingKernel(KernelRuntime):
         assert self.block_shape[2] % self.warp_shape[2] == 0
 
         assert self.warp_shape[1] % 16 == 0
-        assert is_power_of_two(self.block_shape[1])
-        assert is_power_of_two(self.block_shape[2])
-        assert is_power_of_two(self.warp_shape[1])
-        assert is_power_of_two(self.warp_shape[2])
-        assert is_power_of_two(self.block_shape[0] // self.warp_shape[0])
-        assert is_power_of_two(self.block_shape[1] // self.warp_shape[1])
-        assert is_power_of_two(self.block_shape[2] // self.warp_shape[2])
+        assert jit_utils.is_power_of_two(self.block_shape[1])
+        assert jit_utils.is_power_of_two(self.block_shape[2])
+        assert jit_utils.is_power_of_two(self.warp_shape[1])
+        assert jit_utils.is_power_of_two(self.warp_shape[2])
+        assert jit_utils.is_power_of_two(self.block_shape[0] // self.warp_shape[0])
+        assert jit_utils.is_power_of_two(self.block_shape[1] // self.warp_shape[1])
+        assert jit_utils.is_power_of_two(self.block_shape[2] // self.warp_shape[2])
 
         assert self.warp_shape[1] <= 64
         if self.a_dtype.num_bits == 16:
@@ -299,123 +372,6 @@ class HummingKernel(KernelRuntime):
         if not self.epilogue_config.has_bias:
             self.pipeline_config.use_tma_bias = False
 
-    def set_smem_size(self, device_index=0):
-        cbd.cuKernelSetAttribute(
-            cbd.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-            self.smem_size,
-            self.kernel,
-            cbd.CUdevice(device_index),
-        )
-
-    def prepare_inputs_tensor(self, inputs: torch.Tensor):
-        if not self.pipeline_config.use_tma_a:
-            return inputs.data_ptr()
-
-        num_bits = self.a_dtype.num_bits
-        block_bytes_k = num_bits * self.block_shape[2] // 8
-        block_size_m = 1 if self.moe_config.is_moe else self.block_shape[0]
-        tma_smem_dims_k = self.block_shape[2] if block_bytes_k == 64 else 1024 // num_bits
-        swizzle_bytes = 128 if block_bytes_k >= 128 else 64
-
-        return make_tma_desc(
-            inputs,
-            smem_dims=(tma_smem_dims_k, block_size_m),
-            swizzle_bytes=swizzle_bytes,
-        )
-
-    def prepare_weight_tensor(self, weight: torch.Tensor, device: torch.device):
-        assert weight.device == device
-        if not self.pipeline_config.use_tma_b:
-            return weight.data_ptr()
-
-        num_bits = self.b_dtype.num_bits
-        weight = weight.view(-1, weight.size(-1))
-        pack_size_k = 256 // self.a_dtype.num_bits
-        weight = weight.view(weight.size(0), -1, num_bits * pack_size_k)
-        block_size_k = self.block_shape[2]
-        block_size_n = self.block_shape[1]
-
-        return make_tma_desc(
-            weight,
-            smem_dims=(num_bits * pack_size_k, block_size_n // 32, block_size_k // pack_size_k),
-        )
-
-    def prepare_outputs_tensor(self, outputs: torch.Tensor, device: torch.device):
-        assert outputs.device == device
-        if not self.pipeline_config.use_tma_c:
-            return outputs.data_ptr()
-
-        block_size_m = 1 if self.moe_config.is_moe else self.block_shape[0]
-        return make_tma_desc(
-            outputs,
-            smem_dims=(64, block_size_m),
-            swizzle_bytes=128,
-        )
-
-    def prepare_weight_scale_tensor(
-        self, weight_scale: Optional[torch.Tensor], device: torch.device
-    ):
-        if weight_scale is None:
-            assert not self.quant_param_config.has_weight_scale
-            return 0
-        assert weight_scale.device == device
-        if not self.pipeline_config.use_tma_bs:
-            return weight_scale.data_ptr()
-
-        weight_scale = weight_scale.view(-1, weight_scale.size(-1))
-        weight_scale = weight_scale.view(weight_scale.size(0), -1, 16)
-        block_size_n = self.block_shape[1]
-        block_size_k = self.block_shape[2]
-        num_groups = 1
-        if self.quant_param_config.weight_scale_group_size > 0:
-            group_size = self.quant_param_config.weight_scale_group_size
-            num_groups = math.ceil(block_size_k / group_size)
-
-        return make_tma_desc(
-            weight_scale,
-            smem_dims=(16, block_size_n // 16, num_groups),
-        )
-
-    def prepare_zero_point_tensor(
-        self,
-        zero_point: Optional[torch.Tensor],
-        device: torch.device,
-    ):
-        if zero_point is None:
-            assert not self.quant_param_config.has_dynamic_zero_point
-            return 0
-        assert zero_point.device == device
-        if not self.pipeline_config.use_tma_bzp:
-            return zero_point.data_ptr()
-
-        num_bits = 4 if self.b_dtype.num_bits <= 4 else 8
-        block_size_n = self.block_shape[1]
-        block_size_k = self.block_shape[2]
-        num_groups = 1
-        if self.quant_param_config.weight_scale_group_size > 0:
-            group_size = self.quant_param_config.weight_scale_group_size
-            num_groups = math.ceil(block_size_k / group_size)
-
-        return make_tma_desc(
-            zero_point,
-            smem_dims=(block_size_n * num_bits // 32, num_groups),
-        )
-
-    def prepare_bias_tensor(self, bias: Optional[torch.Tensor], device: torch.device):
-        if bias is None:
-            assert not self.epilogue_config.has_bias
-            return 0
-        assert bias.device == device
-        if not self.pipeline_config.use_tma_bias:
-            return bias.data_ptr()
-
-        block_size_n = self.block_shape[1]
-        bias = bias.view(-1, 64)
-        return make_tma_desc(
-            bias,
-            smem_dims=(64, block_size_n // 64),
-        )
-
     def __call__(
         self,
         inputs: torch.Tensor,
@@ -434,72 +390,25 @@ class HummingKernel(KernelRuntime):
         num_ctas_per_sm: int = 1,
         num_sms: Optional[int] = None,
     ):
-        assert inputs.is_cuda
-        device = inputs.device
-        self.set_smem_size(device.index)
-        assert weight.device == device
-        shape_m = inputs.size(0)
 
-        if self.moe_config.is_moe:
-            assert sorted_token_ids is not None
-            assert expert_ids is not None
-            assert num_tokens_post_padded is not None
-            sorted_token_ids.device == device
-            expert_ids.device == device
-            num_tokens_post_padded.device == device
-
-            if self.moe_config.is_moe_down:
-                assert topk_weights is not None
-                topk_weights.device == device
-
-        if self.scheduler_config.use_stream_k:
-            assert locks is not None
-            assert locks.device == device
-
-        if outputs is None:
-            output_shape_m = shape_m
-            if self.moe_config.is_moe and not self.moe_config.is_moe_down:
-                output_shape_m = shape_m * self.moe_config.top_k
-            outputs_shape = (output_shape_m, self.problem_shape[1])
-            torch_dtype = dtypes.torch_dtype_map[self.c_dtype]
-            outputs = torch.empty(outputs_shape, dtype=torch_dtype, device=device)
-
-        arg_values = (
-            self.prepare_inputs_tensor(inputs),
-            self.prepare_weight_tensor(weight, device),
-            self.prepare_outputs_tensor(outputs, device),
-            0 if input_scale is None else input_scale.data_ptr(),
-            self.prepare_weight_scale_tensor(weight_scale, device),
-            self.prepare_zero_point_tensor(zero_point, device),
-            self.prepare_bias_tensor(bias, device),
-            0 if global_scale is None else global_scale.data_ptr(),
-            0 if topk_weights is None else topk_weights.data_ptr(),
-            0 if sorted_token_ids is None else sorted_token_ids.data_ptr(),
-            0 if expert_ids is None else expert_ids.data_ptr(),
-            0 if num_tokens_post_padded is None else num_tokens_post_padded.data_ptr(),
-            0 if locks is None else locks.data_ptr(),
-            shape_m,
+        # We need to integrate the module containing the kernel_id
+        # into the forward path. This ensures that when the kernel changes,
+        # torch.compile can recognize it and update the cache accordingly.
+        return torch.ops.humming.launch_humming(
+            [self.get_kernel_id()],
+            inputs,
+            weight,
+            outputs,
+            input_scale,
+            weight_scale,
+            zero_point,
+            bias,
+            global_scale,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            locks,
+            num_ctas_per_sm,
+            num_sms,
         )
-
-        if num_sms is None:
-            num_sms = self.sm_count_map[device.index]
-
-        config = cbd.CUlaunchConfig()
-        config.gridDimX = num_ctas_per_sm * num_sms
-        config.gridDimY = 1
-        config.gridDimZ = 1
-        config.blockDimX = self.num_threads
-        config.blockDimY = 1
-        config.blockDimZ = 1
-        config.sharedMemBytes = self.smem_size
-        config.hStream = torch.cuda.current_stream().cuda_stream
-
-        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), device.index)
-
-        if "_GLU" in str(self.epilogue_config.activation_type):
-            output_shape_m = outputs.size(0)
-            num_valid_elems = output_shape_m * self.problem_shape[1] // 2
-            outputs = outputs.view(-1)[:num_valid_elems]
-            outputs = outputs.view(output_shape_m, -1)
-
-        return outputs

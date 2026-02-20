@@ -28,6 +28,14 @@ def name_value_to_google_cpp_const_style(name: str, value: Any, keep_name: bool 
     return f"static constexpr auto {name} = {value};"
 
 
+def name_value_to_extern_const_style(name: str, value: Any) -> str:
+    name = name.upper()
+    if isinstance(value, (bool, int)):
+        value = int(value)
+        return f'extern "C" __constant__ uint32_t {name} = {value};'
+    return ""
+
+
 @dataclasses.dataclass
 class BaseHummingConfigClass(object):
     _name_map = {}
@@ -76,6 +84,19 @@ class BaseHummingConfigClass(object):
 
         if include_class_name:
             code = f"class {class_name} {{\n{code}\n}};"
+
+        return code
+
+    def to_extern_cpp_str(self):
+        str_list = []
+        for field in dataclasses.fields(self):
+            name = field.name
+            value = getattr(self, name)
+            line = name_value_to_extern_const_style(name, value)
+            str_list.append(line)
+
+        str_list = [x for x in str_list if x]
+        code = "\n".join(x for x in str_list if x)
 
         return code
 

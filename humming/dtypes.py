@@ -38,6 +38,9 @@ class DataType(object):
 
     def __repr__(self):
         return self.to_str()
+    
+    def id(self):
+        raise NotImplementedError
 
 
 class InergerType(DataType):
@@ -75,6 +78,12 @@ class InergerType(DataType):
         dtype_str = str(torch_dtype)[6:]
         assert "int" in dtype_str
         return cls.from_str(dtype_str)
+
+    def id(self):
+        dtype_id = 1 * 1e7  # int type
+        dtype_id += self.num_bits * 1e5  # num_bits
+        dtype_id += self.is_signed * 1e4  # is_sign
+        return int(dtype_id)
 
 
 class FloatingPointType(DataType):
@@ -136,6 +145,14 @@ class FloatingPointType(DataType):
         # note that fnuz format / packed format / padded format are not supported
         dtype_str = dtype_str.replace("fn", "").replace("fnu", "")
         return cls.from_str(dtype_str)
+
+    def id(self):
+        dtype_id = 2 * 1e7  # int type
+        dtype_id += self.num_bits * 1e5  # num_bits
+        dtype_id += self.is_signed * 1e4  # is_sign
+        dtype_id += self.exponent_bits * 1e2  # exp_bits
+        dtype_id += self.mantissa_bits  # num_bits
+        return int(dtype_id)
 
 
 uint1 = InergerType.from_str("uint1")
