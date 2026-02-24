@@ -23,9 +23,9 @@ private:
 
   static constexpr uint32_t kSmemStride = BlockShape::N * ElementBS::kBits / 32 / 4;
   static constexpr uint32_t kGmemStride = ProblemShape::N * ElementBS::kBits / 32 / 4;
-  static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K, kGroupSize);
+  static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K, kHasWeightScale ? kGroupSize : 1);
   static constexpr uint32_t kGmemExpertStride = kGmemStride * kProblemNumGroups;
-  static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kGroupSize);
+  static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kHasWeightScale ? kGroupSize : 1);
   static constexpr uint32_t kNumInt4s = kSmemStride * kNumGroups;
   static constexpr uint32_t kLoadsPerGroup = kIsChannelScale ? 1 : CEIL_DIV(kGroupSize, BlockShape::K);
 

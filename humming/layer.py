@@ -1,17 +1,20 @@
-import torch
-from humming import dtypes
+import dataclasses
 from typing import Optional
+
+import torch
+
+import humming.kernel.quant_input  # noqa: F401
+from humming import dtypes
+from humming.jit.utils import make_humming_module
 from humming.kernel.humming import HummingKernel
 from humming.kernel.pack_weight import PackWeightKernel
-from humming.jit.utils import make_humming_module
 from humming.utils.weight import (
-    quantize_weight,
+    prepare_humming_bias,
     prepare_humming_weight,
     prepare_humming_weight_scale,
     prepare_humming_zero_point,
-    prepare_humming_bias,
+    quantize_weight,
 )
-import dataclasses
 
 
 @dataclasses.dataclass
@@ -23,7 +26,7 @@ class HummingLayerMeta(object):
     shape_n: int
     shape_k: int
     num_experts: Optional[int] = None
-    has_input_scale: Optional[bool] = False
+    has_input_scale: Optional[bool] = None
     has_weight_scale: bool = True
     input_scale_group_size: int = 0
     weight_scale_group_size: int = 0
@@ -56,6 +59,10 @@ class HummingLayerMeta(object):
     @property
     def bias_name(self):
         return self.name_prefix + "bias"
+    
+    def __post_init__(self):
+        if self.a_dtype.num_bits != 16 and self.has_input_scale is None:
+            self.has_input_scale = True
 
 
 class HummingMethod(torch.nn.Module):
@@ -335,13 +342,23 @@ class HummingMethod(torch.nn.Module):
         **kwargs,
     ):
         meta = layer.humming_metas[sublayer_name]
+        warp_shape_nk = (64, 32)
+        block_shape_nk1 = (128, 128)
+        block_shape_nk2 = (256, 64)
+        if meta.a_dtype.num_bits == 8:
+            warp_shape_nk = (32, 64)
+        elif meta.a_dtype.num_bits == 4:
+            warp_shape_nk = (32, 128)
+            block_shape_nk1 = (128, 256)
+            block_shape_nk2 = (256, 128)
+
         kernel_configs = [
-            [0, 16, (16, 128, 128), (16, 64, 32)],
-            [16, 32, (32, 256, 64), (32, 64, 32)],
-            [32, 48, (48, 256, 64), (48, 64, 32)],
-            [48, 64, (64, 256, 64), (64, 64, 32)],
-            [64, 96, (48, 256, 64), (48, 64, 32)],
-            [96, None, (64, 256, 64), (64, 64, 32)],
+            [0, 16, (16, *block_shape_nk1), (16, *warp_shape_nk)],
+            [16, 32, (32, *block_shape_nk2), (32, *warp_shape_nk)],
+            [32, 48, (48, *block_shape_nk2), (48, *warp_shape_nk)],
+            [48, 64, (64, *block_shape_nk2), (64, *warp_shape_nk)],
+            [64, 96, (48, *block_shape_nk2), (48, *warp_shape_nk)],
+            [96, None, (64, *block_shape_nk2), (64, *warp_shape_nk)],
         ]
 
         if "num_stages" not in kwargs:
@@ -414,6 +431,23 @@ class HummingMethod(torch.nn.Module):
         layer.humming_block_size_configs[sublayer_name] = block_size_configs
 
     @classmethod
+    def may_quant_input(
+        cls,
+        meta: HummingLayerMeta,
+        inputs: torch.Tensor,
+        input_scale: Optional[torch.Tensor] = None,
+    ):
+        if meta.a_dtype.num_bits == 16:
+            return inputs, None
+        if input_scale is not None:
+            return inputs, input_scale
+        return torch.ops.humming.humming_quant_input(
+            inputs=inputs,
+            dtype=str(meta.a_dtype),
+            group_size=None,
+        )
+
+    @classmethod
     def forward_layer(
         cls,
         layer: torch.nn.Module,
@@ -426,8 +460,9 @@ class HummingMethod(torch.nn.Module):
         num_tokens_post_padded: Optional[torch.Tensor] = None,
         sublayer_name: str = "",
     ):
-        configs = layer.humming_kernel_config_modules[sublayer_name]()
         meta = layer.humming_metas[sublayer_name]
+        inputs, input_scale = cls.may_quant_input(meta, inputs, input_scale)
+        configs = layer.humming_kernel_config_modules[sublayer_name]()
         return torch.ops.humming.launch_humming(
             configs,
             inputs,
