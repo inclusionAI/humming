@@ -31,7 +31,7 @@
                "  @p cp.async." #MODE ".shared.global [%1], [%2], %3, %4;\n"               \
                "}\n"                                                                       \
                :                                                                           \
-               : "r"((uint32_t)pred1), "r"(smem), "l"(gmem_ptr), "n"(BYTES), "r"(src_size) \
+               : "r"((uint32_t)pred2), "r"(smem), "l"(gmem_ptr), "n"(BYTES), "r"(src_size) \
                : "memory");
 
 
@@ -88,17 +88,18 @@ CUDA_INLINE void legacy_load_zfill(const T *gmem_ptr, T *smem_ptr, bool pred) {
   }
 };
 
-template <typename T, uint32_t cache_type = 0>
+template <bool use_cp_async, typename T, uint32_t cache_type = 0>
 CUDA_INLINE void legacy_load_zfill_pred(const T *gmem_ptr, T *smem_ptr, bool pred1, bool pred2) {
   if constexpr (!use_cp_async) {
-    if (pred1) { smem_ptr[0] = pred2 ? gmem_ptr[0] : T(); }
+    const T val = {0, 0, 0, 0};
+    if (pred2) { smem_ptr[0] = pred1 ? gmem_ptr[0] : val; }
     return;
   }
 
   constexpr uint32_t BYTES = sizeof(T);
   static_assert(cache_type != 2 || BYTES == 16);
   uint32_t smem = cast_smem_ptr_to_uint(smem_ptr);
-  const uint32_t src_size = pred2 ? BYTES : 0;
+  const uint32_t src_size = pred1 ? BYTES : 0;
   if constexpr (cache_type == 2 || (cache_type == 0 && BYTES == 16)) {
     CP_ASYNC_ZFILL_PRED_ASM(cg);
   } else {

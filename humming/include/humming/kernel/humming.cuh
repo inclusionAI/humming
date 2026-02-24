@@ -24,7 +24,7 @@ public:
 
 template <
     class MmaOpClass,
-    class ProblemShape, class BlockShape, class WarpShape,
+    class ProblemShape, class BlockShape, class WarpShape, class PadShape,
     class ElementA, class ElementB, class ElementC, class ElementBS,
     class SchedulerConfig, class PipelineConfig, class EpilogueConfig,
     class QuantParamConfig, class MoEConfig>
@@ -54,7 +54,7 @@ __global__ __launch_bounds__(PipelineConfig::kNumThreads, PipelineConfig::kNumCt
       SharedStorage, ProblemShape, BlockShape,
       SchedulerConfig, PipelineConfig, QuantParamConfig, MoEConfig>;
   using ProducerPipeline = ProducerPipeline<
-      SharedStorage, ProblemShape, BlockShape, ElementA, ElementB, ElementBS,
+      SharedStorage, ProblemShape, BlockShape, PadShape, ElementA, ElementB, ElementBS,
       PipelineConfig, EpilogueConfig, QuantParamConfig, MoEConfig>;
   using ConsumerPipeline = ConsumerPipeline<SharedStorage, PipelineConfig, EpilogueConfig, QuantParamConfig, MoEConfig>;
   using MainloopArithmetic = MainloopArithmetic<
@@ -67,7 +67,7 @@ __global__ __launch_bounds__(PipelineConfig::kNumThreads, PipelineConfig::kNumCt
   using WGMMA = WGMMA<MmaOpClass, SharedStorage, MainloopArithmetic, BlockShape, WarpShape, ElementA, ElementB, QuantParamConfig>;
   using MMA = std::conditional_t<MmaOpClass::kMmaType == MmaType::WGMMA, WGMMA, WMMA>;
   using Epilogue = EpiloguePipeline<
-      MmaOpClass, SharedStorage, EpilogueArithmetic, ProblemShape, BlockShape, WarpShape,
+      MmaOpClass, SharedStorage, EpilogueArithmetic, ProblemShape, BlockShape, WarpShape, PadShape,
       ElementA, ElementC, SchedulerConfig, PipelineConfig, EpilogueConfig, QuantParamConfig, MoEConfig>;
   using S2RMemoryPipeline = S2RMemoryPipeline<
       SharedStorage, MMA, Epilogue, BlockShape, WarpShape, ElementA, ElementB, ElementBS,

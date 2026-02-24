@@ -4,7 +4,7 @@
 
 
 template <
-    class ProblemShape, class BlockShape,
+    class ProblemShape, class BlockShape, class PadShape,
     class ElementA, class PipelineConfig, class MoEConfig>
 class G2SMemoryLoaderA {
 private:
@@ -16,7 +16,7 @@ private:
   static constexpr uint32_t kLoadThreadOffset = PipelineConfig::kNumThreads - kNumLoadThreads;
 
   static constexpr uint32_t kSmemStride = BlockShape::K * ElementA::kBits / 32 / 4;
-  static constexpr uint32_t kGmemStride = ProblemShape::K * ElementA::kBits / 32 / 4;
+  static constexpr uint32_t kGmemStride = (ProblemShape::K - PadShape::K) * ElementA::kBits / 32 / 4;
   static constexpr uint32_t kNumInt4s = kSmemStride * BlockShape::M;
 
   static_assert(BlockShape::K * ElementA::kBits >= 512);
@@ -116,10 +116,15 @@ public:
       uint32_t gmem_row = kIsMoE ? load_row_index[i] : (smem_row % BlockShape::M);
       uint32_t gmem_offset = gmem_row * kGmemStride + gmem_col;
 
+      bool pred0 = (gmem_col * (128 / ElementA::kBits) + col_offset) < (ProblemShape::K - PadShape::K);
       bool pred1 = kNumInt4s % kNumLoadThreads == 0 || i != kLoadIters - 1 || smem_offset < kNumInt4s;
       bool pred2 = gmem_row < (kIsMoE ? shape_m : block_shape_m);
 
-      legacy_load_pred<kUseCpAsync>(gmem_ptr + gmem_offset, smem_ptr + smem_swizzled_offset, pred1 && pred2);
+      if constexpr (PadShape::K == 0) {
+        legacy_load_pred<kUseCpAsync>(gmem_ptr + gmem_offset, smem_ptr + smem_swizzled_offset, pred1 && pred2);
+      } else {
+        legacy_load_zfill_pred<kUseCpAsync>(gmem_ptr + gmem_offset, smem_ptr + smem_swizzled_offset, pred0, pred1 && pred2);
+      }
     }
   }
 
@@ -141,10 +146,14 @@ public:
       uint32_t gmem_col = smem_col % 4;
       uint32_t gmem_offset = gmem_row * kGmemStride + gmem_col;
 
+      bool pred0 = (gmem_col * (128 / ElementA::kBits) + col_offset) < (ProblemShape::K - PadShape::K);
       bool pred1 = kNumInt4s % kNumLoadThreads == 0 || i != kLoadIters - 1 || smem_offset < kNumInt4s;
       bool pred2 = gmem_row < (kIsMoE ? shape_m : block_shape_m);
-
-      legacy_load_pred<kUseCpAsync>(gmem_ptr + gmem_offset, smem_ptr + smem_swizzled_offset, pred1 && pred2);
+      if constexpr (PadShape::K == 0) {
+        legacy_load_pred<kUseCpAsync>(gmem_ptr + gmem_offset, smem_ptr + smem_swizzled_offset, pred1 && pred2);
+      } else {
+        legacy_load_zfill_pred<kUseCpAsync>(gmem_ptr + gmem_offset, smem_ptr + smem_swizzled_offset, pred0, pred1 && pred2);
+      }
     }
   }
 

@@ -76,10 +76,11 @@ inline void check_tensor_a(const Tensor &tensor, KernelData &kernel_data, int64_
   std::vector<int64_t> expected_shape = {tensor.size(0)};
   if (kernel_data.is_moe && kernel_data.is_moe_down) expected_shape.push_back(kernel_data.top_k);
 
+  int64_t shape_k = kernel_data.problem_shape_k - kernel_data.pad_shape_k;
   if (get_dtype_num_bits(kernel_data.a_dtype_id) == 4) {
-    expected_shape.push_back(kernel_data.problem_shape_k / 2);
+    expected_shape.push_back(shape_k / 2);
   } else {
-    expected_shape.push_back(kernel_data.problem_shape_k);
+    expected_shape.push_back(shape_k);
   }
   auto expected_dtype = dtype_id_to_tensor_dtype(kernel_data.a_dtype_id);
   check_tensor_common(tensor, "a", dev, expected_dtype, expected_shape);
@@ -103,7 +104,7 @@ inline void check_tensor_b(Tensor &tensor, KernelData &kernel_data, int64_t dev)
 inline void check_tensor_c(Tensor &tensor, KernelData &kernel_data, int64_t dev, int64_t shape_m) {
   std::vector<int64_t> expected_shape = {shape_m};
   if (kernel_data.is_moe) expected_shape.push_back(kernel_data.top_k);
-  expected_shape.push_back(kernel_data.problem_shape_n);
+  expected_shape.push_back(kernel_data.problem_shape_n - kernel_data.pad_shape_n);
   auto expected_dtype = dtype_id_to_tensor_dtype(kernel_data.c_dtype_id);
   check_tensor_common(tensor, "c", dev, expected_dtype, expected_shape);
 };

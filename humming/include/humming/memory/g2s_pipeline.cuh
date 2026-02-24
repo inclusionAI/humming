@@ -12,7 +12,7 @@
 
 template <
     class SharedStorage,
-    class ProblemShape, class BlockShape,
+    class ProblemShape, class BlockShape, class PadShape,
     class ElementA, class ElementB, class ElementBS,
     class PipelineConfig, class EpilogueConfig,
     class QuantParamConfig, class MoEConfig>
@@ -103,9 +103,9 @@ public:
   static constexpr bool kHasChannelTmaMBarrier = get_channel_load_bytes().x > 0;
   static constexpr bool kHasChannelCpAsyncMBarrier = get_channel_load_bytes().y > 0;
 
-  using LoaderA = G2SMemoryLoaderA<ProblemShape, BlockShape, ElementA, PipelineConfig, MoEConfig>;
+  using LoaderA = G2SMemoryLoaderA<ProblemShape, BlockShape, PadShape, ElementA, PipelineConfig, MoEConfig>;
   using LoaderB = G2SMemoryLoaderB<ProblemShape, BlockShape, ElementA, ElementB, PipelineConfig, MoEConfig>;
-  using LoaderAS = G2SMemoryLoaderAS<ProblemShape, BlockShape, PipelineConfig, QuantParamConfig, MoEConfig>;
+  using LoaderAS = G2SMemoryLoaderAS<ProblemShape, BlockShape, PadShape, PipelineConfig, QuantParamConfig, MoEConfig>;
   using LoaderBS = G2SMemoryLoaderBS<ProblemShape, BlockShape, ElementBS, PipelineConfig, QuantParamConfig, MoEConfig>;
   using LoaderBZP = G2SMemoryLoaderBZP<ProblemShape, BlockShape, ElementB, PipelineConfig, QuantParamConfig, MoEConfig>;
   using LoaderBias = G2SMemoryLoaderBias<ProblemShape, BlockShape, PipelineConfig, MoEConfig>;

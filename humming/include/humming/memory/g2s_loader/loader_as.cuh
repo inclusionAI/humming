@@ -4,7 +4,7 @@
 
 
 template <
-    class ProblemShape, class BlockShape,
+    class ProblemShape, class BlockShape, class PadShape,
     class PipelineConfig, class QuantParamConfig, class MoEConfig>
 class G2SMemoryLoaderAS {
 private:
@@ -19,7 +19,8 @@ private:
   static constexpr bool kIsGroupScale = kHasInputScale && QuantParamConfig::kInputScaleGroupSize > 0;
   static constexpr uint32_t kGroupSize = kIsGroupScale ? QuantParamConfig::kInputScaleGroupSize : ProblemShape::K;
 
-  static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K, kGroupSize);
+  static_assert(ProblemShape::K == kGroupSize || (ProblemShape::K - PadShape::K) % kGroupSize == 0);
+  static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K - PadShape::K, kGroupSize);
   static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kGroupSize);
   static constexpr uint32_t kLoadsPerGroup = CEIL_DIV(kGroupSize, BlockShape::K);
 

@@ -60,7 +60,7 @@ inline int64_t get_num_sms(std::optional<int64_t> num_sms, int64_t dev) {
 
 Tensor launch_humming(
     IntArrayRef configs,
-    const Tensor &a,
+    Tensor a,
     Tensor b,
     std::optional<Tensor> c_,
     std::optional<Tensor> as_,
@@ -89,6 +89,7 @@ Tensor launch_humming(
   KernelData kernel_data = find_kernel(configs, shape_m);
   int64_t actual_shape_m = shape_m * (kernel_data.is_moe_down ? kernel_data.top_k : 1);
   Tensor c = may_make_tensor_c(c_, a, kernel_data);
+  a = a.contiguous();
 
   if (should_check_tensor) {
     check_tensor_a(a, kernel_data, dev);
@@ -189,6 +190,8 @@ int64_t register_kernel(const std::string &cubin_path, const std::string &func_n
         reader.getUint32("BLOCK_SHAPE_M"),
         reader.getUint32("BLOCK_SHAPE_N"),
         reader.getUint32("BLOCK_SHAPE_K"),
+        reader.getUint32("PAD_SHAPE_N"),
+        reader.getUint32("PAD_SHAPE_K"),
         reader.getUint32("INPUT_SCALE_GROUP_SIZE"),
         reader.getUint32("WEIGHT_SCALE_GROUP_SIZE"),
         reader.getUint32("TOP_K"),

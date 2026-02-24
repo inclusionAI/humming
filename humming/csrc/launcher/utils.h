@@ -72,6 +72,8 @@ struct KernelData {
   uint32_t block_shape_m;
   uint32_t block_shape_n;
   uint32_t block_shape_k;
+  uint32_t pad_shape_n;
+  uint32_t pad_shape_k;
   uint32_t input_scale_group_size;
   uint32_t weight_scale_group_size;
   uint32_t top_k;

@@ -77,9 +77,10 @@ using SharedStorageType = SharedStorage<
 
 auto ptr = reinterpret_cast<void*>(&humming<
     MmaOpClass,
-    Shape<{shape_m}, {shape_n}, {shape_k}>,
+    Shape<0, {shape_n}, {shape_k}>,
     Shape<{block_m}, {block_n}, {block_k}>,
     Shape<{warp_m}, {warp_n}, {warp_k}>,
+    Shape<0, {pad_n}, {pad_k}>,
     {a_dtype},
     {b_dtype},
     {c_dtype},
@@ -96,7 +97,6 @@ extern "C" __constant__ uint32_t SMEM_SIZE_A = sizeof(SharedStorageType::a);
 extern "C" __constant__ uint32_t SMEM_SIZE_B = sizeof(SharedStorageType::b);
 extern "C" __constant__ uint32_t SMEM_SIZE_REDUCE = sizeof(SharedStorageType::reduce);
 
-extern "C" __constant__ uint32_t PROBLEM_SHAPE_M = {shape_m};
 extern "C" __constant__ uint32_t PROBLEM_SHAPE_N = {shape_n};
 extern "C" __constant__ uint32_t PROBLEM_SHAPE_K = {shape_k};
 
@@ -107,6 +107,9 @@ extern "C" __constant__ uint32_t BLOCK_SHAPE_K = {block_k};
 extern "C" __constant__ uint32_t WARP_SHAPE_M = {warp_m};
 extern "C" __constant__ uint32_t WARP_SHAPE_N = {warp_n};
 extern "C" __constant__ uint32_t WARP_SHAPE_K = {warp_k};
+
+extern "C" __constant__ uint32_t PAD_SHAPE_N = {pad_n};
+extern "C" __constant__ uint32_t PAD_SHAPE_K = {pad_k};
 
 extern "C" __constant__ uint32_t A_DTYPE_ID = {a_dtype}::kId;
 extern "C" __constant__ uint32_t B_DTYPE_ID = {b_dtype}::kId;
@@ -152,13 +155,13 @@ class HummingKernel(KernelRuntime):
 
     def __init__(
         self,
-        problem_shape,
-        block_shape,
-        warp_shape,
-        a_dtype,
-        b_dtype,
-        c_dtype,
-        bs_dtype,
+        problem_shape: tuple[int, int, int],
+        block_shape: tuple[int, int, int],
+        warp_shape: tuple[int, int, int],
+        a_dtype: dtypes.DataType | str,
+        b_dtype: dtypes.DataType | str,
+        c_dtype: dtypes.DataType | str,
+        bs_dtype: dtypes.DataType | str,
         **kwargs,
     ):
         if self.inited:
@@ -169,6 +172,7 @@ class HummingKernel(KernelRuntime):
         self.problem_shape = (0,) + tuple(problem_shape)[1:]
         self.block_shape = tuple(block_shape)
         self.warp_shape = tuple(warp_shape)
+        self.pad_shape = kwargs.get("pad_shape", (0, 0, 0))
         self.num_warps = math.prod(block_shape) // math.prod(warp_shape)
         self.num_math_threads = self.num_warps * 32
 
@@ -202,7 +206,6 @@ class HummingKernel(KernelRuntime):
         self.code = CODE_TEMPLATE.format(
             use_warp_spec=int(self.pipeline_config.use_warp_spec),
             mma_op_class=self.mma_op_class.to_cpp_str(),
-            shape_m=self.problem_shape[0],
             shape_n=self.problem_shape[1],
             shape_k=self.problem_shape[2],
             block_m=self.block_shape[0],
@@ -211,6 +214,8 @@ class HummingKernel(KernelRuntime):
             warp_m=self.warp_shape[0],
             warp_n=self.warp_shape[1],
             warp_k=self.warp_shape[2],
+            pad_n=self.pad_shape[1],
+            pad_k=self.pad_shape[2],
             a_dtype=self.a_dtype.to_cpp_str(),
             b_dtype=self.b_dtype.to_cpp_str(),
             c_dtype=self.c_dtype.to_cpp_str(),
@@ -301,6 +306,10 @@ class HummingKernel(KernelRuntime):
         assert jit_utils.is_power_of_two(self.block_shape[0] // self.warp_shape[0])
         assert jit_utils.is_power_of_two(self.block_shape[1] // self.warp_shape[1])
         assert jit_utils.is_power_of_two(self.block_shape[2] // self.warp_shape[2])
+        assert self.problem_shape[1] > self.pad_shape[1]
+        assert self.problem_shape[2] > self.pad_shape[2]
+        assert self.pad_shape[1] % 8 == 0
+        assert self.pad_shape[2] % (128 // self.a_dtype.num_bits) == 0
 
         assert self.warp_shape[1] <= 64
         if self.a_dtype.num_bits == 16:

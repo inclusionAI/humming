@@ -17,7 +17,7 @@ CUDA_INLINE T reduce_add_f162(T a, T b) {
 
 template <
     class ArithClass,
-    class ProblemShape, class BlockShape, class ElementC,
+    class ProblemShape, class BlockShape, class PadShape, class ElementC,
     class SchedulerConfig, class PipelineConfig, class EpilogueConfig, class MoEConfig>
 class EpilogueGmemWriter : F16Conversion<ElementC> {
 private:
@@ -102,16 +102,17 @@ public:
         uint32_t gmem_row = smem_row % BlockShape::M;
         gmem_row = kIsMoE ? moe_row_index[gmem_row] : gmem_row;
         uint32_t gmem_col = smem_row / BlockShape::M * 8 + smem_col;
-        bool pred = gmem_row < (kIsMoE ? output_shape_m : block_output_shape_m);
+        bool pred1 = gmem_row < (kIsMoE ? output_shape_m : block_output_shape_m);
+        bool pred2 = PadShape::N == 0 || (col_offset + gmem_col * 8 < ProblemShape::N - PadShape::N);
 
-        if (!pred) continue;
+        if (!pred1 || !pred2) continue;
 
         int4 val = smem_ptr[smem_offset_swizzled];
         bool should_apply_activation = kHasActivation && (kUseStreamK && slice_count > 1);
         bool should_apply_glu_activation = kHasGLUActivation && should_apply_activation;
         bool should_apply_identity_activation = kHasIndentityActivation && should_apply_activation;
 
-        uint32_t gmem_offset = gmem_row * (ProblemShape::N * 2 / 16) + gmem_col;
+        uint32_t gmem_offset = gmem_row * ((ProblemShape::N - PadShape::N) / 8) + gmem_col;
         if (!should_apply_activation && !kHasGLUActivation) {
           if (!kUseStreamK || slice_count == 1 || slice_id == 0) {
             gmem_ptr[gmem_offset] = val;
@@ -203,10 +204,11 @@ public:
       offset = n_block_id * (BlockShape::N * 2 / 16);
     }
     if constexpr (!kIsMoE) {
+      constexpr uint32_t kShapeN = ProblemShape::N - PadShape::N;
       if constexpr (kHasGLUActivation) {
-        offset += m_block_id * (ProblemShape::N / 2 * BlockShape::M * 2 / 16);
+        offset += m_block_id * (kShapeN / 2 * BlockShape::M * 2 / 16);
       } else {
-        offset += m_block_id * (ProblemShape::N * BlockShape::M * 2 / 16);
+        offset += m_block_id * (kShapeN * BlockShape::M * 2 / 16);
       }
     }
     gmem_ptr = gmem_ptr_raw + offset;

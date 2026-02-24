@@ -9,7 +9,7 @@
 
 template <
     class MmaOpClass, class SharedStorage, class ArithClass,
-    class ProblemShape, class BlockShape, class WarpShape,
+    class ProblemShape, class BlockShape, class WarpShape, class PadShape,
     class ElementA, class ElementC,
     class SchedulerConfig, class PipelineConfig, class EpilogueConfig,
     class QuantParamConfig, class MoEConfig>
@@ -17,7 +17,7 @@ class EpiloguePipeline {
 private:
   using SmemReducer = EpilogueSmemReducer<MmaOpClass, BlockShape, WarpShape, ElementC, PipelineConfig>;
   using SmemWriter = EpilogueSmemWriter<MmaOpClass, ArithClass, BlockShape, WarpShape, ElementA, ElementC, PipelineConfig, QuantParamConfig>;
-  using GmemWriter = EpilogueGmemWriter<ArithClass, ProblemShape, BlockShape, ElementC, SchedulerConfig, PipelineConfig, EpilogueConfig, MoEConfig>;
+  using GmemWriter = EpilogueGmemWriter<ArithClass, ProblemShape, BlockShape, PadShape, ElementC, SchedulerConfig, PipelineConfig, EpilogueConfig, MoEConfig>;
   using OutputPtrType = std::conditional_t<PipelineConfig::kUseTmaC, const void *, void *>;
 
 public:
