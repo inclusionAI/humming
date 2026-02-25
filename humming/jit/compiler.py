@@ -1,9 +1,11 @@
+import glob
+import json
 import os
 import subprocess
 from pathlib import Path
-import json
-import glob
-import shutil
+
+import filelock
+
 import humming.jit.utils as jit_utils
 
 
@@ -40,18 +42,23 @@ class Compiler(object):
         cache_dirname = os.path.join(jit_utils.get_humming_cache_dir(), hash_hex)
         cache_dirname = Path(cache_dirname)
         cache_filename = cache_dirname / "kernel.cubin"
-
-        if cache_filename.exists():
-            return cache_filename.as_posix()
-
         cache_dirname.mkdir(exist_ok=True, parents=True)
-        source_path = os.path.join(cache_dirname, "kernel.cu")
-        with open(cache_dirname / "kernel.cu", "w") as f:
-            f.write(code)
-        with open(cache_dirname / "signature.txt", "w") as f:
-            f.write(signature)
 
-        returncode, stdout, stderr = cls._compile(source_path, cache_dirname, sm_version)
+        lock_filename = (cache_dirname / "lock").as_posix()
+        with filelock.FileLock(lock_filename):
+            if cache_filename.exists():
+                return cache_filename.as_posix()
+
+            cache_dirname.mkdir(exist_ok=True, parents=True)
+            source_path = os.path.join(cache_dirname, "kernel.cu")
+            with open(cache_dirname / "kernel.cu", "w") as f:
+                f.write(code)
+            with open(cache_dirname / "signature.txt", "w") as f:
+                f.write(signature)
+
+            compile_res = cls._compile(source_path, cache_dirname, sm_version)
+            returncode, stdout, stderr = compile_res
+
         with open(cache_dirname / "stdout.log", "w") as f:
             f.write(stdout)
         with open(cache_dirname / "stderr.log", "w") as f:
@@ -111,7 +118,4 @@ class NVCCCompiler(Compiler):
             json.dump(cmd, f, ensure_ascii=False)
 
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode == 0:
-            shutil.move(keep_dirname + "/kernel.ptx", cache_dirname.as_posix())
-            shutil.rmtree(keep_dirname)
         return result.returncode, result.stdout, result.stderr
