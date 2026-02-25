@@ -175,7 +175,7 @@ def prepare_humming_weight_scale(weight_scale, to_apply_on_c=False):
     for i in range(8 // count):
         perm_new += [x + count * i for x in perm]
 
-    perm_new = torch.tensor(perm_new, dtype=torch.int32, device="cuda:0")
+    perm_new = torch.tensor(perm_new, dtype=torch.int32, device=weight_scale.device)
     weight_scale = weight_scale.transpose(-1, -2).contiguous()
     orig_shape = weight_scale.shape
     weight_scale = weight_scale.view(-1, len(perm_new))[:, perm_new]

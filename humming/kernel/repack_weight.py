@@ -124,7 +124,7 @@ class WeightRepackKernel(KernelRuntime):
         config.blockDimX = 32
         config.blockDimY = 1
         config.blockDimZ = 1
-        config.hStream = torch.cuda.current_stream().cuda_stream
+        config.hStream = torch.cuda.current_stream(device).cuda_stream
 
         arg_values = (
             inputs.data_ptr(),
@@ -136,5 +136,5 @@ class WeightRepackKernel(KernelRuntime):
             padded_shape_k,
         )
 
-        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), device.index)
+        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), 0)
         return outputs

@@ -42,7 +42,7 @@ class UnpackWeightKernel(KernelRuntime):
 
         assert outputs.nelement() % (32 * 32) == 0
 
-        device_index = inputs.device.index
+        device = inputs.device
         config = cbd.CUlaunchConfig()
         config.gridDimX = outputs.nelement() // (32 * 32)
         config.gridDimY = 1
@@ -50,9 +50,9 @@ class UnpackWeightKernel(KernelRuntime):
         config.blockDimX = 32
         config.blockDimY = 1
         config.blockDimZ = 1
-        config.hStream = torch.cuda.current_stream().cuda_stream
+        config.hStream = torch.cuda.current_stream(device).cuda_stream
 
         arg_values = (inputs.data_ptr(), outputs.data_ptr())
 
-        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), device_index)
+        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), 0)
         return outputs

@@ -93,7 +93,7 @@ class QuantWeightKernel(KernelRuntime):
                 assert zero_point.shape == scale_shape
                 assert zero_point.device.index == inputs.device.index
 
-        device_index = inputs.device.index
+        device = inputs.device
         config = cbd.CUlaunchConfig()
         config.gridDimX = inputs.nelement() // group_size
         config.gridDimY = 1
@@ -101,7 +101,7 @@ class QuantWeightKernel(KernelRuntime):
         config.blockDimX = 32
         config.blockDimY = 1
         config.blockDimZ = 1
-        config.hStream = torch.cuda.current_stream().cuda_stream
+        config.hStream = torch.cuda.current_stream(device).cuda_stream
 
         arg_values = (
             inputs.data_ptr(),
@@ -110,5 +110,5 @@ class QuantWeightKernel(KernelRuntime):
             0 if zero_point is None else zero_point.data_ptr(),
         )
 
-        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), device_index)
+        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), 0)
         return outputs, scales, zero_point

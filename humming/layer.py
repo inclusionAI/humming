@@ -87,8 +87,8 @@ class HummingMethod(torch.nn.Module):
 
         assert data.dtype == param.dtype
 
-        if expert_id is None and data.nelement() != param.nelement():
-            print(data.shape, param.shape)
+        no_equals = data.nelement() != param.nelement() 
+        if expert_id is None and data.size(0) == param.size(0) and no_equals:
             for expert_id in range(data.size(0)):
                 data_tmp = data[expert_id].to(param.device).view(-1)
                 part_tensor = param.data[expert_id]
