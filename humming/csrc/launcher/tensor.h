@@ -12,7 +12,7 @@ inline Tensor may_make_tensor_c(std::optional<Tensor> &c, const Tensor &a, Kerne
   auto sizes = a.sym_sizes().vec();
   sizes.pop_back();
   if (kernel_data.is_moe && !kernel_data.is_moe_down) sizes.push_back(kernel_data.top_k);
-  sizes.push_back(kernel_data.problem_shape_n);
+  sizes.push_back(kernel_data.problem_shape_n - kernel_data.pad_shape_n);
 
   auto c_dtype = dtype_id_to_tensor_dtype(kernel_data.c_dtype_id);
   auto options = a.options().dtype(c_dtype);

@@ -133,7 +133,7 @@ public:
         } else if (should_apply_glu_activation) {
           int2 *gmem_ptr_int2 = reinterpret_cast<int2 *>(gmem_ptr);
           int2 *val_int2_ptr = reinterpret_cast<int2 *>(&val);
-          uint32_t gmem_offset2 = gmem_offset + output_shape_m * (ProblemShape::N * 2 / 16);
+          uint32_t gmem_offset2 = gmem_offset + output_shape_m * ((ProblemShape::N - PadShape::N) / 8);
           if (slice_id > 0) {
             val_int2_ptr[0] = reduce_add_f162<scalar_t2>(val_int2_ptr[0], gmem_ptr_int2[gmem_offset]);
             val_int2_ptr[1] = reduce_add_f162<scalar_t2>(val_int2_ptr[1], gmem_ptr_int2[gmem_offset2]);
