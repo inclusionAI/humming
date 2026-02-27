@@ -1,15 +1,14 @@
 import ctypes
 import math
 import os
+import zlib
 from typing import Optional
 
 import torch
-import zlib
-
 import torch.utils.cpp_extension
-from humming.jit.utils import make_humming_module
 
 import humming.dtypes as dtypes
+import humming.jit.utils as jit_utils
 from humming.config import (
     EpilogueConfig,
     MmaConfig,
@@ -22,7 +21,7 @@ from humming.config.enum import MmaType
 from humming.config.mma import MmaOpClass
 from humming.dtypes import DataType
 from humming.jit.runtime import KernelRuntime
-import humming.jit.utils as jit_utils
+from humming.jit.utils import make_humming_module
 
 CODE_TEMPLATE = """
 #if {use_warp_spec}
@@ -399,7 +398,6 @@ class HummingKernel(KernelRuntime):
         num_ctas_per_sm: int = 1,
         num_sms: Optional[int] = None,
     ):
-
         # We need to integrate the module containing the kernel_id
         # into the forward path. This ensures that when the kernel changes,
         # torch.compile can recognize it and update the cache accordingly.

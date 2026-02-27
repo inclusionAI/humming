@@ -8,7 +8,6 @@ a_dtypes = [dtypes.float16, dtypes.float8e4m3]
 b_dtypes = [dtypes.uint3, dtypes.uint4, dtypes.uint5]
 
 
-
 def run_example(group_size, a_dtype, b_dtype):
     layer = HummingLayer(
         shape_n=8192,

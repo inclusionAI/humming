@@ -6,6 +6,7 @@ import triton.language as tl
 from torch.library import custom_op, register_fake
 from torch._subclasses.fake_tensor import FakeTensor
 
+
 @triton.jit
 def calc_scale(tensor, dtype):
     if dtype == "float8e4m3":

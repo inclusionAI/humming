@@ -38,7 +38,7 @@ class DataType(object):
 
     def __repr__(self):
         return self.to_str()
-    
+
     def id(self):
         raise NotImplementedError
 

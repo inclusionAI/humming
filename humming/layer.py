@@ -418,6 +418,7 @@ class HummingMethod(torch.nn.Module):
             if meta.num_experts is not None:
                 min_shape_m = int(0.9 * min_shape_m * meta.num_experts / 4)
                 import math
+
                 max_shape_m = math.ceil(0.9 * max_shape_m * meta.num_experts / 4)
 
             cls.add_kernel_config(

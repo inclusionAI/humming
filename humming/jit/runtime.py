@@ -18,9 +18,7 @@ class KernelRuntime(object):
             return value
 
         args_items = tuple(get_value(x) for x in args)
-        kwargs_items = tuple(
-            (key, get_value(kwargs[key])) for key in sorted(kwargs.keys())
-        )
+        kwargs_items = tuple((key, get_value(kwargs[key])) for key in sorted(kwargs.keys()))
 
         signature = (cls.__name__, args_items + kwargs_items)
 
@@ -31,9 +29,7 @@ class KernelRuntime(object):
         return cls._instances[signature]
 
     def prepare(self):
-        kernel_filename = NVCCCompiler.compile(
-            self.code, sm_version=self.sm_version_str
-        )
+        kernel_filename = NVCCCompiler.compile(self.code, sm_version=self.sm_version_str)
         kernel_name = jit_utils.find_kernel_name_in_cubin(kernel_filename, self.name)
         self.kernel_name = kernel_name
         self.kernel_filename = kernel_filename
@@ -41,9 +37,7 @@ class KernelRuntime(object):
         self.inited = True
 
     def load_cubin(self, kernel_filename, kernel_name):
-        result, lib = cbd.cuLibraryLoadFromFile(
-            kernel_filename.encode(), [], [], 0, [], [], 0
-        )
+        result, lib = cbd.cuLibraryLoadFromFile(kernel_filename.encode(), [], [], 0, [], [], 0)
         assert result == 0, repr(result)
         result, kernel = cbd.cuLibraryGetKernel(lib, kernel_name.encode())
         assert result == 0, repr(result)
@@ -59,9 +53,7 @@ class KernelRuntime(object):
             sm_version = device_props.major * 10 + device_props.minor
 
         self.sm_version = sm_version
-        self.sm_version_str = (
-            str(sm_version) + "a" if sm_version >= 90 else str(sm_version)
-        )
+        self.sm_version_str = str(sm_version) + "a" if sm_version >= 90 else str(sm_version)
 
     @functools.lru_cache
     def get_cubin_symbol_value(self, name):
