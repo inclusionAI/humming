@@ -82,13 +82,19 @@ class HummingMethod(torch.nn.Module):
         expert_id: Optional[int] = None,
     ):
         param = getattr(layer, name, None)
+        if name == "bias":
+            is_moe = param.ndim == 2
+        elif name == "global_scale":
+            is_moe = param.nelement() > 1
+        else:
+            is_moe = param.ndim == 3
+
         if param is None:
             return
 
         assert data.dtype == param.dtype
 
-        no_equals = data.nelement() != param.nelement() 
-        if expert_id is None and data.size(0) == param.size(0) and no_equals:
+        if is_moe and expert_id is None and data.nelement() != param.nelement():
             for expert_id in range(data.size(0)):
                 data_tmp = data[expert_id].to(param.device).view(-1)
                 part_tensor = param.data[expert_id]
