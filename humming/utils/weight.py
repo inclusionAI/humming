@@ -7,8 +7,13 @@ from humming.kernel.unpack_weight import UnpackWeightKernel
 
 
 def quantize_weight(
-    weight, dtype, scale_dtype, group_size, has_dynamic_zp=False, has_global_scale=False
-):
+    weight: torch.Tensor,
+    dtype: dtypes.DataType,
+    scale_dtype: dtypes.DataType,
+    group_size: int,
+    has_dynamic_zp: bool = False,
+    has_global_scale: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     assert weight.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert weight.ndim in [2, 3]
     assert not has_dynamic_zp or scale_dtype is not None
@@ -96,14 +101,14 @@ def quantize_weight(
 
 
 def prepare_humming_weight(
-    weight,
-    b_dtype,
-    a_dtype,
-    zero_point=None,
-    packed=False,
-    padded_shape_n=None,
-    padded_shape_k=None,
-):
+    weight: torch.Tensor,
+    b_dtype: dtypes.DataType,
+    a_dtype: dtypes.DataType,
+    zero_point: torch.Tensor | None = None,
+    packed: bool = False,
+    padded_shape_n: int | None = None,
+    padded_shape_k: int | None = None,
+) -> torch.Tensor:
     is_moe = weight.ndim == 3
     weight = weight.unsqueeze(0) if not is_moe else weight
     if zero_point is not None:
@@ -164,7 +169,10 @@ def prepare_humming_weight(
     return repacked_weight if is_moe else repacked_weight.squeeze(0)
 
 
-def prepare_humming_weight_scale(weight_scale, to_apply_on_c=False):
+def prepare_humming_weight_scale(
+    weight_scale: torch.Tensor,
+    to_apply_on_c: bool = False,
+) -> torch.Tensor:
     if to_apply_on_c:
         perm = [0, 1, 8, 9, 16, 17, 24, 25]
     else:
@@ -184,7 +192,11 @@ def prepare_humming_weight_scale(weight_scale, to_apply_on_c=False):
     return weight_scale
 
 
-def prepare_humming_zero_point(zero_point, dtype, packed=False):
+def prepare_humming_zero_point(
+    zero_point: torch.Tensor | None,
+    dtype: dtypes.DataType,
+    packed: bool = False,
+) -> torch.Tensor | None:
     if zero_point is None:
         return zero_point
 
@@ -204,7 +216,24 @@ def prepare_humming_zero_point(zero_point, dtype, packed=False):
     return zero_point.view(torch.int32).view(-1, shape_n * num_zp_bits // 32)
 
 
-def prepare_humming_bias(bias):
+def prepare_humming_bias(bias: torch.Tensor | None) -> torch.Tensor | None:
     if bias is None:
         return
     return prepare_humming_weight_scale(bias.unsqueeze(-1), True).squeeze(0)
+
+
+def prepare_humming_tensor_for_glu(
+    tensor: torch.Tensor | None,
+    shape_n: int,
+    pad_shape_n: int = 0,
+    is_moe: bool = False,
+) -> torch.Tensor | None:
+    if tensor is None or tensor.nelement() == 0:
+        return tensor
+    tensor = tensor.unsqueeze(0) if not is_moe else tensor
+    actual_shape_n = shape_n - pad_shape_n
+    index = torch.arange(actual_shape_n, device=tensor.device)
+    index = index.view(2, -1).flip(0).T.contiguous().view(-1)
+    index = torch.cat([index, torch.arange(actual_shape_n, shape_n, device=tensor.device)])
+    tensor = tensor[:, index].contiguous()
+    return tensor.squeeze(0) if not is_moe else tensor

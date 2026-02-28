@@ -10,6 +10,7 @@ from humming.kernel.humming import HummingKernel
 from humming.kernel.pack_weight import PackWeightKernel
 from humming.utils.weight import (
     prepare_humming_bias,
+    prepare_humming_tensor_for_glu,
     prepare_humming_weight,
     prepare_humming_weight_scale,
     prepare_humming_zero_point,
@@ -325,7 +326,12 @@ class HummingMethod(torch.nn.Module):
             cls.set_param_data(layer, meta.bias_name, bias, offset_n, expert_id)
 
     @classmethod
-    def finish_load(cls, layer: torch.nn.Module, sublayer_name: str = ""):
+    def finish_load(
+        cls,
+        layer: torch.nn.Module,
+        should_preprocess_for_glu: bool = False,
+        sublayer_name: str = "",
+    ):
         meta = layer.humming_metas[sublayer_name]
         weight = getattr(layer, meta.weight_name)
         weight_scale = getattr(layer, meta.weight_scale_name, None)
@@ -342,6 +348,17 @@ class HummingMethod(torch.nn.Module):
             zero_point = zero_point.view(num_experts, -1, num_groups)
         if weight_scale is not None:
             weight_scale = weight_scale.view(num_experts, meta.shape_n, -1)
+
+        if should_preprocess_for_glu:
+            for tensor in [weight, weight_scale, zero_point, bias]:
+                tensor_new = prepare_humming_tensor_for_glu(
+                    tensor=tensor,
+                    is_moe=weight.ndim == 3,
+                    shape_n=meta.shape_n,
+                    pad_shape_n=meta.pad_shape_n,
+                )
+                if tensor is not None:
+                    tensor.copy_(tensor_new)
 
         weight = prepare_humming_weight(
             weight=weight,
