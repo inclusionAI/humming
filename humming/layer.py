@@ -82,9 +82,9 @@ class HummingMethod(torch.nn.Module):
         expert_id: Optional[int] = None,
     ):
         param = getattr(layer, name, None)
-        if name == "bias":
+        if name.endswith("bias"):
             is_moe = param.ndim == 2
-        elif name == "global_scale":
+        elif name.endswith("global_scale"):
             is_moe = param.nelement() > 1
         else:
             is_moe = param.ndim == 3
