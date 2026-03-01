@@ -395,6 +395,8 @@ class HummingMethod(torch.nn.Module):
             cls.set_param_data(layer, meta.zero_point_name, zero_point)
 
         if bias is not None and bias.size(0):
+            if bias.ndim == 1 and bias.size(0) == meta.shape_n - meta.pad_shape_n:
+                bias = torch.nn.functional.pad(bias, pad=(0, meta.pad_shape_n))
             bias = prepare_humming_bias(bias)
             cls.set_param_data(layer, meta.bias_name, bias)
 
