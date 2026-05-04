@@ -385,16 +385,14 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             # Capture the current CUDA device so worker threads use the correct GPU;
             # CUDA device is thread-local and new threads default to GPU 0.
             _current_device = torch.cuda.current_device()
-
-            def _prepare_kernel_with_device(data):
-                torch.cuda.set_device(_current_device)
-                return prepare_kernel(data)
-
-            executor = ThreadPoolExecutor(max_workers=16)
-            for config, kernel, num_sms in executor.map(_prepare_kernel_with_device, tuning_config_obj):
-                kernel.load_cubin()
-                res += [config[0], config[1], kernel.kernel_id, num_sms]
-            executor.shutdown(wait=False)
+            with ThreadPoolExecutor(
+                max_workers=16,
+                initializer=torch.cuda.set_device,
+                initargs=(_current_device,),
+            ) as executor:
+                for config, kernel, num_sms in executor.map(prepare_kernel, tuning_config_obj):
+                    kernel.load_cubin()
+                    res += [config[0], config[1], kernel.kernel_id, num_sms]
         else:
             for config in tuning_config_obj:
                 kernel_config, kernel, num_sms = prepare_kernel(config)
