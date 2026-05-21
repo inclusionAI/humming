@@ -45,7 +45,18 @@ def estimate_tensorcore_max_tops(gpu_index=0):
         max_clock_mhz = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM)
         sm_count = torch.cuda.get_device_properties(gpu_index).multi_processor_count
 
-        ops_map = {75: 1024, 80: 2048, 86: 1024, 87: 2048, 89: 1024, 90: 4096, 100: 8192, 103: 8192}
+        ops_map = {
+            75: 1024,
+            80: 2048,
+            86: 1024,
+            87: 2048,
+            89: 1024,
+            90: 4096,
+            100: 8192,
+            103: 8192,
+            120: 1024,
+            121: 1024,
+        }
         ops_per_clock = ops_map[sm_version]
 
         # 1. This function returns the dense FP16 Tensor Core performance (FP16 accumulator).

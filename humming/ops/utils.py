@@ -82,11 +82,6 @@ def _resolve_use_torch_stable_api() -> bool:
 
 
 def init_humming_launcher():
-    from torch.library import register_fake
-
-    from humming.config import GemmType
-    from humming.kernel import HummingKernel
-
     global _launcher_inited
     if _launcher_inited:
         return
@@ -118,34 +113,6 @@ def init_humming_launcher():
         )
 
         _launcher_inited = True
-
-    @register_fake("humming::launch_kernel")
-    def _launch_kernel_fake(
-        configs: torch.Tensor,
-        inputs: torch.Tensor,
-        weight: torch.Tensor,
-        outputs: torch.Tensor | None = None,
-        input_scale: torch.Tensor | None = None,
-        weight_scale: torch.Tensor | None = None,
-        zero_point: torch.Tensor | None = None,
-        bias: torch.Tensor | None = None,
-        global_scale: torch.Tensor | None = None,
-        sorted_ids: torch.Tensor | None = None,
-        expert_ids: torch.Tensor | None = None,
-        num_tokens_padded: torch.Tensor | None = None,
-        expert_layout: torch.Tensor | None = None,
-        locks: torch.Tensor | None = None,
-        top_k: int = 1,
-        valid_shape_m: int = 0,
-    ) -> torch.Tensor:
-        kernel_id = int(configs[2])
-        kernel = HummingKernel._id2kernel[kernel_id]
-        shape_m = inputs.size(0)
-        if kernel.gemm_type == GemmType.INDEXED:
-            shape_m = inputs.size(0) * top_k
-        shape_n = kernel.shape_n - kernel.pad_shape_n
-        output_dtype = dtypes.torch_dtype_map[kernel.c_dtype]
-        return torch.empty((shape_m, shape_n), dtype=output_dtype, device=inputs.device)
 
 
 def build_humming_launcher_in_bg():

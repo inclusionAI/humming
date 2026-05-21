@@ -38,7 +38,7 @@ include-package-data = true
 packages = {find = {include = ["humming", "humming.*"]}}
 
 [tool.setuptools.package-data]
-"*" = ["*.cu", "*.cuh", "*.cpp", "*.h", ".hpp"]
+"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc"]
 
 [tool.ruff]
 line-length = 100
