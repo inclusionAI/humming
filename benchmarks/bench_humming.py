@@ -63,7 +63,7 @@ def bench_humming(
         if gemm_type == GemmType.DENSE:
             actual_shape_m = shape_m
         elif gemm_type == GemmType.INDEXED:
-            actual_shape_m = shape_m * (1 if is_moe_down else top_k)
+            actual_shape_m = shape_m * (top_k if is_moe_down else 1)
         elif gemm_type == GemmType.GROUPED_CONTIGUOUS:
             actual_shape_m = shape_m * top_k
         else:
