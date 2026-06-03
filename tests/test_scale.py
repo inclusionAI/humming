@@ -19,6 +19,7 @@ from humming.utils.weight import (
     "b_dtype",
     [
         "uint3",
+        "uint4",
         "uint5",
         "uint8",
         "int4",

@@ -46,7 +46,7 @@ private:
   static constexpr uint32_t kNumSubBlocksM = CEIL_DIV(WarpShape::M, 16);
   static constexpr uint32_t kNumSubBlocksN = WarpShape::N / 16;
   static constexpr uint32_t kNumASPerSubBlock = kUseWgmma ? 4 : 2;
-  static constexpr uint32_t kNumBSPerSubBlock = !kUseFusedE8m0Scale && (!kUseWgmma && ElementA::kBits) < 16 ? 4 : 2;
+  static constexpr uint32_t kNumBSPerSubBlock = !kUseFusedE8m0Scale && !kUseWgmma && ElementA::kBits < 16 ? 4 : 2;
   static constexpr uint32_t kNumASPerGroup = kNumSubBlocksM * kNumASPerSubBlock;
   static constexpr uint32_t kNumBSPerGroup = kNumSubBlocksN * kNumBSPerSubBlock;
 
