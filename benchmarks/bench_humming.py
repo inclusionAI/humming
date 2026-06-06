@@ -114,6 +114,9 @@ def bench_humming(
             _, expert_layout, sorted_ids, expert_ids, num_tokens_padded = moe_tensors
 
         def run():
+            valid_shape_m = 0
+            if gemm_type == GemmType.GROUPED_MASKED:
+                valid_shape_m = shape_m * top_k
             return layer(
                 inputs=inputs,  # noqa
                 input_scale=input_scale,  # noqa
@@ -121,6 +124,7 @@ def bench_humming(
                 expert_ids=expert_ids,  # noqa
                 num_tokens_padded=num_tokens_padded,  # noqa
                 expert_layout=expert_layout,  # noqa
+                valid_shape_m=valid_shape_m,
                 compute_config=json.dumps(
                     {
                         "use_f16_accum": use_f16_accum,
@@ -143,6 +147,14 @@ def bench_humming(
         for tensor in layer.state_dict().values():
             if gemm_type == GemmType.DENSE:
                 nbytes += tensor.nbytes
+            elif gemm_type == GemmType.GROUPED_MASKED:
+                assert expert_layout is not None
+                num_actived_experts = int((expert_layout > 0).sum().item())
+                nbytes += tensor.nbytes // num_experts * num_actived_experts
+            elif gemm_type == GemmType.GROUPED_CONTIGUOUS:
+                assert expert_layout is not None
+                num_actived_experts = int((expert_layout[1:] > expert_layout[:-1]).sum().item())
+                nbytes += tensor.nbytes // num_experts * num_actived_experts
             else:
                 assert expert_ids is not None
                 num_actived_experts = len(set(expert_ids.tolist()))

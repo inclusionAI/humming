@@ -809,6 +809,7 @@ class HummingLayer(HummingModule):
         num_tokens_padded: torch.Tensor | None = None,
         expert_layout: torch.Tensor | None = None,
         top_k: int = 1,
+        valid_shape_m: int = 0,
         compute_config: dict | str | None = None,
         tuning_config: dict | list | str | None = None,
     ) -> torch.Tensor:
@@ -822,6 +823,7 @@ class HummingLayer(HummingModule):
             num_tokens_padded=num_tokens_padded,
             expert_layout=expert_layout,
             top_k=top_k,
+            valid_shape_m=valid_shape_m,
             compute_config=compute_config,
             tuning_config=tuning_config,
         )
