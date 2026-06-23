@@ -98,6 +98,15 @@ def bench_marlin(
             )
             _, _, sorted_ids, expert_ids, num_tokens_padded = moe_tensors
 
+            # The marlin kernel always dereferences topk_weights (it does not
+            # check for a null pointer), so pass a real tensor even though
+            # mul_topk_weights=False means the values are unused.
+            topk_weights = torch.ones(
+                (shape_m, top_k),
+                dtype=torch.float32,
+                device="cuda:0",
+            )
+
         def run_dense():
             return vllm_ops.marlin_gemm(
                 a=inputs,  # noqa
@@ -134,7 +143,7 @@ def bench_marlin(
                 sorted_token_ids=sorted_ids,  # noqa
                 expert_ids=expert_ids,  # noqa
                 num_tokens_past_padded=num_tokens_padded,  # noqa
-                topk_weights=None,  # noqa
+                topk_weights=topk_weights,  # noqa
                 mul_topk_weights=False,
                 b_q_type=vllm_scalar_type,
                 size_m=inputs.size(0),  # noqa
