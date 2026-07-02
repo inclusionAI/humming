@@ -404,10 +404,14 @@ def test_int_weight_scale(
 @pytest.mark.parametrize("c_dtype", ["float16", "bfloat16"])
 @pytest.mark.parametrize("weight_scale_group_size", [32, 64])
 @pytest.mark.parametrize("has_global_scale", [True, False])
-def test_fused_e8m0_weight_scale(c_dtype, weight_scale_group_size, has_global_scale):
+@pytest.mark.parametrize("input_scale_group_size", [0, 128])
+@pytest.mark.parametrize("mma_type", ["mma", "wgmma"])
+def test_fused_e8m0_weight_scale(
+    c_dtype, weight_scale_group_size, has_global_scale, input_scale_group_size, mma_type
+):
     a_dtype = dtypes.float8e4m3
     b_dtype = dtypes.float4e2m1
-    skip_if_unsupported(a_dtype=a_dtype)
+    skip_if_unsupported(a_dtype=a_dtype, mma_type=mma_type)
     c_dtype = dtypes.DataType.from_str(c_dtype)
     bs_dtype = dtypes.float8e8m0
 
@@ -451,6 +455,7 @@ def test_fused_e8m0_weight_scale(c_dtype, weight_scale_group_size, has_global_sc
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=1024,
         k=1024,
+        group_size=input_scale_group_size,
         dtype=a_dtype,
     )
 
@@ -465,12 +470,13 @@ def test_fused_e8m0_weight_scale(c_dtype, weight_scale_group_size, has_global_sc
         bs_dtype=bs_dtype,
         num_stages=3,
         use_warp_spec=False,
+        input_scale_group_size=input_scale_group_size,
         weight_scale_group_size=weight_scale_group_size,
         weight_scale_type="group_tensor",
         use_fused_e8m0_scale=True,
         use_tma=False,
         use_cp_async=False,
-        mma_type="mma",
+        mma_type=mma_type,
         use_stream_k=False,
     )
 

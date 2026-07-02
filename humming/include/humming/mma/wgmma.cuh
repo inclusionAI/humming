@@ -114,9 +114,12 @@ public:
       constexpr uint32_t kNumIters = WarpShape::N / (MmaShape::N / 4);
 
       bool scale_d = true;
-      constexpr bool kApplyScaleOnC = !kUseFusedE8m0Scale && ElementA::kBits != 16 &&
-          (LayerConfig::kInputScaleGroupSize > 0 || LayerConfig::kWeightScaleGroupSize > 0);
-      if constexpr (!kUseFusedE8m0Scale && ElementA::kBits != 16 && LayerConfig::kInputScaleGroupSize > 0) {
+      constexpr bool kFusedGroupInputScale =
+          kUseFusedE8m0Scale && ElementA::kBits != 16 && LayerConfig::kInputScaleGroupSize > 0;
+      constexpr bool kApplyScaleOnC = (!kUseFusedE8m0Scale && ElementA::kBits != 16 &&
+          (LayerConfig::kInputScaleGroupSize > 0 || LayerConfig::kWeightScaleGroupSize > 0))
+          || kFusedGroupInputScale;
+      if constexpr (ElementA::kBits != 16 && LayerConfig::kInputScaleGroupSize > 0) {
         scale_d = (iter_id * kPartMmaShapeK) % LayerConfig::kInputScaleGroupSize > 0;
       }
       if constexpr (!kUseFusedE8m0Scale && ElementA::kBits != 16 && LayerConfig::kWeightScaleGroupSize > 0) {
@@ -165,7 +168,7 @@ public:
     constexpr bool kIsGroupWeightScale = LayerConfig::kIsGroupWeightScale;
     constexpr bool kIsBlockWeightScale = LayerConfig::kIsBlockWeightScale;
 
-    if constexpr (ElementA::kBits < 16 && !kUseFusedE8m0Scale && kIsGroupInputScale) {
+    if constexpr (ElementA::kBits < 16 && kIsGroupInputScale) {
       index = 1;
     }
 
