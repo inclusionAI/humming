@@ -300,9 +300,26 @@ public:
         using F8x4 = typename F8Conversion<ElementBS>::scalar_t4;
         F8x4 *bs_vals = reinterpret_cast<F8x4 *>(bs[buffer_id]);
         float4 *dq_bs_vals = reinterpret_cast<float4 *>(dq_bs);
+
+        constexpr uint32_t kFullPackets = kNumBSPerGroup / 4;
+        constexpr uint32_t kTailScales = kNumBSPerGroup % 4;
+
         PRAGMA_UNROLL
-        for (uint32_t i = 0; i < kNumBSPerGroup / 4; i++)
+        for (uint32_t i = 0; i < kFullPackets; i++)
           dq_bs_vals[i] = F8Conversion<ElementBS>::num42float4(bs_vals[i]);
+
+        if constexpr (kTailScales != 0) {
+          uint32_t packed = 0;
+          const uint8_t *src = reinterpret_cast<const uint8_t *>(bs[buffer_id]);
+          uint8_t *dst = reinterpret_cast<uint8_t *>(&packed);
+
+          PRAGMA_UNROLL
+          for (uint32_t i = 0; i < kTailScales; i++)
+            dst[i] = src[kFullPackets * 4 + i];
+
+          dq_bs_vals[kFullPackets] =
+              F8Conversion<ElementBS>::num42float4(*reinterpret_cast<F8x4 *>(&packed));
+        }
       } else if constexpr (!kIsF16Accum && ElementBS::kBits == 16) {
         using F16x2 = typename F16Conversion<ElementBS>::scalar_t2;
         F16x2 *bs_vals = reinterpret_cast<F16x2 *>(bs[buffer_id]);
