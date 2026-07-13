@@ -12,6 +12,8 @@ public:
   using BlockShape = typename Ctx::BlockShape;
   using ElementA = typename Ctx::ElementA;
   using ElementB = typename Ctx::ElementB;
+  using CRegistersType = typename MmaOpClass::CRegisters;
+  using CRegistersArrayType = CRegistersType[WarpShape::M / MmaShape::M][WarpShape::N / MmaShape::N];
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
@@ -32,7 +34,7 @@ public:
   typename MmaOpClass::ARegisters regs_a[2][WarpShape::M / MmaShape::M][kPartMmaShapeK / MmaShape::K];
   uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
   typename MmaOpClass::BRegisters regs_b[2][WarpShape::N / MmaShape::N][kPartMmaShapeK / MmaShape::K];
-  typename MmaOpClass::CRegisters regs_c[WarpShape::M / MmaShape::M][WarpShape::N / MmaShape::N];
+  CRegistersArrayType regs_c;
 
   uint32_t regs_sfa[2][WarpShape::M / MmaShape::M][kPartMmaShapeK / MmaShape::K];
   uint32_t regs_sfb[2][WarpShape::N / MmaShape::N][kPartMmaShapeK / MmaShape::K];
