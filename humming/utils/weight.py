@@ -182,6 +182,7 @@ def prepare_humming_weight(
     padded_shape_n: int | None = None,
     padded_shape_k: int | None = None,
     interleave_mode: int = 3,
+    use_packed_k_layout: bool = False,
 ) -> torch.Tensor:
     is_moe = weight.ndim == 3
     weight = weight.unsqueeze(0) if not is_moe else weight
@@ -235,6 +236,11 @@ def prepare_humming_weight(
         assert zero_point is not None
         group_size_zp = shape_k // zero_point.size(-1)
 
+    if use_packed_k_layout:
+        assert use_wgmma, "use_packed_k_layout requires wgmma"
+        assert a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit (fp8/int8) activation"
+        assert not use_fused_e8m0_scale, "use_packed_k_layout is incompatible with fused-e8m0 scale"
+
     repacked_weight = ops.repack_weight(
         inputs=weight,
         zero_point=zero_point,
@@ -247,6 +253,7 @@ def prepare_humming_weight(
         interleave_mode=interleave_mode,
         use_fused_e8m0_scale=use_fused_e8m0_scale,
         group_size_zp=group_size_zp,
+        use_packed_k_layout=use_packed_k_layout,
     )
 
     return repacked_weight if is_moe else repacked_weight.squeeze(0)

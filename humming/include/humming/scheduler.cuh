@@ -32,6 +32,9 @@ private:
   static constexpr uint32_t K_BLOCKS = ProblemShape::K / BlockShape::K;
 
   static constexpr uint32_t kRasterGroupM = Ctx::kRasterGroupM;
+  static constexpr uint32_t kNumStages = Ctx::TuningConfig::kNumStages;
+
+  static constexpr int32_t ct_gcd(int32_t a, int32_t b) { return b == 0 ? a : ct_gcd(b, a % b); }
 
   uint32_t m_blocks;
   uint32_t mn_blocks;
@@ -100,9 +103,10 @@ public:
       streamk_mnk_total_iters = CEIL_DIV(streamk_mnk_blocks, kNumCtaGroups);
 
       constexpr int32_t blocks_per_group = kMaxGroupSize / BlockShape::K;
-
-      if constexpr (blocks_per_group > 1) {
-        streamk_mnk_total_iters = blocks_per_group * CEIL_DIV(streamk_mnk_total_iters, blocks_per_group);
+      constexpr int32_t bpg = blocks_per_group > 1 ? blocks_per_group : 1;
+      constexpr int32_t align_iters = bpg / ct_gcd(bpg, (int32_t)kNumStages) * (int32_t)kNumStages;
+      if constexpr (align_iters > 1) {
+        streamk_mnk_total_iters = align_iters * CEIL_DIV(streamk_mnk_total_iters, align_iters);
       };
 
       streamk_mnk_next_index = kNumCtaGroups * dp_mn_iters * K_BLOCKS + streamk_mnk_total_iters * (blockIdx.x / kMultiCastSize);

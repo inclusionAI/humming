@@ -99,6 +99,7 @@ struct KernelData {
   bool use_tma_bs;
   bool use_tma_bzp;
   bool use_tma_bias;
+  bool use_packed_k_layout;
 };
 
 struct KernelLaunchData {

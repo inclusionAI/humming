@@ -110,31 +110,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         LayerConfig.__post_init__(self)
         ComputeConfig.__post_init__(self)
         TuningConfig.__post_init__(self)
-
-        # NOTE: these flag overrides must run BEFORE KernelRuntime.__post_init__,
-        # which generates the kernel code / cubin (USE_TMA_AS etc.). Overriding
-        # afterwards would leave the cubin metadata out of sync with the launcher.
-
-        # Channel-wise input scale is a [M] vector (inherently M-contiguous), so it
-        # is always M-major; this lets use_tma_as be enabled for it as well.
-        if self.has_input_scale and self.input_scale_group_size == 0:
-            self.use_m_major_input_scale = True
-
-        # AS TMA needs the M-innermost start coord (the expert token offset) to be
-        # 16B-aligned. dense/grouped satisfy this (grouped pads every expert's token
-        # count to a multiple of 4); indexed gemm gathers rows and cannot, so it
-        # falls back to the cp.async M-major path.
-        if self.use_tma_as and self.is_indexed_gemm:
-            self.use_tma_as = False
-            self.use_m_major_input_scale = True
-
-        # TMA loads of the input scale require it to be M-major ([num_groups, M]).
-        if self.use_tma_as:
-            assert self.use_m_major_input_scale, (
-                "use_tma_as requires use_m_major_input_scale=True "
-                "(input scale must be stored M-major [num_groups, M])"
-            )
-
         KernelRuntime.__post_init__(self)
 
     def init_kernel(self) -> None:
@@ -340,6 +315,21 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.gemm_type = GemmType.DENSE
         assert self.gemm_type is not None, "gemm_type must be specify for MoE GEMM"
 
+        if self.has_input_scale and self.input_scale_group_size == 0:
+            self.use_m_major_input_scale = True
+
+        if self.use_tma_as and self.is_indexed_gemm:
+            self.use_tma_as = False
+            self.use_m_major_input_scale = True
+
+        if self.use_tma_as:
+            assert self.use_m_major_input_scale, "use_tma_as requires use_m_major_input_scale=True"
+
+        if self.use_packed_k_layout:
+            warp_k = self.warp_shape[2]
+            for gs in (self.input_scale_group_size, self.weight_scale_group_size):
+                assert gs == 0 or gs >= warp_k
+
     def __call__(self):
         msg = (
             "don't call HummingKernel object directly, "
@@ -409,11 +399,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
         res = []
         if os.environ.get("HUMMING_DISABLE_PARALLEL_BUILD", "0") != "1":
-            # Parallelize kernel compilation using multiple threads,
-            # but ensure kernel loading occurs in the main thread to prevent CUDA context issues.
-            # (KernelRuntime would skip loading when running in child thread).
-            # Capture the current CUDA device so worker threads use the correct GPU;
-            # CUDA device is thread-local and new threads default to GPU 0.
             _current_device = torch.cuda.current_device()
             with ThreadPoolExecutor(
                 max_workers=16,

@@ -55,12 +55,15 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kUseWmma = LayerConfig::kMmaType == MmaType::MMA;
   static constexpr bool kUseWgmma = LayerConfig::kMmaType == MmaType::WGMMA;
 
+  static constexpr bool kUsePackedKLayout = LayerConfig::kUsePackedKLayout;
+  static constexpr uint32_t kPackedKFactor = kUsePackedKLayout ? 2 : 1;
+
   static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;
   static constexpr uint32_t N_WARPS = BlockShape::N / WarpShape::N;
   static constexpr uint32_t K_WARPS = BlockShape::K / WarpShape::K;
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
-  static constexpr uint32_t kWarpIters = WarpShape::K / kPartMmaShapeK;
+  static constexpr uint32_t kWarpIters = kUsePackedKLayout ? (WarpShape::N / 16) : (WarpShape::K / kPartMmaShapeK);
 
   static constexpr uint32_t kUseWarpSpec = TuningConfig_::kUseWarpSpec;
   static constexpr uint32_t kNumThreads = TuningConfig_::kNumThreads;

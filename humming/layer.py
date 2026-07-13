@@ -154,6 +154,13 @@ class HummingLayerMeta(LayerConfig):
             self.is_group_weight_scale = True
             self.is_tensor_weight_scale = True
 
+        self.use_packed_k_layout = (
+            self.mma_type == MmaType.WGMMA
+            and self.a_dtype.num_bits == 8
+            and not self.use_fused_e8m0_scale
+            and self.weight_scale_group_size == 128
+        )
+
         self._meta_str = self.to_str()
 
 
@@ -434,6 +441,7 @@ class HummingLayerMethod:
             use_fused_e8m0_scale=meta.use_fused_e8m0_scale,
             packed=True,
             interleave_mode=interleave_mode,
+            use_packed_k_layout=meta.use_packed_k_layout,
         )
 
         if weight_scale is not None:

@@ -31,7 +31,9 @@ class Sm90Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        if use_f16_accum:
+        if meta.use_packed_k_layout:
+            max_block_m = 128
+        elif use_f16_accum:
             max_block_m = 256
         else:
             max_block_m = 176
@@ -167,9 +169,11 @@ class Sm90Heuristics(DeviceHeuristics):
     ):
         if meta.a_dtype.num_bits == 16:
             func = cls.get_config1
+        elif meta.use_packed_k_layout:
+            func = cls.get_config1
         elif meta.input_scale_group_size == 0 and meta.weight_scale_group_size == 0:
             func = cls.get_config1
-        elif meta.use_fused_e8m0_scale:
+        elif meta.use_fused_e8m0_scale and meta.input_scale_group_size == 0:
             func = cls.get_config1
         else:
             func = cls.get_config2

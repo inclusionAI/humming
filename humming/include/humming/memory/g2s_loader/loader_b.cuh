@@ -18,11 +18,11 @@ private:
   static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
   static constexpr uint32_t kMultiCastSizeB = Ctx::kMultiCastSizeB;
 
-  static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
-  static constexpr uint32_t kSmemStride = BlockShape::N * kPartMmaShapeK * ElementB::kBits / 32 / 4;
-  static constexpr uint32_t kGmemStride = ProblemShape::N * kPartMmaShapeK * ElementB::kBits / 32 / 4;
+  static constexpr uint32_t kPackSizeK = Ctx::kUsePackedKLayout ? 64 : (256 / ElementA::kBits);
+  static constexpr uint32_t kSmemStride = BlockShape::N * kPackSizeK * ElementB::kBits / 32 / 4;
+  static constexpr uint32_t kGmemStride = ProblemShape::N * kPackSizeK * ElementB::kBits / 32 / 4;
   static constexpr uint32_t kGmemExpertStride = ProblemShape::N * ProblemShape::K * ElementB::kBits / 32 / 4;
-  static constexpr uint32_t kNumInt4s = kSmemStride * BlockShape::K / kPartMmaShapeK;
+  static constexpr uint32_t kNumInt4s = kSmemStride * BlockShape::K / kPackSizeK;
 
 public:
   Ctx &ctx;
@@ -71,17 +71,17 @@ public:
 
   CUDA_INLINE
   void advance() {
-    row_offset += BlockShape::K / kPartMmaShapeK;
-    gmem_ptr += kGmemStride * BlockShape::K / kPartMmaShapeK;
+    row_offset += BlockShape::K / kPackSizeK;
+    gmem_ptr += kGmemStride * BlockShape::K / kPackSizeK;
   }
 
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t n_block_id, uint32_t k_block_id) {
-    row_offset = expert_id * (ProblemShape::K / kPartMmaShapeK) + k_block_id * (BlockShape::K / kPartMmaShapeK);
-    col_offset = n_block_id * (BlockShape::N / 32);
+    row_offset = expert_id * (ProblemShape::K / kPackSizeK) + k_block_id * (BlockShape::K / kPackSizeK);
+    col_offset = n_block_id * (BlockShape::N * ElementB::kBits / 32);
 
     uint64_t gmem_offset = expert_id * kGmemExpertStride;
-    gmem_offset += n_block_id * kSmemStride + k_block_id * (kGmemStride * BlockShape::K / kPartMmaShapeK);
+    gmem_offset += n_block_id * kSmemStride + k_block_id * (kGmemStride * BlockShape::K / kPackSizeK);
     gmem_ptr = gmem_ptr_raw + gmem_offset;
   }
 };
