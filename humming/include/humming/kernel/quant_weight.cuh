@@ -208,8 +208,17 @@ __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_
     } else if constexpr (!kHasZeroPoint) {
       float min_abs_val = fminf(max_val, fabsf(min_val));
       float dtype_max_val = get_data_type_max_num<TargetType>();
-      float scale_val1 = max_abs_val / (dtype_max_val + 1.0);
-      float scale_val2 = min_abs_val / (dtype_max_val + 0.0);
+      float scale_val1, scale_val2;
+      if constexpr (TargetType::kBits == 1) {
+        // 1-bit has no positive code (dtype_max_val == 0) and
+        // quant_buffer does not clamp: pick a scale that rounds the
+        // positive side to code 0 and the negative side to code -1.
+        scale_val1 = max_abs_val / (dtype_max_val + 1.499);
+        scale_val2 = min_abs_val / (dtype_max_val + 0.499);
+      } else {
+        scale_val1 = max_abs_val / (dtype_max_val + 1.0);
+        scale_val2 = min_abs_val / (dtype_max_val + 0.0);
+      }
 
       scale_val = max(scale_val1, scale_val2);
       if (max_val > fabsf(min_val)) scale_val = -scale_val;

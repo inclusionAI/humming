@@ -16,6 +16,7 @@ public:
   CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t pred) {
     uint32_t warp_id = ctx.warp_id();
+    uint32_t n_warp_id = ctx.n_warp_id();
     uint32_t lane_id = ctx.lane_id();
     uint32_t bias_sh_rd = Ctx::kUseWgmma ? (lane_id / 8) : (lane_id % 4);
 

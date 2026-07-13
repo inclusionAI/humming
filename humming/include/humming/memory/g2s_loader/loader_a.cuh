@@ -68,7 +68,7 @@ public:
       const uint32_t col_offset2 = col_offset + (1024 / ElementA::kBits) * block_idx;
       if constexpr (kMultiCastSizeA == 1) {
         tma_load_2d(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
-      } else if (ctx.cluster_rank == 0) {
+      } else if (blockIdx.x % kMultiCastSizeA == 0) {
         tma_load_2d<kMultiCastSizeA>(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
       }
     }
