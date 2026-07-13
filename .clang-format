@@ -11,7 +11,7 @@ IndentCaseLabels: true
 AllowShortBlocksOnASingleLine: Always
 AllowShortIfStatementsOnASingleLine: AllIfsAndElse
 AllowShortCaseLabelsOnASingleLine: true
-AllowShortFunctionsOnASingleLine: None
+AllowShortFunctionsOnASingleLine: All
 AllowAllParametersOfDeclarationOnNextLine: false
 AllowAllConstructorInitializersOnNextLine: false
 AllowAllArgumentsOnNextLine: true

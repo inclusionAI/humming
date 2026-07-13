@@ -36,6 +36,7 @@ cu13 = [
 ]
 
 [tool.setuptools_scm]
+fallback_version = "0.0.0"
 version_scheme = "post-release"
 local_scheme = "node-and-date"
 version_file = "humming/_version.py"

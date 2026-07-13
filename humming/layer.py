@@ -495,7 +495,7 @@ class HummingLayerMethod:
             inputs=inputs,
             outputs=quanted_input,
             dtype=str(meta.a_dtype),
-            group_size=None,
+            group_size=meta.input_scale_group_size or None,
         )
         return quanted_input, input_scale
 

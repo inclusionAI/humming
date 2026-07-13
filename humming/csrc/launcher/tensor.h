@@ -329,7 +329,7 @@ inline CUtensorMap make_tma_desc_bzp(std::optional<Tensor> &tensor_, KernelData 
 
   auto tensor = tensor_.value();
 
-  return make_tma_desc(tensor, {16, block_shape_n * num_bits / 32, num_groups});
+  return make_tma_desc(tensor, {block_shape_n * num_bits / 32, num_groups});
 }
 
 inline CUtensorMap make_tma_desc_bias(std::optional<Tensor> &tensor_, KernelData &kernel_data) {

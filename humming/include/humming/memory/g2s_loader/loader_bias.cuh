@@ -3,20 +3,23 @@
 #include <humming/utils/all.cuh>
 
 
-template <class ProblemShape, class BlockShape, class TuningConfig>
+template <class Ctx>
 class G2SMemoryLoaderBias {
 private:
-  static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
-  static constexpr bool kUseTma = TuningConfig::kUseTmaBias;
-  static constexpr bool kUseCpAsync = TuningConfig::kUseCpAsync;
-  static constexpr uint32_t kNumLoadThreads = TuningConfig::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = TuningConfig::kNumThreads - kNumLoadThreads;
+  using ProblemShape = typename Ctx::ProblemShape;
+  using BlockShape = typename Ctx::BlockShape;
+
+  static constexpr bool kUseTma = Ctx::kUseTmaBias;
+  static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
+  static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
 
   static constexpr uint32_t kSmemStride = BlockShape::N * 16 / 32 / 4;
   static constexpr uint32_t kGmemStride = ProblemShape::N * 16 / 32 / 4;
   static constexpr uint32_t kNumInt4s = kSmemStride;
 
 public:
+  Ctx &ctx;
   const CUtensorMap *tensor_map_ptr;
   const int4 *gmem_ptr_raw;
   const int4 *gmem_ptr;
@@ -24,7 +27,8 @@ public:
   uint32_t offset;
 
   CUDA_INLINE
-  G2SMemoryLoaderBias(const void *ptr) {
+  G2SMemoryLoaderBias(Ctx &ctx) : ctx(ctx) {
+    const void *ptr = ctx.params.bias;
     if constexpr (kUseTma) {
       tensor_map_ptr = reinterpret_cast<const CUtensorMap *>(ptr);
     } else {
@@ -40,7 +44,7 @@ public:
 
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
-    if (threadIdx.x == kLoadThreadOffset) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, offset);
+    if (ctx.load_thread_id() == 0) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, offset);
   }
 
   CUDA_INLINE

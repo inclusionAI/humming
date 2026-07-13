@@ -3,31 +3,31 @@
 #include <humming/utils/all.cuh>
 
 
-template <
-    class MmaOpClass_, class SharedStorage, class ArithClass,
-    class WarpShape, class BlockShape,
-    class ElementA, class ElementB,
-    class LayerConfig>
+template <class Ctx, class ArithClass>
 struct MXMMA {
 public:
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using MmaShape = typename MmaOpClass::MmaShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using BlockShape = typename Ctx::BlockShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementB = typename Ctx::ElementB;
+
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
-  static constexpr uint32_t kScaleVec = MmaOpClass_::kScaleVec;
-  static constexpr bool kNativeMixed = MmaOpClass_::kNativeMixed;
+  static constexpr uint32_t kScaleVec = MmaOpClass::kScaleVec;
+  static constexpr bool kNativeMixed = MmaOpClass::kNativeMixed;
 
-  static constexpr uint32_t kAsGroup = LayerConfig::kInputScaleGroupSize;
+  static constexpr uint32_t kAsGroup = Ctx::kInputScaleGroupSize;
   static constexpr uint32_t kAsBlockGroups = kAsGroup > 0 ? BlockShape::K / kAsGroup : 1;
   static constexpr uint32_t kAsBlocksPerWord = kAsBlockGroups >= 4 ? 1 : 4 / kAsBlockGroups;
   static constexpr uint32_t kWarpKIters = WarpShape::K / kPartMmaShapeK;
 
-  static constexpr bool kHasZeroPoint = LayerConfig::kHasZeroPoint;
-  static constexpr bool kIsFpZeroPoint = LayerConfig::kIsFpZeroPoint;
-  static constexpr bool kUseFusedE8m0Scale = LayerConfig::kUseFusedE8m0Scale;
+  static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
+  static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
+  static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
 
-  using MmaOpClass = MmaOpClass_;
-  using MmaShape = typename MmaOpClass::MmaShape;
-
-  SharedStorage &smem;
+  Ctx &ctx;
   ArithClass &arith;
   typename MmaOpClass::ARegisters regs_a[2][WarpShape::M / MmaShape::M][kPartMmaShapeK / MmaShape::K];
   uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
@@ -40,8 +40,8 @@ public:
   uint32_t k_block_idx = 0;
 
   CUDA_INLINE
-  MXMMA(SharedStorage &smem, ArithClass &arith)
-      : smem(smem), arith(arith) {
+  MXMMA(Ctx &ctx, ArithClass &arith)
+      : ctx(ctx), arith(arith) {
   }
 
   CUDA_INLINE

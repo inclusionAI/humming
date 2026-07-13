@@ -3,21 +3,22 @@
 #include <humming/utils/all.cuh>
 
 
-template <
-    class SharedStorage, class ProblemShape, class BlockShape, class PadShape,
-    class ElementA, class ComputeConfig, class TuningConfig>
+template <class Ctx>
 class G2SMemoryLoaderA {
 private:
-  static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
-  static constexpr bool kUseTma = TuningConfig::kUseTmaA;
-  static constexpr bool kUseCpAsync = TuningConfig::kUseCpAsync;
-  static constexpr bool kIsDenseGemm = ComputeConfig::kGemmType == GemmType::DENSE;
-  static constexpr bool kIsIndexedGemm = ComputeConfig::kGemmType == GemmType::INDEXED;
-  static constexpr bool kIsGroupedGemm = ComputeConfig::kGemmType == GemmType::GROUPED_CONTIGUOUS || ComputeConfig::kGemmType == GemmType::GROUPED_MASKED;
+  using SharedStorage = typename Ctx::SharedStorage;
+  using ProblemShape = typename Ctx::ProblemShape;
+  using BlockShape = typename Ctx::BlockShape;
+  using PadShape = typename Ctx::PadShape;
+  using ElementA = typename Ctx::ElementA;
 
-  static constexpr uint32_t kNumLoadThreads = TuningConfig::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = TuningConfig::kNumThreads - kNumLoadThreads;
-  static constexpr uint32_t kMultiCastSizeA = TuningConfig::kMultiCastSizeA;
+  static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
+  static constexpr bool kUseTma = Ctx::kUseTmaA;
+  static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
+  static constexpr bool kIsIndexedGemm = Ctx::kIsIndexedGemm;
+
+  static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
+  static constexpr uint32_t kMultiCastSizeA = Ctx::kMultiCastSizeA;
 
   static constexpr uint32_t kSmemStride = BlockShape::K * ElementA::kBits / 32 / 4;
   static constexpr uint32_t kGmemStride = (ProblemShape::K - PadShape::K) * ElementA::kBits / 32 / 4;
@@ -29,22 +30,21 @@ private:
   static constexpr uint32_t kLoadIters = CEIL_DIV(kNumInt4s, kNumLoadThreads);
 
 public:
-  SharedStorage &smem;
-  const uint32_t thread_id = threadIdx.x - kLoadThreadOffset;
+  Ctx &ctx;
   const CUtensorMap *tensor_map_ptr;
   const int4 *gmem_ptr_raw;
   const int4 *gmem_ptr;
 
   uint32_t shape_m;
   uint32_t block_shape_m;
-  uint32_t load_row_index[kUseTma ? CEIL_DIV(BlockShape::M, kNumLoadThreads) : kLoadIters];
+  uint32_t load_row_index[kLoadIters];
   uint32_t row_offset;
   uint32_t col_offset;
-  uint32_t cluster_rank = blockIdx.x % kMultiCastSizeA;
 
   CUDA_INLINE
-  G2SMemoryLoaderA(const void *ptr, SharedStorage &smem, uint32_t shape_m)
-      : smem(smem), shape_m(shape_m) {
+  G2SMemoryLoaderA(Ctx &ctx)
+      : ctx(ctx), shape_m(ctx.params.shape_m) {
+    const void *ptr = ctx.params.a;
     if constexpr (kUseTma) {
       tensor_map_ptr = reinterpret_cast<const CUtensorMap *>(ptr);
     } else {
@@ -61,13 +61,14 @@ public:
 
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
+    uint32_t thread_id = ctx.load_thread_id();
     if (thread_id < kNumTmaLoadsPerLine) {
       const uint32_t block_idx = thread_id;
       const uint32_t smem_offset = BlockShape::M * 8 * block_idx;
       const uint32_t col_offset2 = col_offset + (1024 / ElementA::kBits) * block_idx;
       if constexpr (kMultiCastSizeA == 1) {
         tma_load_2d(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
-      } else if (cluster_rank == 0) {
+      } else if (ctx.cluster_rank == 0) {
         tma_load_2d<kMultiCastSizeA>(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
       }
     }
@@ -85,6 +86,7 @@ public:
   CUDA_INLINE
   void load_legacy_swizzled_128B(int4 *smem_ptr, uint32_t stage_id) {
     static_assert(BlockShape::K * ElementA::kBits >= 1024);
+    uint32_t thread_id = ctx.load_thread_id();
     uint32_t smem_uint = offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
     uint32_t smem_base = smem_uint / 128 % 8;
     uint32_t smem_swizzled_col = (thread_id % 8) ^ (((thread_id % 64) / 8 + smem_base)) % 8;
@@ -115,6 +117,7 @@ public:
   CUDA_INLINE
   void load_legacy_swizzled_64B(int4 *smem_ptr, uint32_t stage_id) {
     static_assert(BlockShape::K * ElementA::kBits == 512);
+    uint32_t thread_id = ctx.load_thread_id();
     uint32_t smem_uint = offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
     uint32_t smem_base = smem_uint / 128 % 4;
     uint32_t smem_swizzled_col = (thread_id % 8) ^ (((thread_id % 32) / 8 + smem_base) % 4);
@@ -150,7 +153,7 @@ public:
 
   CUDA_INLINE
   void seek(uint32_t m_block_id, uint32_t k_block_id, uint32_t current_shape_m, uint32_t m_offset) {
-    if constexpr (kIsGroupedGemm) {
+    if constexpr (Ctx::kIsGroupedGemm) {
       shape_m = current_shape_m;
       row_offset = m_offset;
     } else {
@@ -165,6 +168,7 @@ public:
 
     if constexpr (kIsIndexedGemm) {
       static_assert(!kUseTma);
+      uint32_t thread_id = ctx.load_thread_id();
 
       PRAGMA_UNROLL
       for (uint32_t i = 0; i < kLoadIters; i++) {
@@ -178,7 +182,7 @@ public:
         } else {
           gmem_row = smem_row % (BlockShape::M / 2) * 2 + smem_col / 4;
         }
-        load_row_index[i] = smem.rd_row_index[gmem_row];
+        load_row_index[i] = ctx.smem.rd_row_index[gmem_row];
       }
     }
   }

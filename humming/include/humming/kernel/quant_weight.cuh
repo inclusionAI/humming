@@ -232,9 +232,9 @@ __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_
     }
 
     if constexpr (kUseUE8M0Scale) {
-      uint32_t scale_val_uint = *reinterpret_cast<uint32_t *>(&scale_val);
-      scale_val_uint = (scale_val_uint & 0x7F800000) + 1;
-      scale_val = *reinterpret_cast<float *>(&scale_val);
+      uint32_t scale_val_uint = __float_as_uint(scale_val);
+      scale_val_uint = (scale_val_uint + 0x007FFFFF) & 0x7F800000;
+      scale_val = __uint_as_float(scale_val_uint);
     }
 
     if (threadIdx.x == 0) {
@@ -250,8 +250,8 @@ __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_
 
       if constexpr (kHasZeroPoint && !kIsFpZeroPoint) {
         zero_point_ptr[blockIdx.x] = static_cast<uint32_t>(zero_point);
-      } else {
-        zero_point_ptr[blockIdx.x] = *reinterpret_cast<uint32_t *>(&zero_point_float);
+      } else if constexpr (kHasZeroPoint && kIsFpZeroPoint) {
+        zero_point_ptr[blockIdx.x] = __float_as_uint(zero_point_float);
       }
     }
   } else {

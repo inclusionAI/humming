@@ -3,34 +3,35 @@
 #include <humming/utils/all.cuh>
 
 
-template <
-    class MmaOpClass_, class SharedStorage, class ArithClass,
-    class WarpShape,
-    class ElementA, class ElementB,
-    class LayerConfig>
+template <class Ctx, class ArithClass>
 struct WMMA {
 public:
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using MmaShape = typename Ctx::MmaShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementB = typename Ctx::ElementB;
+  using CRegistersType = typename MmaOpClass::CRegisters;
+  using CRegistersArrayType = CRegistersType[WarpShape::M / MmaShape::M][WarpShape::N / MmaShape::N];
+
+  static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
+  static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
+  static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
+  static constexpr bool kNativeMixed = MmaOpClass::kNativeMixed;
+
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
 
-  static constexpr bool kHasZeroPoint = LayerConfig::kHasZeroPoint;
-  static constexpr bool kIsFpZeroPoint = LayerConfig::kIsFpZeroPoint;
-  static constexpr bool kUseFusedE8m0Scale = LayerConfig::kUseFusedE8m0Scale;
-  static constexpr bool kNativeMixed = MmaOpClass_::kNativeMixed;
-
-  using MmaOpClass = MmaOpClass_;
-  using MmaShape = typename MmaOpClass::MmaShape;
-
-  SharedStorage &smem;
+  Ctx &ctx;
   ArithClass &arith;
   typename MmaOpClass::ARegisters regs_a[2][WarpShape::M / MmaShape::M][kPartMmaShapeK / MmaShape::K];
   uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
   typename MmaOpClass::BRegisters regs_b[2][WarpShape::N / MmaShape::N][kPartMmaShapeK / MmaShape::K];
-  typename MmaOpClass::CRegisters regs_c[2][WarpShape::M / MmaShape::M][WarpShape::N / MmaShape::N];
+  CRegistersArrayType regs_c[2];
 
   CUDA_INLINE
-  WMMA(SharedStorage &smem, ArithClass &arith)
-      : smem(smem), arith(arith) {
+  WMMA(Ctx &ctx, ArithClass &arith)
+      : ctx(ctx), arith(arith) {
   }
 
   CUDA_INLINE
@@ -60,7 +61,7 @@ public:
       fused_dequant_for_mxfp4<ElementA, WarpShape::N / 16, false>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
     } else {
       if constexpr (ElementB::kBits == 1 && kNumWarpShapeNSplits == 2) {
-        regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (threadIdx.x / 32 % 2 * 8);
+        regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (ctx.warp_id() % 2 * 8);
       }
 
       PRAGMA_UNROLL
@@ -117,9 +118,9 @@ public:
   template <class T = uint32_t>
   CUDA_INLINE T *final_regs_c_as_ptr() {
     uint32_t index = 0;
-    constexpr bool kIsGroupInputScale = LayerConfig::kInputScaleGroupSize > 0;
-    constexpr bool kIsGroupWeightScale = LayerConfig::kIsGroupWeightScale;
-    constexpr bool kIsBlockWeightScale = LayerConfig::kIsBlockWeightScale;
+    constexpr bool kIsGroupInputScale = Ctx::kInputScaleGroupSize > 0;
+    constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
+    constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
 
     if constexpr (ElementA::kBits < 16 && kIsGroupInputScale) {
       index = 1;

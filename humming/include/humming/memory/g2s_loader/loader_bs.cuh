@@ -3,27 +3,28 @@
 #include <humming/utils/all.cuh>
 
 
-template <
-    class MmaOpClass,
-    class ProblemShape, class BlockShape,
-    class ElementBS,
-    class LayerConfig, class TuningConfig>
+template <class Ctx>
 class G2SMemoryLoaderBS {
 private:
-  static constexpr bool kUseMxmma = MmaOpClass::kMmaType == MmaType::MXMMA;
-  static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
-  static constexpr bool kUseTma = TuningConfig::kUseTmaBS;
-  static constexpr bool kUseCpAsync = TuningConfig::kUseCpAsync;
-  static constexpr uint32_t kNumLoadThreads = TuningConfig::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = TuningConfig::kNumThreads - kNumLoadThreads;
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using ProblemShape = typename Ctx::ProblemShape;
+  using BlockShape = typename Ctx::BlockShape;
+  using ElementBS = typename Ctx::ElementBS;
 
-  static constexpr bool kIsChannel = LayerConfig::kIsChannelWeightScale;
-  static constexpr bool kIsGroup = LayerConfig::kIsGroupWeightScale;
-  static constexpr bool kIsBlock = LayerConfig::kIsBlockWeightScale;
-  static constexpr bool kIsTensor = LayerConfig::kIsTensorWeightScale;
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
+  static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
+  static constexpr bool kUseTma = Ctx::kUseTmaBS;
+  static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
+  static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
+
+  static constexpr bool kIsChannel = Ctx::kIsChannelWeightScale;
+  static constexpr bool kIsGroup = Ctx::kIsGroupWeightScale;
+  static constexpr bool kIsBlock = Ctx::kIsBlockWeightScale;
+  static constexpr bool kIsTensor = Ctx::kIsTensorWeightScale;
   static constexpr bool kIsGroupOrBlock = kIsGroup || kIsBlock;
-  static constexpr uint32_t kGroupSize = !kIsGroupOrBlock ? ProblemShape::K : LayerConfig::kWeightScaleGroupSize;
-  static constexpr uint32_t kGroupSizeN = kIsBlock ? LayerConfig::kWeightScaleGroupSizeN : 1;
+  static constexpr uint32_t kGroupSize = !kIsGroupOrBlock ? ProblemShape::K : Ctx::kWeightScaleGroupSize;
+  static constexpr uint32_t kGroupSizeN = kIsBlock ? Ctx::kWeightScaleGroupSizeN : 1;
 
   static constexpr uint32_t kSmemStride = CEIL_DIV(BlockShape::N, kGroupSizeN) * ElementBS::kBits / 32 / 4;
   static constexpr uint32_t kGmemStride = ProblemShape::N * ElementBS::kBits / 32 / 4;
@@ -41,6 +42,7 @@ private:
   static constexpr uint32_t kMxNumInt4s = kMxSmemStride * kNumGroups / (kMxScaleVec == 1 ? 2 : 4);
 
 public:
+  Ctx &ctx;
   const CUtensorMap *tensor_map_ptr;
   const int4 *gmem_ptr_raw;
   const int4 *gmem_ptr;
@@ -50,7 +52,8 @@ public:
   uint32_t counter = 0;
 
   CUDA_INLINE
-  G2SMemoryLoaderBS(const void *ptr) {
+  G2SMemoryLoaderBS(Ctx &ctx) : ctx(ctx) {
+    const void *ptr = ctx.params.bs;
     if constexpr (kUseTma) {
       tensor_map_ptr = reinterpret_cast<const CUtensorMap *>(ptr);
     } else {
@@ -68,7 +71,7 @@ public:
 
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
-    if (threadIdx.x == kLoadThreadOffset) {
+    if (ctx.load_thread_id() == 0) {
       if constexpr (!kUseMxmma) tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       else tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
     }
@@ -81,13 +84,13 @@ public:
       constexpr uint32_t kNW = CEIL_DIV(BlockShape::N, kGroupSizeN);
       constexpr uint32_t kNumScales = CEIL_DIV(BlockShape::K, kGroupSize) * kNW;
       static_assert(kNumScales <= kNumLoadThreads);
-      const uint32_t thread_id = threadIdx.x - kLoadThreadOffset;
+      const uint32_t thread_id = ctx.load_thread_id();
       if (thread_id < kNumScales) {
         const uint32_t *gmem_ptr_load = reinterpret_cast<const uint32_t *>(gmem_ptr_raw);
         uint32_t *smem_ptr_load = reinterpret_cast<uint32_t *>(smem_ptr);
         uint32_t gmem_row = row_offset + thread_id / kNW;
         uint32_t gmem_col = col_offset + thread_id % kNW;
-        legacy_load<TuningConfig::kUseCpAsync>(&gmem_ptr_load[gmem_row * kLoadStride + gmem_col], &smem_ptr_load[thread_id]);
+        legacy_load<Ctx::kUseCpAsync>(&gmem_ptr_load[gmem_row * kLoadStride + gmem_col], &smem_ptr_load[thread_id]);
       }
     } else if constexpr (kUseMxmma) {
       legacy_load_2d<

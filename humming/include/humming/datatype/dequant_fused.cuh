@@ -22,9 +22,8 @@ CUDA_INLINE uint2 fused_dequant_single_for_mxfp4<Float8E4M3>(const uint32_t qb, 
       __byte_perm(exp_offset_buffer1, exp_offset_buffer2, qb >> 16)};
 
   uint32_t res[2] = {
-    lop3_and_or(qb << 4, 0x80808080, exp_offsets[0]),
-    lop3_and_or(qb, 0x80808080, exp_offsets[1])
-  };
+      lop3_and_or(qb << 4, 0x80808080, exp_offsets[0]),
+      lop3_and_or(qb, 0x80808080, exp_offsets[1])};
 
   return *reinterpret_cast<uint2 *>(res);
 }

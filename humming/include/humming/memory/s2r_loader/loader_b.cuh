@@ -3,38 +3,41 @@
 #include <humming/utils/all.cuh>
 
 
-template <class BlockShape, class WarpShape, class ElementA, class ElementB, class TuningConfig>
+template <class Ctx>
 class S2RMemoryLoaderB {
 private:
-  static constexpr uint32_t kNumMathThreads = TuningConfig::kNumMathThreads;
-  static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
-  static constexpr uint32_t kWarpItersK = WarpShape::K / kPartMmaShapeK;
+  using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementB = typename Ctx::ElementB;
 
-  static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;
-  static constexpr uint32_t N_WARPS = BlockShape::N / WarpShape::N;
-  static constexpr uint32_t K_WARPS = BlockShape::K / WarpShape::K;
+  static constexpr uint32_t N_WARPS = Ctx::N_WARPS;
+  static constexpr uint32_t K_WARPS = Ctx::K_WARPS;
 
   static constexpr bool kIsWarpHalfGroup = WarpShape::N == ElementA::kBits * 2;
   static constexpr bool kLoadHalfGroup = ElementB::kBits % 2 == 0 && kIsWarpHalfGroup;
   static constexpr uint32_t TRUE_N_WARPS = kIsWarpHalfGroup ? N_WARPS / 2 : N_WARPS;
-  static constexpr uint32_t kSmemStride = BlockShape::N * kPartMmaShapeK * ElementB::kBits / 32 / 4;
+  static constexpr uint32_t kSmemStride = BlockShape::N * Ctx::kPartMmaShapeK * ElementB::kBits / 32 / 4;
   static constexpr uint32_t kNumIntsPerThread = ElementB::kBits / (kLoadHalfGroup ? 2 : 1);
   using LoadType = typename LoadTypeChooser<kNumIntsPerThread * 4>::Type;
   static constexpr uint32_t kLoadIters = kNumIntsPerThread / (sizeof(LoadType) / 4);
 
+  Ctx &ctx;
+
 public:
+  CUDA_INLINE S2RMemoryLoaderB(Ctx &ctx) : ctx(ctx) {}
+
   CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t iter_id) {
-    uint32_t warp_id = (threadIdx.x / 32);
-    uint32_t n_warp_id = warp_id % N_WARPS;
+    uint32_t warp_id = ctx.warp_id();
+    uint32_t n_warp_id = ctx.n_warp_id();
     if (kIsWarpHalfGroup) n_warp_id = n_warp_id / 2;
-    uint32_t lane_id = threadIdx.x % 32;
+    uint32_t lane_id = ctx.lane_id();
     constexpr uint32_t warp_weight_blocks = MAX(WarpShape::N / (ElementA::kBits * 4), 1);
     uint32_t idx = warp_weight_blocks * 32 * n_warp_id + lane_id;
 
     if constexpr (K_WARPS > 1) {
-      uint32_t k_warp_id = (threadIdx.x / (kNumMathThreads / K_WARPS));
-      idx = TRUE_N_WARPS * 32 * warp_weight_blocks * kWarpItersK * k_warp_id + idx;
+      idx = TRUE_N_WARPS * 32 * warp_weight_blocks * Ctx::kWarpIters * ctx.k_warp_id() + idx;
     }
 
     uint32_t smem_start_idx = idx * kLoadIters;

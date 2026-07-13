@@ -68,33 +68,32 @@ CUDA_INLINE void shlf_trans_mma_c(T &vals) {
 }
 
 
-template <
-    class SharedStorage,
-    class MmaOpClass, class ArithClass,
-    class BlockShape, class WarpShape,
-    class ElementA, class ElementC,
-    class LayerConfig, class TuningConfig>
-class EpilogueSmemWriter : F16Conversion<ElementC> {
+template <class Ctx, class MMA, class ArithClass>
+class EpilogueSmemWriter : F16Conversion<typename Ctx::ElementC> {
 private:
-  static constexpr bool kUseWgmma = MmaOpClass::kMmaType == MmaType::WGMMA;
+  using SharedStorage = typename Ctx::SharedStorage;
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementC = typename Ctx::ElementC;
+
+  static constexpr bool kUseWgmma = Ctx::kUseWgmma;
 
   using scalar_t = typename F16Conversion<ElementC>::scalar_t;
   using scalar_t2 = typename F16Conversion<ElementC>::scalar_t2;
   using MmaShape = typename MmaOpClass::MmaShape;
   using ValTypeC = typename MmaOpClass::ValTypeC;
-  using CRegistersType = typename MmaOpClass::CRegisters;
-  using MMA_CRegistersArrayType = CRegistersType[MAX(WarpShape::M / MmaShape::M, 1)][MAX(WarpShape::N / MmaShape::N, 1)];
-  using WGMMA_CRegistersArrayType = CRegistersType[WarpShape::N * 4 / MmaShape::N][WarpShape::M / MmaShape::M];
-  using CRegistersArrayType = std::conditional_t<kUseWgmma, WGMMA_CRegistersArrayType, MMA_CRegistersArrayType>;
+  using CRegistersArrayType = typename MMA::CRegistersArrayType;
 
-  static constexpr uint32_t kNumWriteSplits = TuningConfig::kNumWriteSplits;
-  static constexpr uint32_t kNumMathThreads = TuningConfig::kNumMathThreads;
+  static constexpr uint32_t kNumWriteSplits = Ctx::kNumWriteSplits;
+  static constexpr uint32_t kNumMathThreads = Ctx::kNumMathThreads;
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
-  static constexpr bool kIsGroupInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize > 0;
-  static constexpr bool kIsGroupWeightScale = LayerConfig::kIsGroupWeightScale;
-  static constexpr bool kIsBlockWeightScale = LayerConfig::kIsBlockWeightScale;
-  static constexpr bool kUseIntWeightScale = LayerConfig::kUseIntWeightScale;
-  static constexpr bool kUseFusedE8m0Scale = LayerConfig::kUseFusedE8m0Scale;
+  static constexpr bool kIsGroupInputScale = kHasInputScale && Ctx::kInputScaleGroupSize > 0;
+  static constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
+  static constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
+  static constexpr bool kUseIntWeightScale = Ctx::kUseIntWeightScale;
+  static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
   static constexpr bool kHasGroupScale = kIsGroupInputScale || kIsGroupWeightScale || kIsBlockWeightScale;
   static constexpr bool kIsIntAccum = std::is_same<ValTypeC, int32_t>::value && (!kHasGroupScale || kUseIntWeightScale || kUseFusedE8m0Scale);
 
@@ -103,13 +102,12 @@ private:
   static constexpr uint32_t K_WARPS = BlockShape::K / WarpShape::K;
 
 public:
-  int4 *smem_ptr;
+  Ctx &ctx;
   ArithClass &arith;
 
   CUDA_INLINE
-  EpilogueSmemWriter(int4 *smem_ptr, ArithClass &arith)
-      : smem_ptr(smem_ptr),
-        arith(arith) {
+  EpilogueSmemWriter(Ctx &ctx, ArithClass &arith)
+      : ctx(ctx), arith(arith) {
   }
 
   CUDA_INLINE
@@ -117,16 +115,16 @@ public:
     if (threadIdx.x >= kNumMathThreads / K_WARPS) return;
 
     auto &regs = *reinterpret_cast<CRegistersArrayType *>(regs_ptr);
-    scalar_t2 *smem_half2_ptr = reinterpret_cast<scalar_t2 *>(smem_ptr);
+    scalar_t2 *smem_half2_ptr = reinterpret_cast<scalar_t2 *>(ctx.smem.reduce);
     uint32_t smem = offsetof(SharedStorage, reduce) / 128 % 8;
     using PackTypeC = std::conditional_t<
         sizeof(ValTypeC) == 2, scalar_t2,
         std::conditional_t<kIsIntAccum, int2, float2>>;
 
-    uint32_t laneid = threadIdx.x % 32;
-    uint32_t warpid = threadIdx.x / 32;
-    uint32_t warp_delta_row = (warpid / N_WARPS % M_WARPS) * WarpShape::M;
-    uint32_t n_warp_id = warpid % N_WARPS;
+    uint32_t laneid = ctx.lane_id();
+    uint32_t warpid = ctx.warp_id();
+    uint32_t warp_delta_row = ctx.m_warp_offset();
+    uint32_t n_warp_id = ctx.n_warp_id();
     uint32_t group_warp_id = warpid % 4;
     auto write_to_smem = [&](PackTypeC val, uint32_t row_8x8block, uint32_t col_8x8block) {
       scalar_t2 val_half2;

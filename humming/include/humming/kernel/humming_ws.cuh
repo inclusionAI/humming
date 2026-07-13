@@ -9,9 +9,7 @@
 #include <humming/epilogue/pipeline.cuh>
 #include <humming/memory/g2s_pipeline.cuh>
 #include <humming/memory/s2r_pipeline.cuh>
-#include <humming/mma/mxmma.cuh>
-#include <humming/mma/wgmma.cuh>
-#include <humming/mma/wmma.cuh>
+#include <humming/mma/all.cuh>
 
 #include <humming/datatype/dequant.cuh>
 
@@ -21,6 +19,9 @@ class KernelTensorParamType {
 public:
   using Type = std::conditional_t<kUseTma, CUtensorMap const, void *const>;
 };
+
+CUDA_INLINE const void *param_to_ptr(const CUtensorMap &x) { return &x; }
+CUDA_INLINE const void *param_to_ptr(void *const &x) { return x; }
 
 
 template <
@@ -54,45 +55,32 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   using SharedStorage = SharedStorage<
       MmaOpClass, BlockShape, WarpShape, ElementA, ElementB, ElementBS,
       LayerConfig, ComputeConfig, TuningConfig>;
-  using Scheduler = Scheduler<
-      SharedStorage, ProblemShape, BlockShape,
-      LayerConfig, ComputeConfig, TuningConfig>;
-  using ProducerPipeline = ProducerPipeline<
-      MmaOpClass, SharedStorage, ProblemShape, BlockShape, PadShape, ElementA, ElementB, ElementBS,
-      LayerConfig, ComputeConfig, TuningConfig>;
-  using ConsumerPipeline = ConsumerPipeline<SharedStorage, ElementA, LayerConfig, TuningConfig>;
-  using MainloopArithmetic = MainloopArithmetic<
-      MmaOpClass, BlockShape, WarpShape,
-      ElementA, ElementB, ElementC, ElementBS, LayerConfig>;
-  using EpilogueArithmetic = EpilogueArithmetic<
-      MmaOpClass, BlockShape, WarpShape,
+  using Ctx = KernelContext<
+      MmaOpClass, ProblemShape, BlockShape, WarpShape, PadShape,
       ElementA, ElementB, ElementC, ElementBS,
-      LayerConfig, TuningConfig>;
-  using WMMA = WMMA<MmaOpClass, SharedStorage, MainloopArithmetic, WarpShape, ElementA, ElementB, LayerConfig>;
-  using WGMMA = WGMMA<MmaOpClass, SharedStorage, MainloopArithmetic, BlockShape, WarpShape, ElementA, ElementB, LayerConfig>;
-  using MXMMA = MXMMA<MmaOpClass, SharedStorage, MainloopArithmetic, WarpShape, BlockShape, ElementA, ElementB, LayerConfig>;
-  using MMA = std::conditional_t<
-      MmaOpClass::kMmaType == MmaType::WGMMA, WGMMA,
-      std::conditional_t<MmaOpClass::kMmaType == MmaType::MXMMA, MXMMA, WMMA>>;
-  using Epilogue = EpiloguePipeline<
-      MmaOpClass, SharedStorage, EpilogueArithmetic, ProblemShape, BlockShape, WarpShape, PadShape,
-      ElementA, ElementC, LayerConfig, ComputeConfig, TuningConfig>;
-  using S2RMemoryPipeline = S2RMemoryPipeline<
-      SharedStorage, MMA, Epilogue, BlockShape, WarpShape, ElementA, ElementB, ElementBS,
       LayerConfig, ComputeConfig, TuningConfig>;
+  using Scheduler = Scheduler<Ctx>;
+  using ProducerPipeline = ProducerPipeline<Ctx>;
+  using ConsumerPipeline = ConsumerPipeline<Ctx>;
+  using MainloopArithmetic = MainloopArithmetic<Ctx>;
+  using EpilogueArithmetic = EpilogueArithmetic<Ctx>;
+  using MMA = Mma<Ctx, MainloopArithmetic>;
+  using Epilogue = EpiloguePipeline<Ctx, MMA, EpilogueArithmetic>;
+  using S2RMemoryPipeline = S2RMemoryPipeline<Ctx, MMA, Epilogue>;
 
   extern __shared__ int4 shared_memory[];
   auto &smem = *reinterpret_cast<SharedStorage *>(shared_memory);
 
-  auto pa = [&]() {if constexpr (TuningConfig::kUseTmaA) return &A; else return A; };
-  auto pb = [&]() {if constexpr (TuningConfig::kUseTmaB) return &B; else return B; };
-  auto pc = [&]() {if constexpr (TuningConfig::kUseTmaC) return &C; else return C; };
-  auto pas = [&]() {if constexpr (TuningConfig::kUseTmaAS) return &AS; else return AS; };
-  auto pbs = [&]() {if constexpr (TuningConfig::kUseTmaBS) return &BS; else return BS; };
-  auto pbzp = [&]() {if constexpr (TuningConfig::kUseTmaBZP) return &BZP; else return BZP; };
-  auto pbias = [&]() {if constexpr (TuningConfig::kUseTmaBias) return &Bias; else return Bias; };
-  auto scheduler = Scheduler(smem, pc(), tensor_map_buffer, shape_m, top_k, sorted_ids_ptr, expert_ids_ptr, num_tokens_padded_ptr, expert_layout_ptr, use_int64_expert_layout);
-  if (threadIdx.x >= TuningConfig::kNumMathThreads) {
+  const KernelParams params{
+      shape_m, top_k, use_int64_expert_layout,
+      param_to_ptr(A), param_to_ptr(B), param_to_ptr(AS), param_to_ptr(BS),
+      param_to_ptr(BZP), param_to_ptr(Bias), param_to_ptr(C), GS,
+      sorted_ids_ptr, expert_ids_ptr, num_tokens_padded_ptr, expert_layout_ptr,
+      tensor_map_buffer, locks};
+  auto ctx = Ctx(smem, params);
+
+  auto scheduler = Scheduler(ctx);
+  if (ctx.is_load_thread()) {
     if constexpr (TuningConfig::kNumMathThreads > 256) {
       asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(40));
     } else if constexpr (TuningConfig::kNumCtasPerSm == 1 && ElementA::kBits != 16) {
@@ -101,7 +89,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(24));
     }
 
-    auto producer = ProducerPipeline(smem, pa(), pb(), pas(), pbs(), pbzp(), pbias(), shape_m);
+    auto producer = ProducerPipeline(ctx);
     producer.init_mbarrier();
     mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
     while (scheduler.get_next_block()) {
@@ -139,10 +127,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
     auto mainloop_arith = MainloopArithmetic();
     auto epilogue_arith = EpilogueArithmetic();
-    auto mma = MMA(smem, mainloop_arith);
-    auto epilogue = Epilogue(smem, pc(), tensor_map_buffer, epilogue_arith, GS, locks, shape_m, top_k);
-    auto consumer = ConsumerPipeline(smem);
-    auto s2r_pipe = S2RMemoryPipeline(smem, mma, epilogue);
+    auto mma = MMA(ctx, mainloop_arith);
+    auto epilogue = Epilogue(ctx, epilogue_arith);
+    auto consumer = ConsumerPipeline(ctx);
+    auto s2r_pipe = S2RMemoryPipeline(ctx, mma, epilogue);
 
     consumer.init_mbarrier();
     mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
@@ -162,21 +150,18 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       while (slice_iters) {
         PRAGMA_UNROLL
         for (uint32_t stage_id = 0; stage_id < kNumStages; stage_id++) {
-          constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
-          constexpr uint32_t warp_k_iters = WarpShape::K / kPartMmaShapeK;
-
           PRAGMA_UNROLL
-          for (uint32_t warp_k_iter_id = 0; warp_k_iter_id < warp_k_iters; warp_k_iter_id++) {
-            s2r_pipe.load_stage_iter(stage_id, warp_k_iter_id + 1);
-            mma.run(stage_id, warp_k_iter_id);
-            if (warp_k_iter_id == warp_k_iters - 2) {
+          for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
+            s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
+            mma.run(stage_id, warp_iter_id);
+            if (warp_iter_id == Ctx::kWarpIters - 2) {
               consumer.arrive(stage_id);
               if (slice_iters > 1) {
                 consumer.wait_stage((stage_id + 1) % kNumStages);
               }
             }
 
-            mma.transform_b((warp_k_iter_id + 1) % 2);
+            mma.transform_b((warp_iter_id + 1) % 2);
           }
 
           slice_iters--;

@@ -50,7 +50,7 @@ CUDA_INLINE void common_unpack_weight(uint32_t *in_arr, uint32_t *out_arr) {
 };
 
 template <uint32_t kNumBits>
-__global__ void pack_weight_kernel(const uint32_t *in_ptr, uint32_t *out_ptr) {
+__global__ void pack_weight_kernel(const uint32_t *in_ptr, uint32_t *out_ptr, int64_t num_elements) {
   constexpr uint32_t iters = 1;
   constexpr uint32_t num_ints_per_iter = 32;
   uint32_t in_buffer[32];
@@ -62,18 +62,22 @@ __global__ void pack_weight_kernel(const uint32_t *in_ptr, uint32_t *out_ptr) {
     uint32_t out_offset = blockIdx.x * (iters * 32 * kNumBits) + i * 32 * kNumBits + threadIdx.x * kNumBits;
 
     PRAGMA_UNROLL_COUNT(32)
-    for (uint32_t i = 0; i < 32; i++)
+    for (uint32_t i = 0; i < 32; i++) {
+      if (in_offset + i >= num_elements) continue;
       in_buffer[i] = in_ptr[in_offset + i];
+    }
     common_pack_weight<kNumBits>(in_buffer, out_buffer);
     PRAGMA_UNROLL
-    for (uint32_t i = 0; i < kNumBits; i++)
+    for (uint32_t i = 0; i < kNumBits; i++) {
+      if (out_offset + i >= (num_elements * kNumBits / 32)) continue;
       out_ptr[out_offset + i] = out_buffer[i];
+    }
   };
 }
 
 
 template <uint32_t kNumBits>
-__global__ void unpack_weight_kernel(const uint32_t *in_ptr, uint32_t *out_ptr) {
+__global__ void unpack_weight_kernel(const uint32_t *in_ptr, uint32_t *out_ptr, int64_t num_elements) {
   constexpr uint32_t iters = 1;
   constexpr uint32_t num_ints_per_iter = 32;
   uint32_t in_buffer[kNumBits];
@@ -85,11 +89,15 @@ __global__ void unpack_weight_kernel(const uint32_t *in_ptr, uint32_t *out_ptr) 
     uint32_t out_offset = blockIdx.x * (iters * 32 * 32) + i * 32 * 32 + threadIdx.x * 32;
 
     PRAGMA_UNROLL
-    for (uint32_t i = 0; i < kNumBits; i++)
+    for (uint32_t i = 0; i < kNumBits; i++) {
+      if (in_offset + i >= (num_elements * kNumBits / 32)) continue;
       in_buffer[i] = in_ptr[in_offset + i];
+    }
     common_unpack_weight<kNumBits>(in_buffer, out_buffer);
     PRAGMA_UNROLL
-    for (uint32_t i = 0; i < 32; i++)
+    for (uint32_t i = 0; i < 32; i++) {
+      if (out_offset + i >= num_elements) continue;
       out_ptr[out_offset + i] = out_buffer[i];
+    }
   };
 }

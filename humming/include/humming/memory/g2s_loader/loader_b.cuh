@@ -3,18 +3,20 @@
 #include <humming/utils/all.cuh>
 
 
-template <
-    class ProblemShape, class BlockShape,
-    class ElementA, class ElementB,
-    class ComputeConfig, class TuningConfig>
+template <class Ctx>
 class G2SMemoryLoaderB {
 private:
-  static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
-  static constexpr bool kUseTma = TuningConfig::kUseTmaB;
-  static constexpr bool kUseCpAsync = TuningConfig::kUseCpAsync;
-  static constexpr uint32_t kNumLoadThreads = TuningConfig::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = TuningConfig::kNumThreads - kNumLoadThreads;
-  static constexpr uint32_t kMultiCastSizeB = TuningConfig::kMultiCastSizeB;
+  using ProblemShape = typename Ctx::ProblemShape;
+  using BlockShape = typename Ctx::BlockShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementB = typename Ctx::ElementB;
+
+  static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
+  static constexpr bool kUseTma = Ctx::kUseTmaB;
+  static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
+  static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
+  static constexpr uint32_t kMultiCastSizeB = Ctx::kMultiCastSizeB;
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kSmemStride = BlockShape::N * kPartMmaShapeK * ElementB::kBits / 32 / 4;
@@ -23,6 +25,7 @@ private:
   static constexpr uint32_t kNumInt4s = kSmemStride * BlockShape::K / kPartMmaShapeK;
 
 public:
+  Ctx &ctx;
   const CUtensorMap *tensor_map_ptr;
   const int4 *gmem_ptr_raw;
   const int4 *gmem_ptr;
@@ -32,7 +35,8 @@ public:
   uint32_t cluster_rank = blockIdx.x % kMultiCastSizeB;
 
   CUDA_INLINE
-  G2SMemoryLoaderB(const void *ptr) {
+  G2SMemoryLoaderB(Ctx &ctx) : ctx(ctx) {
+    const void *ptr = ctx.params.b;
     if constexpr (kUseTma) {
       tensor_map_ptr = reinterpret_cast<const CUtensorMap *>(ptr);
     } else {
@@ -49,7 +53,7 @@ public:
 
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
-    if (threadIdx.x == kLoadThreadOffset) {
+    if (ctx.load_thread_id() == 0) {
       if constexpr (kMultiCastSizeB == 1) {
         tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       } else if (cluster_rank == 0) {

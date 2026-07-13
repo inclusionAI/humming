@@ -64,7 +64,8 @@ __global__ void hadamard_quant_input_wide(
 
   auto constexpr_log2 = [](uint32_t v) constexpr {
     uint32_t r = 0;
-    while ((1u << r) < v) r++;
+    while ((1u << r) < v)
+      r++;
     return r;
   };
   constexpr uint32_t kLog2E = constexpr_log2(E_lane);
@@ -88,20 +89,18 @@ __global__ void hadamard_quant_input_wide(
   // When T_tile == 1, all M tiles owned by this thread are contiguous in
   // gmem; do one big vec load. Otherwise per-tile load.
   if constexpr (kThreadsPerTile == 1) {
-    const SourceType *gptr = in_ptr + group_idx * kGroupSize
-                             + tile_slot * kElemsPerThread;
+    const SourceType *gptr = in_ptr + group_idx * kGroupSize + tile_slot * kElemsPerThread;
     vec_load_to_float<SourceType, kElemsPerThread>(reg, gptr);
   } else {
     PRAGMA_UNROLL
     for (uint32_t m = 0; m < kTilesPerThread; m++) {
       uint32_t tile_in_group = tile_slot * kTilesPerThread + m;
-      const SourceType *gptr = in_ptr + group_idx * kGroupSize
-                               + tile_in_group * kBlockSize
-                               + lane_in_tile * E_lane;
+      const SourceType *gptr = in_ptr + group_idx * kGroupSize + tile_in_group * kBlockSize + lane_in_tile * E_lane;
       float tile_reg[E_lane];
       vec_load_to_float<SourceType, E_lane>(tile_reg, gptr);
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E_lane; i++) reg[m * E_lane + i] = tile_reg[i];
+      for (uint32_t i = 0; i < E_lane; i++)
+        reg[m * E_lane + i] = tile_reg[i];
     }
   }
 
@@ -142,7 +141,8 @@ __global__ void hadamard_quant_input_wide(
   float norm = rsqrtf((float)kBlockSize);
   if constexpr (kHasExtraScale) norm *= extra_scale;
   PRAGMA_UNROLL
-  for (uint32_t i = 0; i < kElemsPerThread; i++) reg[i] *= norm;
+  for (uint32_t i = 0; i < kElemsPerThread; i++)
+    reg[i] *= norm;
 
   // ---- Channel-wide reduction ----
   float local_max, local_min, local_absmax;
@@ -288,10 +288,7 @@ __global__ void hadamard_quant_input_wide(
     // Output offset for this thread:
     //   group_idx * kGroupSize + (tile_slot * kTilesPerThread) * kBlockSize
     //     + lane_in_tile * E_lane
-    uint8_t *gptr = reinterpret_cast<uint8_t *>(out_ptr)
-                    + group_idx * kGroupSize
-                    + tile_slot * kTilesPerThread * kBlockSize
-                    + lane_in_tile * E_lane;
+    uint8_t *gptr = reinterpret_cast<uint8_t *>(out_ptr) + group_idx * kGroupSize + tile_slot * kTilesPerThread * kBlockSize + lane_in_tile * E_lane;
 
     // When T_tile == 1, all kElemsPerThread bytes are contiguous → big vec
     // store. Otherwise per-tile store.
@@ -326,7 +323,8 @@ __global__ void hadamard_quant_input_wide(
         }
       } else {
         PRAGMA_UNROLL
-        for (uint32_t i = 0; i < kElemsPerThread; i++) gptr[i] = bytes[i];
+        for (uint32_t i = 0; i < kElemsPerThread; i++)
+          gptr[i] = bytes[i];
       }
     } else {
       PRAGMA_UNROLL
@@ -352,7 +350,8 @@ __global__ void hadamard_quant_input_wide(
               *reinterpret_cast<uint16_t *>(&bytes[m * E_lane]);
         } else {
           PRAGMA_UNROLL
-          for (uint32_t i = 0; i < E_lane; i++) p[i] = bytes[m * E_lane + i];
+          for (uint32_t i = 0; i < E_lane; i++)
+            p[i] = bytes[m * E_lane + i];
         }
       }
     }
@@ -370,18 +369,13 @@ __global__ void hadamard_quant_input_wide(
               reg[m * E_lane + 2 * i] * inv_scale,
               reg[m * E_lane + 2 * i + 1] * inv_scale);
         } else {
-          uint32_t a = quant_one_value<TargetType>(
-              reg[m * E_lane + 2 * i], inv_scale) & 0xFu;
-          uint32_t b = quant_one_value<TargetType>(
-              reg[m * E_lane + 2 * i + 1], inv_scale) & 0xFu;
+          uint32_t a = quant_one_value<TargetType>(reg[m * E_lane + 2 * i], inv_scale) & 0xFu;
+          uint32_t b = quant_one_value<TargetType>(reg[m * E_lane + 2 * i + 1], inv_scale) & 0xFu;
           bytes[m * (E_lane / 2) + i] = static_cast<uint8_t>(a | (b << 4));
         }
       }
     }
-    uint8_t *gptr = reinterpret_cast<uint8_t *>(out_ptr)
-                    + (group_idx * kGroupSize
-                       + tile_slot * kTilesPerThread * kBlockSize) / 2
-                    + lane_in_tile * (E_lane / 2);
+    uint8_t *gptr = reinterpret_cast<uint8_t *>(out_ptr) + (group_idx * kGroupSize + tile_slot * kTilesPerThread * kBlockSize) / 2 + lane_in_tile * (E_lane / 2);
     PRAGMA_UNROLL
     for (uint32_t m = 0; m < kTilesPerThread; m++) {
       uint8_t *p = gptr + m * (kBlockSize / 2);

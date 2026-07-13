@@ -18,47 +18,42 @@ CUDA_INLINE uint64_t make_wgmma_smem_desc(uint32_t addr) {
 };
 
 
-template <
-    class MmaOpClass_, class SharedStorage, class ArithClass,
-    class BlockShape, class WarpShape,
-    class ElementA, class ElementB,
-    class LayerConfig>
+template <class Ctx, class ArithClass>
 struct WGMMA {
 public:
-  using MmaOpClass = MmaOpClass_;
-  using MmaShape = typename MmaOpClass::MmaShape;
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using MmaShape = typename Ctx::MmaShape;
+  using SharedStorage = typename Ctx::SharedStorage;
+  using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementB = typename Ctx::ElementB;
+  using CRegistersType = typename MmaOpClass::CRegisters;
+  using CRegistersArrayType = CRegistersType[WarpShape::N * 4 / MmaShape::N][WarpShape::M / MmaShape::M];
 
-  static constexpr bool kHasZeroPoint = LayerConfig::kHasZeroPoint;
-  static constexpr bool kIsFpZeroPoint = LayerConfig::kIsFpZeroPoint;
-  static constexpr bool kUseFusedE8m0Scale = LayerConfig::kUseFusedE8m0Scale;
+  static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
+  static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
+  static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
-  static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;
-  static constexpr uint32_t N_WARPS = BlockShape::N / WarpShape::N;
-  static constexpr uint32_t K_WARPS = BlockShape::K / WarpShape::K;
-  static constexpr uint32_t kWarpItersK = WarpShape::K / (256 / ElementA::kBits);
   static constexpr uint32_t kSwizzleBytes = ElementA::kBits * BlockShape::K >= 1024 ? 128 : 64;
   static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
 
-  SharedStorage &smem;
+  Ctx &ctx;
   ArithClass &arith;
   uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
   typename MmaOpClass::BRegisters regs_b[2][WarpShape::N * 4 / MmaShape::N][kPartMmaShapeK / MmaShape::K];
-  typename MmaOpClass::CRegisters regs_c[2][WarpShape::N * 4 / MmaShape::N][WarpShape::M / MmaShape::M];
+  CRegistersArrayType regs_c[2];
   uint32_t smem_offset = 0;
 
   CUDA_INLINE
-  WGMMA(SharedStorage &smem, ArithClass &arith)
-      : smem(smem), arith(arith) {
-    uint32_t warp_id = threadIdx.x / 32;
-    uint32_t m_warp_id = warp_id / N_WARPS % M_WARPS;
-    uint32_t k_warp_id = warp_id / (N_WARPS * M_WARPS);
-
+  WGMMA(Ctx &ctx, ArithClass &arith)
+      : ctx(ctx), arith(arith) {
     constexpr uint32_t kSwizzleSizeK = kSwizzleBytes * 8 / ElementA::kBits;
     static_assert(kSwizzleSizeK >= WarpShape::K);
 
-    const uint32_t row_offset = M_WARPS > 1 ? WarpShape::M * m_warp_id : 0;
-    const uint32_t col_offset = K_WARPS > 1 ? WarpShape::K * k_warp_id : 0;
+    const uint32_t row_offset = ctx.m_warp_offset();
+    const uint32_t col_offset = ctx.k_warp_offset();
 
     smem_offset = row_offset * (kSwizzleBytes / 16);
     smem_offset += (col_offset % kSwizzleSizeK) * ElementA::kBits / 128;
@@ -84,7 +79,7 @@ public:
       fused_dequant_for_mxfp4<ElementA, WarpShape::N / 16, true>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
     } else {
       if constexpr (ElementB::kBits == 1 && kNumWarpShapeNSplits == 2) {
-        regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (threadIdx.x / 32 % 2 * 8);
+        regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (ctx.warp_id() % 2 * 8);
       }
 
       PRAGMA_UNROLL
@@ -103,22 +98,27 @@ public:
     static_assert(WarpShape::M == MmaShape::M);
     uint32_t buffer_id = iter_id % 2;
 
+    const uint32_t smem_base = cast_smem_ptr_to_uint(&ctx.smem);
+
     PRAGMA_UNROLL
     for (uint32_t k = 0; k < kPartMmaShapeK / MmaShape::K; k++) {
-      uint32_t smem_addr = offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
+      uint32_t smem_addr = smem_base + offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
       smem_addr += (iter_id * 2 + k) * sizeof(int4) + smem_offset;
       uint64_t desc = make_wgmma_smem_desc<kSwizzleBytes>(smem_addr);
 
       constexpr uint32_t kNumIters = WarpShape::N / (MmaShape::N / 4);
 
       bool scale_d = true;
-      constexpr bool kApplyScaleOnC = !kUseFusedE8m0Scale && ElementA::kBits != 16 &&
-          (LayerConfig::kInputScaleGroupSize > 0 || LayerConfig::kWeightScaleGroupSize > 0);
-      if constexpr (!kUseFusedE8m0Scale && ElementA::kBits != 16 && LayerConfig::kInputScaleGroupSize > 0) {
-        scale_d = (iter_id * kPartMmaShapeK) % LayerConfig::kInputScaleGroupSize > 0;
+      constexpr bool kFusedGroupInputScale =
+          kUseFusedE8m0Scale && ElementA::kBits != 16 && Ctx::kInputScaleGroupSize > 0;
+      constexpr bool kApplyScaleOnC = (!kUseFusedE8m0Scale && ElementA::kBits != 16 &&
+                                       (Ctx::kInputScaleGroupSize > 0 || Ctx::kWeightScaleGroupSize > 0)) ||
+                                      kFusedGroupInputScale;
+      if constexpr (ElementA::kBits != 16 && Ctx::kInputScaleGroupSize > 0) {
+        scale_d = (iter_id * kPartMmaShapeK) % Ctx::kInputScaleGroupSize > 0;
       }
-      if constexpr (!kUseFusedE8m0Scale && ElementA::kBits != 16 && LayerConfig::kWeightScaleGroupSize > 0) {
-        scale_d = scale_d && (iter_id * kPartMmaShapeK) % LayerConfig::kWeightScaleGroupSize > 0;
+      if constexpr (!kUseFusedE8m0Scale && ElementA::kBits != 16 && Ctx::kWeightScaleGroupSize > 0) {
+        scale_d = scale_d && (iter_id * kPartMmaShapeK) % Ctx::kWeightScaleGroupSize > 0;
       }
 
       wgmma_fence();
@@ -159,11 +159,11 @@ public:
   template <class T = uint32_t>
   CUDA_INLINE T *final_regs_c_as_ptr() {
     uint32_t index = 0;
-    constexpr bool kIsGroupInputScale = LayerConfig::kInputScaleGroupSize > 0;
-    constexpr bool kIsGroupWeightScale = LayerConfig::kIsGroupWeightScale;
-    constexpr bool kIsBlockWeightScale = LayerConfig::kIsBlockWeightScale;
+    constexpr bool kIsGroupInputScale = Ctx::kInputScaleGroupSize > 0;
+    constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
+    constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
 
-    if constexpr (ElementA::kBits < 16 && !kUseFusedE8m0Scale && kIsGroupInputScale) {
+    if constexpr (ElementA::kBits < 16 && kIsGroupInputScale) {
       index = 1;
     }
 

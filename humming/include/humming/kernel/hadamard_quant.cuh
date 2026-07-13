@@ -183,7 +183,8 @@ __global__ void hadamard_quant_input(
 
   auto constexpr_log2 = [](uint32_t v) constexpr {
     uint32_t r = 0;
-    while ((1u << r) < v) r++;
+    while ((1u << r) < v)
+      r++;
     return r;
   };
   constexpr uint32_t kLog2E = constexpr_log2(E);
@@ -226,7 +227,8 @@ __global__ void hadamard_quant_input(
     vec_load_to_float<SourceType, E>(reg, gptr);
   } else {
     PRAGMA_UNROLL
-    for (uint32_t i = 0; i < E; i++) reg[i] = 0.f;
+    for (uint32_t i = 0; i < E; i++)
+      reg[i] = 0.f;
   }
 
   // ---- Register stages ----
@@ -270,7 +272,8 @@ __global__ void hadamard_quant_input(
       uint32_t partner_base = tile_in_block * kBlockSize + partner_lane * E;
 
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) fht_smem[my_base + i] = reg[i];
+      for (uint32_t i = 0; i < E; i++)
+        fht_smem[my_base + i] = reg[i];
       __syncthreads();
 
       PRAGMA_UNROLL
@@ -423,7 +426,8 @@ __global__ void hadamard_quant_input(
         *reinterpret_cast<uint32_t *>(gptr) = packed;
       } else {
         PRAGMA_UNROLL
-        for (uint32_t i = 0; i < E; i++) gptr[i] = local_bytes[i];
+        for (uint32_t i = 0; i < E; i++)
+          gptr[i] = local_bytes[i];
       }
     } else if constexpr (kBits == 4) {
       // Two elements per byte. Out tile has kBlockSize/2 bytes.
@@ -441,15 +445,15 @@ __global__ void hadamard_quant_input(
           local_bytes[i] = static_cast<uint8_t>(a | (b << 4));
         }
       }
-      uint8_t *gptr = reinterpret_cast<uint8_t *>(out_ptr)
-                      + tile_idx * (kBlockSize / 2) + lane_in_tile * (E / 2);
+      uint8_t *gptr = reinterpret_cast<uint8_t *>(out_ptr) + tile_idx * (kBlockSize / 2) + lane_in_tile * (E / 2);
       if constexpr (E / 2 == 4) {
         *reinterpret_cast<uint32_t *>(gptr) = *reinterpret_cast<uint32_t *>(&local_bytes[0]);
       } else if constexpr (E / 2 == 2) {
         *reinterpret_cast<uint16_t *>(gptr) = *reinterpret_cast<uint16_t *>(&local_bytes[0]);
       } else {
         PRAGMA_UNROLL
-        for (uint32_t i = 0; i < E / 2; i++) gptr[i] = local_bytes[i];
+        for (uint32_t i = 0; i < E / 2; i++)
+          gptr[i] = local_bytes[i];
       }
     } else {
       static_assert(kBits == 8 || kBits == 4, "only 4-bit or 8-bit targets supported");

@@ -197,6 +197,8 @@ class TuningConfig(BaseHummingConfig):
     multi_cast_size_a: int = 1
     multi_cast_size_b: int = 1
 
+    raster_group_m: int = 1
+
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
         "num_threads",
         "num_math_threads",

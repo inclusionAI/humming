@@ -7,27 +7,26 @@
 #include <humming/epilogue/smem_writer.cuh>
 
 
-template <
-    class MmaOpClass, class SharedStorage, class ArithClass,
-    class ProblemShape, class BlockShape, class WarpShape, class PadShape,
-    class ElementA, class ElementC,
-    class LayerConfig, class ComputeConfig, class TuningConfig>
+template <class Ctx, class MMA, class ArithClass>
 class EpiloguePipeline {
 private:
-  using SmemReducer = EpilogueSmemReducer<MmaOpClass, BlockShape, WarpShape, ElementC, LayerConfig, TuningConfig>;
-  using SmemWriter = EpilogueSmemWriter<SharedStorage, MmaOpClass, ArithClass, BlockShape, WarpShape, ElementA, ElementC, LayerConfig, TuningConfig>;
-  using GmemWriter = EpilogueGmemWriter<SharedStorage, ArithClass, ProblemShape, BlockShape, PadShape, ElementC, ComputeConfig, TuningConfig>;
-  using OutputPtrType = std::conditional_t<TuningConfig::kUseTmaC, const void *, void *>;
+  using SharedStorage = typename Ctx::SharedStorage;
+  using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
 
-  static constexpr bool kIsGroupedGemm = ComputeConfig::kGemmType == GemmType::GROUPED_CONTIGUOUS || ComputeConfig::kGemmType == GemmType::GROUPED_MASKED;
-  static constexpr uint32_t kNumWriteSplits = TuningConfig::kNumWriteSplits;
+  using SmemReducer = EpilogueSmemReducer<Ctx, MMA>;
+  using SmemWriter = EpilogueSmemWriter<Ctx, MMA, ArithClass>;
+  using GmemWriter = EpilogueGmemWriter<Ctx, ArithClass>;
+
+  static constexpr bool kIsGroupedGemm = Ctx::kIsGroupedGemm;
+  static constexpr uint32_t kNumWriteSplits = Ctx::kNumWriteSplits;
 
 public:
+  Ctx &ctx;
   SmemReducer smem_reducer;
   SmemWriter smem_writer;
   GmemWriter gmem_writer;
   ArithClass &arith;
-  const uint32_t *GS;
   int32_t *locks;
 
   uint32_t slice_count;
@@ -35,71 +34,63 @@ public:
   uint32_t locks_offset;
 
   CUDA_INLINE
-  EpiloguePipeline(
-      SharedStorage &smem, OutputPtrType output_ptr, CUtensorMap *tensor_map_buffer, ArithClass &arith,
-      const uint32_t *GS, int32_t *locks, uint32_t output_shape_m, uint32_t top_k)
-      : GS(GS), locks(locks), arith(arith),
-        smem_reducer(smem.reduce), smem_writer(smem.reduce, arith),
-        gmem_writer(arith, smem.reduce, output_ptr, smem, output_shape_m, top_k) {
-    if constexpr (TuningConfig::kUseTmaC) {
-      if constexpr (kIsGroupedGemm) gmem_writer.update_tensor_map_ptr(tensor_map_buffer + blockIdx.x);
-      else if (threadIdx.x == 0) prefetch_tensor_map(output_ptr);
+  EpiloguePipeline(Ctx &ctx, ArithClass &arith)
+      : ctx(ctx), locks(ctx.params.locks), arith(arith),
+        smem_reducer(ctx), smem_writer(ctx, arith), gmem_writer(ctx, arith) {
+    if constexpr (Ctx::kUseTmaC) {
+      if constexpr (kIsGroupedGemm) gmem_writer.update_tensor_map_ptr(ctx.params.tensor_map_buffer + blockIdx.x);
+      else if (threadIdx.x == 0) prefetch_tensor_map(ctx.params.c);
     }
-    sync_math_threads();
+    ctx.sync_math_threads();
   }
 
   CUDA_INLINE
   void call(uint32_t *regs_c_ptr) {
-    sync_math_threads();
+    ctx.sync_math_threads();
     if constexpr (BlockShape::K > WarpShape::K) smem_reducer.reduce(regs_c_ptr);
     static_assert(kNumWriteSplits == 1 || kNumWriteSplits == 2);
     if constexpr (kNumWriteSplits > 1) {
       static_assert(BlockShape::M == WarpShape::M);
       static_assert(BlockShape::M % 32 == 0);
-      static_assert(!TuningConfig::kUseTmaC);
+      static_assert(!Ctx::kUseTmaC);
     }
 
     if (slice_count > 1) acquire_gmem_barrier();
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kNumWriteSplits; i++) {
       smem_writer.write(regs_c_ptr, slice_count, i);
-      sync_math_threads();
+      ctx.sync_math_threads();
       gmem_writer.write(slice_id, slice_count, i);
-      sync_math_threads();
+      ctx.sync_math_threads();
     }
     if (slice_count > 1) release_gmem_barrier();
   }
 
   CUDA_INLINE
-  void sync_math_threads() {
-    sync_part_threads<TuningConfig::kNumMathThreads, TuningConfig::kNumThreads>();
-  }
-
-  CUDA_INLINE
   void acquire_gmem_barrier() {
-    if (TuningConfig::kUseTmaC || slice_count > 3) {
+    if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 0 : -1;
-      barrier_acquire2<TuningConfig::kNumMathThreads, TuningConfig::kNumThreads>(&locks[locks_offset], val);
+      barrier_acquire2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val);
     } else {
-      barrier_acquire<TuningConfig::kNumMathThreads, TuningConfig::kNumThreads>(&locks[locks_offset], slice_id);
+      barrier_acquire<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id);
     }
   }
 
   CUDA_INLINE
   void release_gmem_barrier() {
-    if (TuningConfig::kUseTmaC || slice_count > 3) {
+    if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 1 - static_cast<int32_t>(slice_count) : 0;
-      barrier_release2<TuningConfig::kNumMathThreads, TuningConfig::kNumThreads>(&locks[locks_offset], val);
+      barrier_release2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val);
     } else {
-      barrier_release<TuningConfig::kNumMathThreads, TuningConfig::kNumThreads>(&locks[locks_offset], slice_id == slice_count - 1);
+      barrier_release<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id == slice_count - 1);
     }
   }
 
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t m_block_id, uint32_t n_block_id, uint32_t current_shape_m, uint32_t m_offset) {
     gmem_writer.seek(m_block_id, n_block_id, current_shape_m, m_offset);
-    if constexpr (LayerConfig::kIsTensorWeightScale) {
-      arith.gs = GS[ComputeConfig::kGemmType == GemmType::DENSE ? 0 : expert_id];
+    if constexpr (Ctx::kIsTensorWeightScale) {
+      arith.gs = ctx.params.gs[Ctx::kIsDenseGemm ? 0 : expert_id];
     }
   };
 

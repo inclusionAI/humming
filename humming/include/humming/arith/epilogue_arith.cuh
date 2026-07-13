@@ -6,28 +6,32 @@
 #include <humming/datatype/dtypes.cuh>
 #include <humming/utils/all.cuh>
 
-template <
-    class MmaOpClass,
-    class BlockShape, class WarpShape,
-    class ElementA, class ElementB, class ElementC, class ElementBS,
-    class LayerConfig, class TuningConfig>
-class EpilogueArithmetic : F16Conversion<ElementC> {
+template <class Ctx>
+class EpilogueArithmetic : F16Conversion<typename Ctx::ElementC> {
 private:
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementB = typename Ctx::ElementB;
+  using ElementC = typename Ctx::ElementC;
+  using ElementBS = typename Ctx::ElementBS;
+
   using scalar_t = typename F16Conversion<ElementC>::scalar_t;
   using scalar_t2 = typename F16Conversion<ElementC>::scalar_t2;
 
-  static constexpr bool kUseStreamK = TuningConfig::kUseStreamK;
+  static constexpr bool kUseStreamK = Ctx::kUseStreamK;
   static constexpr bool kIsF16Accum = MmaOpClass::kCTypeBits == 16;
-  static constexpr bool kHasBias = LayerConfig::kHasBias;
+  static constexpr bool kHasBias = Ctx::kHasBias;
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
-  static constexpr bool kIsGroupInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize > 0;
-  static constexpr bool kIsChannelInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize == 0;
-  static constexpr bool kIsGroupWeightScale = LayerConfig::kIsGroupWeightScale;
-  static constexpr bool kIsBlockWeightScale = LayerConfig::kIsBlockWeightScale;
-  static constexpr bool kIsChannelWeightScale = LayerConfig::kIsChannelWeightScale;
-  static constexpr bool kIsTensorWeightScale = LayerConfig::kIsTensorWeightScale;
+  static constexpr bool kIsGroupInputScale = kHasInputScale && Ctx::kInputScaleGroupSize > 0;
+  static constexpr bool kIsChannelInputScale = kHasInputScale && Ctx::kInputScaleGroupSize == 0;
+  static constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
+  static constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
+  static constexpr bool kIsChannelWeightScale = Ctx::kIsChannelWeightScale;
+  static constexpr bool kIsTensorWeightScale = Ctx::kIsTensorWeightScale;
   static constexpr bool kIsGroupOrBlockWeightScale = kIsGroupWeightScale || kIsBlockWeightScale;
-  static constexpr bool kHasZeroPoint = LayerConfig::kHasZeroPoint;
+  static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
 
   static constexpr uint2 kExpOffset = get_epilogue_exp_offset<
       ElementA, ElementB, ElementC, ElementBS, kHasZeroPoint,

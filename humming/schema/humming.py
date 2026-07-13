@@ -116,6 +116,8 @@ class HummingWeightSchema(BaseWeightSchema):
                 },
             }
 
+            assert self.weight_scale_type in [WeightScaleType.GROUP, WeightScaleType.GROUP_TENSOR]
+
         if self.has_zero_point and self.is_fp_zero_point:
             tensor_meta["zero_point"] = {
                 "shape": (shape_n, shape_k // group_size),

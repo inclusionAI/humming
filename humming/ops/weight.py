@@ -39,7 +39,7 @@ def dequant_weight(
 def pack_weight(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
     assert inputs.is_cuda
     assert inputs.is_contiguous()
-    assert inputs.nelement() % (32 * 32) == 0
+    assert inputs.size(-1) % 32 == 0
     assert inputs.size(-1) * num_bits % 32 == 0
     assert inputs.dtype == torch.int32
 

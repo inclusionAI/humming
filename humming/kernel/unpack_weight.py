@@ -1,5 +1,6 @@
 import ctypes
 import dataclasses
+import math
 from typing import ClassVar
 
 import cuda.bindings.driver as cbd
@@ -22,14 +23,15 @@ class UnpackWeightKernel(KernelRuntime):
     def init_kernel(self):
         self.code = CODE_TEMPLATE.render(num_bits=self.num_bits)
         self.kernel_expr = f"unpack_weight_kernel<{self.num_bits}>"
-        self.arg_types = (ctypes.c_void_p, ctypes.c_void_p)
+        self.arg_types = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64)
         self.prepare()
 
     def __call__(self, inputs: torch.Tensor, outputs: torch.Tensor):
         self.check_context()
         device = inputs.device
         config = cbd.CUlaunchConfig()
-        config.gridDimX = outputs.nelement() // (32 * 32)
+        num_elements = outputs.nelement()
+        config.gridDimX = math.ceil(num_elements / (32 * 32))
         config.gridDimY = 1
         config.gridDimZ = 1
         config.blockDimX = 32
@@ -37,7 +39,7 @@ class UnpackWeightKernel(KernelRuntime):
         config.blockDimZ = 1
         config.hStream = torch.cuda.current_stream(device).cuda_stream
 
-        arg_values = (inputs.data_ptr(), outputs.data_ptr())
+        arg_values = (inputs.data_ptr(), outputs.data_ptr(), num_elements)
 
         cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)
         return outputs

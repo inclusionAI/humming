@@ -3,33 +3,34 @@
 #include <humming/utils/all.cuh>
 
 
-template <class SharedStorage, class MmaOpClass, class BlockShape, class WarpShape, class ElementA, class TuningConfig>
+template <class Ctx>
 class S2RMemoryLoaderA {
 private:
-  using MmaShape = typename MmaOpClass::MmaShape;
-  static constexpr uint32_t kNumMathThreads = TuningConfig::kNumMathThreads;
-  static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
-  static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;
-  static constexpr uint32_t N_WARPS = BlockShape::N / WarpShape::N;
-  static constexpr uint32_t K_WARPS = BlockShape::K / WarpShape::K;
-  static constexpr uint32_t kWarpItersK = WarpShape::K / kPartMmaShapeK;
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using MmaShape = typename Ctx::MmaShape;
+  using SharedStorage = typename Ctx::SharedStorage;
+  using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using ElementA = typename Ctx::ElementA;
+
+  Ctx &ctx;
 
 public:
+  CUDA_INLINE S2RMemoryLoaderA(Ctx &ctx) : ctx(ctx) {}
+
   CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t iter_id, uint32_t stage_id = 0) {
-    const uint32_t lane_id = threadIdx.x % 32;
-    const uint32_t warp_id = threadIdx.x / 32;
-    const uint32_t m_iter_id = M_WARPS > 1 ? warp_id / N_WARPS % M_WARPS : 0;
-    const uint32_t k_warp_id = warp_id / (M_WARPS * N_WARPS);
-    constexpr uint32_t row_stride_m_iter = BlockShape::M / M_WARPS;
+    const uint32_t lane_id = ctx.lane_id();
+    const uint32_t m_iter_id = ctx.m_warp_id();
+    const uint32_t k_warp_id = ctx.k_warp_id();
     uint32_t smem_uint = offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
     uint32_t smem_base = smem_uint / 128 % (BlockShape::K * ElementA::kBits == 512 ? 4 : 8);
 
     PRAGMA_UNROLL
     for (uint32_t load_iter_id = 0; load_iter_id < CEIL_DIV(WarpShape::M, 16); load_iter_id++) {
 
-      uint32_t row = m_iter_id * (BlockShape::M / M_WARPS) + load_iter_id * 16;
-      uint32_t col = iter_id * 2 + k_warp_id * (kWarpItersK * 2);
+      uint32_t row = ctx.m_warp_offset() + load_iter_id * 16;
+      uint32_t col = iter_id * 2 + k_warp_id * (Ctx::kWarpIters * 2);
 
       if constexpr (MmaShape::M == 8) {
         row += (lane_id / 16) * 8 + lane_id % 8;

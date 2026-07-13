@@ -29,7 +29,8 @@ CUDA_INLINE void vec_load_to_float(float (&reg)[E], const T *gptr) {
       }
     } else {
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) reg[i] = gptr[i];
+      for (uint32_t i = 0; i < E; i++)
+        reg[i] = gptr[i];
     }
   } else if constexpr (std::is_same<T, __half>::value) {
     if constexpr (E % 8 == 0) {
@@ -40,10 +41,14 @@ CUDA_INLINE void vec_load_to_float(float (&reg)[E], const T *gptr) {
         float2 f1 = __half22float2(*reinterpret_cast<__half2 *>(&b.y));
         float2 f2 = __half22float2(*reinterpret_cast<__half2 *>(&b.z));
         float2 f3 = __half22float2(*reinterpret_cast<__half2 *>(&b.w));
-        reg[v * 8 + 0] = f0.x; reg[v * 8 + 1] = f0.y;
-        reg[v * 8 + 2] = f1.x; reg[v * 8 + 3] = f1.y;
-        reg[v * 8 + 4] = f2.x; reg[v * 8 + 5] = f2.y;
-        reg[v * 8 + 6] = f3.x; reg[v * 8 + 7] = f3.y;
+        reg[v * 8 + 0] = f0.x;
+        reg[v * 8 + 1] = f0.y;
+        reg[v * 8 + 2] = f1.x;
+        reg[v * 8 + 3] = f1.y;
+        reg[v * 8 + 4] = f2.x;
+        reg[v * 8 + 5] = f2.y;
+        reg[v * 8 + 6] = f3.x;
+        reg[v * 8 + 7] = f3.y;
       }
     } else if constexpr (E % 2 == 0) {
       PRAGMA_UNROLL
@@ -55,7 +60,8 @@ CUDA_INLINE void vec_load_to_float(float (&reg)[E], const T *gptr) {
       }
     } else {
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) reg[i] = __half2float(gptr[i]);
+      for (uint32_t i = 0; i < E; i++)
+        reg[i] = __half2float(gptr[i]);
     }
   } else if constexpr (std::is_same<T, __nv_bfloat16>::value) {
     if constexpr (E % 8 == 0) {
@@ -66,10 +72,14 @@ CUDA_INLINE void vec_load_to_float(float (&reg)[E], const T *gptr) {
         float2 f1 = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162 *>(&b.y));
         float2 f2 = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162 *>(&b.z));
         float2 f3 = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162 *>(&b.w));
-        reg[v * 8 + 0] = f0.x; reg[v * 8 + 1] = f0.y;
-        reg[v * 8 + 2] = f1.x; reg[v * 8 + 3] = f1.y;
-        reg[v * 8 + 4] = f2.x; reg[v * 8 + 5] = f2.y;
-        reg[v * 8 + 6] = f3.x; reg[v * 8 + 7] = f3.y;
+        reg[v * 8 + 0] = f0.x;
+        reg[v * 8 + 1] = f0.y;
+        reg[v * 8 + 2] = f1.x;
+        reg[v * 8 + 3] = f1.y;
+        reg[v * 8 + 4] = f2.x;
+        reg[v * 8 + 5] = f2.y;
+        reg[v * 8 + 6] = f3.x;
+        reg[v * 8 + 7] = f3.y;
       }
     } else if constexpr (E % 2 == 0) {
       PRAGMA_UNROLL
@@ -81,7 +91,8 @@ CUDA_INLINE void vec_load_to_float(float (&reg)[E], const T *gptr) {
       }
     } else {
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) reg[i] = __bfloat162float(gptr[i]);
+      for (uint32_t i = 0; i < E; i++)
+        reg[i] = __bfloat162float(gptr[i]);
     }
   } else {
     static_assert(sizeof(T) == 0, "unsupported dtype");
@@ -112,7 +123,8 @@ CUDA_INLINE void vec_store_from_float(T *gptr, const float (&reg)[E], float norm
       }
     } else {
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) gptr[i] = reg[i] * norm;
+      for (uint32_t i = 0; i < E; i++)
+        gptr[i] = reg[i] * norm;
     }
   } else if constexpr (std::is_same<T, __half>::value) {
     if constexpr (E % 8 == 0) {
@@ -137,7 +149,8 @@ CUDA_INLINE void vec_store_from_float(T *gptr, const float (&reg)[E], float norm
       }
     } else {
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) gptr[i] = __float2half_rn(reg[i] * norm);
+      for (uint32_t i = 0; i < E; i++)
+        gptr[i] = __float2half_rn(reg[i] * norm);
     }
   } else if constexpr (std::is_same<T, __nv_bfloat16>::value) {
     if constexpr (E % 8 == 0) {
@@ -162,7 +175,8 @@ CUDA_INLINE void vec_store_from_float(T *gptr, const float (&reg)[E], float norm
       }
     } else {
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) gptr[i] = __float2bfloat16_rn(reg[i] * norm);
+      for (uint32_t i = 0; i < E; i++)
+        gptr[i] = __float2bfloat16_rn(reg[i] * norm);
     }
   } else {
     static_assert(sizeof(T) == 0, "unsupported dtype");
@@ -201,7 +215,8 @@ __global__ void hadamard_transform(
   // log2 via constexpr loop (NVRTC doesn't have __builtin_ctz at host scope).
   auto constexpr_log2 = [](uint32_t v) constexpr {
     uint32_t r = 0;
-    while ((1u << r) < v) r++;
+    while ((1u << r) < v)
+      r++;
     return r;
   };
   constexpr uint32_t kLog2E = constexpr_log2(E);
@@ -228,7 +243,8 @@ __global__ void hadamard_transform(
     vec_load_to_float<T, E>(reg, gptr);
   } else {
     PRAGMA_UNROLL
-    for (uint32_t i = 0; i < E; i++) reg[i] = 0.f;
+    for (uint32_t i = 0; i < E; i++)
+      reg[i] = 0.f;
   }
 
   // ---- Register stages ----
@@ -273,7 +289,8 @@ __global__ void hadamard_transform(
       uint32_t partner_base = tile_in_block * kBlockSize + partner_lane * E;
 
       PRAGMA_UNROLL
-      for (uint32_t i = 0; i < E; i++) smem[my_base + i] = reg[i];
+      for (uint32_t i = 0; i < E; i++)
+        smem[my_base + i] = reg[i];
       __syncthreads();
 
       PRAGMA_UNROLL

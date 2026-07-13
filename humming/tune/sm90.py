@@ -151,8 +151,8 @@ class Sm90Heuristics(DeviceHeuristics):
         for i in range(max_block_m // 8):
             num_blocks = num_blocks_list[i]
             block_m = i * 8 + 8
-            if meta.a_dtype == dtypes.int8 and num_blocks % 16 == 8 and block_m > 32:
-                num_blocks_list[i] = 10000
+            if meta.a_dtype == dtypes.int8 and block_m % 16 == 8 and block_m > 32:
+                num_blocks_list[i] = 1000000
 
         return num_blocks_list
 

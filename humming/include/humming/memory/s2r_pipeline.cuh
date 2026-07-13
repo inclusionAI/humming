@@ -6,41 +6,41 @@
 #include <humming/memory/s2r_loader/loader_bias.cuh>
 #include <humming/memory/s2r_loader/loader_bs.cuh>
 #include <humming/memory/s2r_loader/loader_bzp.cuh>
+#include <humming/utils/all.cuh>
 
-template <
-    class SharedStorage, class MMA, class Epilogue,
-    class BlockShape, class WarpShape,
-    class ElementA, class ElementB, class ElementBS,
-    class LayerConfig, class ComputeConfig, class TuningConfig>
+template <class Ctx, class MMA, class Epilogue>
 class S2RMemoryPipeline {
 private:
-  static constexpr bool kUseWgmma = MMA::MmaOpClass::kMmaType == MmaType::WGMMA;
-  static constexpr bool kUseMxmma = MMA::MmaOpClass::kMmaType == MmaType::MXMMA;
-  static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
-  static constexpr uint32_t kWarpItersK = WarpShape::K / kPartMmaShapeK;
-  static constexpr uint32_t kNumStages = TuningConfig::kNumStages;
+  using MmaOpClass = typename Ctx::MmaOpClass;
+  using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
+  using ElementA = typename Ctx::ElementA;
+
+  static constexpr bool kUseWgmma = Ctx::kUseWgmma;
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
+  static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
+  static constexpr uint32_t kNumStages = Ctx::TuningConfig::kNumStages;
 
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
-  static constexpr bool kIsChannelInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize == 0;
-  static constexpr bool kIsGroupInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize > 0;
-  static constexpr bool kIsChannelWeightScale = LayerConfig::kIsChannelWeightScale;
-  static constexpr bool kIsGroupWeightScale = LayerConfig::kIsGroupWeightScale;
-  static constexpr bool kIsBlockWeightScale = LayerConfig::kIsBlockWeightScale;
+  static constexpr bool kIsChannelInputScale = kHasInputScale && Ctx::kInputScaleGroupSize == 0;
+  static constexpr bool kIsGroupInputScale = kHasInputScale && Ctx::kInputScaleGroupSize > 0;
+  static constexpr bool kIsChannelWeightScale = Ctx::kIsChannelWeightScale;
+  static constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
+  static constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
   static constexpr bool kIsGroupOrBlockWeightScale = kIsGroupWeightScale || kIsBlockWeightScale;
 
-  static constexpr bool kHasZeroPoint = LayerConfig::kHasZeroPoint;
-  static constexpr bool kHasBias = LayerConfig::kHasBias;
+  static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
+  static constexpr bool kHasBias = Ctx::kHasBias;
 
-  using MmaOpClass = typename MMA::MmaOpClass;
-  using LoaderA = S2RMemoryLoaderA<SharedStorage, MmaOpClass, BlockShape, WarpShape, ElementA, TuningConfig>;
-  using LoaderB = S2RMemoryLoaderB<BlockShape, WarpShape, ElementA, ElementB, TuningConfig>;
-  using LoaderAS = S2RMemoryLoaderAS<MmaOpClass, BlockShape, WarpShape, ElementA, LayerConfig, ComputeConfig, TuningConfig>;
-  using LoaderBS = S2RMemoryLoaderBS<MmaOpClass, BlockShape, WarpShape, ElementA, ElementBS, LayerConfig, TuningConfig>;
-  using LoaderBZP = S2RMemoryLoaderBZP<BlockShape, WarpShape, ElementA, ElementB, LayerConfig, TuningConfig>;
-  using LoaderBias = S2RMemoryLoaderBias<MmaOpClass, BlockShape, WarpShape, TuningConfig>;
+  using LoaderA = S2RMemoryLoaderA<Ctx>;
+  using LoaderB = S2RMemoryLoaderB<Ctx>;
+  using LoaderAS = S2RMemoryLoaderAS<Ctx>;
+  using LoaderBS = S2RMemoryLoaderBS<Ctx>;
+  using LoaderBZP = S2RMemoryLoaderBZP<Ctx>;
+  using LoaderBias = S2RMemoryLoaderBias<Ctx>;
 
 public:
-  SharedStorage &smem;
+  Ctx &ctx;
   MMA &mma;
   Epilogue &epilogue;
   LoaderA loader_a;
@@ -51,15 +51,18 @@ public:
   LoaderBias loader_bias;
 
   CUDA_INLINE
-  S2RMemoryPipeline(SharedStorage &smem, MMA &mma, Epilogue &epilogue)
-      : smem(smem), mma(mma), epilogue(epilogue) {
+  S2RMemoryPipeline(Ctx &ctx, MMA &mma, Epilogue &epilogue)
+      : ctx(ctx), mma(mma), epilogue(epilogue),
+        loader_a(ctx), loader_b(ctx), loader_as(ctx),
+        loader_bs(ctx), loader_bzp(ctx), loader_bias(ctx) {
   }
 
   template <bool kIsFirst = false>
   CUDA_INLINE void load_stage_iter(uint32_t stage_id, uint32_t iter_id) {
-    stage_id = (stage_id + iter_id / kWarpItersK) % kNumStages;
-    iter_id = iter_id % kWarpItersK;
+    stage_id = (stage_id + iter_id / Ctx::kWarpIters) % kNumStages;
+    iter_id = iter_id % Ctx::kWarpIters;
     uint32_t buffer_id = iter_id % 2;
+    auto &smem = ctx.smem;
 
     loader_b.load(smem.stages[stage_id].b, mma.regs_qb_as_ptr(buffer_id), iter_id);
     if constexpr (!kUseWgmma)
@@ -84,6 +87,7 @@ public:
   }
 
   CUDA_INLINE void load_channel(uint32_t slice_id) {
+    auto &smem = ctx.smem;
     if constexpr (kIsChannelInputScale) loader_as.load(smem.as_c, epilogue.arith.regs_as_as_ptr(), -1);
     if constexpr (kIsChannelWeightScale) loader_bs.load(smem.bs_c, epilogue.arith.regs_bs_as_ptr(), -1);
     if constexpr (kHasBias) loader_bias.load(smem.bias, epilogue.arith.regs_bias_as_ptr(), slice_id == 0);

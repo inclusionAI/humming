@@ -10,4 +10,5 @@
 #include <humming/utils/ptx/warp.cuh>
 #include <humming/utils/ptx/wgmma.cuh>
 
+#include <humming/utils/context.cuh>
 #include <humming/utils/storage.cuh>

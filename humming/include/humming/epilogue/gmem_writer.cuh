@@ -28,30 +28,30 @@ CUDA_INLINE T atomic_reduce_add_f162(T &a, T &b) {
   return a;
 };
 
-template <
-    class SharedStorage, class ArithClass,
-    class ProblemShape, class BlockShape, class PadShape, class ElementC,
-    class ComputeConfig, class TuningConfig>
-class EpilogueGmemWriter : F16Conversion<ElementC> {
+template <class Ctx, class ArithClass>
+class EpilogueGmemWriter : F16Conversion<typename Ctx::ElementC> {
 private:
-  static constexpr bool kUseStreamK = TuningConfig::kUseStreamK;
-  static constexpr bool kUseTmaC = TuningConfig::kUseTmaC;
+  using SharedStorage = typename Ctx::SharedStorage;
+  using ProblemShape = typename Ctx::ProblemShape;
+  using BlockShape = typename Ctx::BlockShape;
+  using PadShape = typename Ctx::PadShape;
+  using ElementC = typename Ctx::ElementC;
 
-  static constexpr bool kIsDenseGemm = ComputeConfig::kGemmType == GemmType::DENSE;
-  static constexpr bool kIsIndexedGemm = ComputeConfig::kGemmType == GemmType::INDEXED;
-  static constexpr bool kIsGroupedGemm = ComputeConfig::kGemmType == GemmType::GROUPED_CONTIGUOUS || ComputeConfig::kGemmType == GemmType::GROUPED_MASKED;
+  static constexpr bool kUseStreamK = Ctx::kUseStreamK;
+  static constexpr bool kUseTmaC = Ctx::kUseTmaC;
 
-  static constexpr uint32_t kNumMathThreads = TuningConfig::kNumMathThreads;
-  static constexpr uint32_t kNumWriteSplits = TuningConfig::kNumWriteSplits;
+  static constexpr bool kIsIndexedGemm = Ctx::kIsIndexedGemm;
+  static constexpr bool kIsGroupedGemm = Ctx::kIsGroupedGemm;
+
+  static constexpr uint32_t kNumMathThreads = Ctx::kNumMathThreads;
+  static constexpr uint32_t kNumWriteSplits = Ctx::kNumWriteSplits;
 
   using scalar_t = typename F16Conversion<ElementC>::scalar_t;
   using scalar_t2 = typename F16Conversion<ElementC>::scalar_t2;
-  using OutputPtrType = std::conditional_t<kUseTmaC, const void *, void *>;
 
 public:
+  Ctx &ctx;
   ArithClass &arith;
-  SharedStorage &smem;
-  int4 *smem_ptr;
   int4 *gmem_ptr_raw;
   int4 *gmem_ptr;
   const CUtensorMap *tensor_map_ptr;
@@ -62,19 +62,15 @@ public:
   uint32_t block_output_shape_m;
 
   CUDA_INLINE
-  EpilogueGmemWriter(
-      ArithClass &arith,
-      int4 *smem_ptr, OutputPtrType output_ptr,
-      SharedStorage &smem, uint32_t shape_m, uint32_t top_k)
-      : arith(arith), smem_ptr(smem_ptr), smem(smem) {
-
+  EpilogueGmemWriter(Ctx &ctx, ArithClass &arith) : ctx(ctx), arith(arith) {
+    const void *ptr = ctx.params.c;
     if constexpr (kUseTmaC) {
-      tensor_map_ptr = reinterpret_cast<const CUtensorMap *>(output_ptr);
+      tensor_map_ptr = reinterpret_cast<const CUtensorMap *>(ptr);
     } else {
-      gmem_ptr_raw = reinterpret_cast<int4 *>(output_ptr);
+      gmem_ptr_raw = reinterpret_cast<int4 *>(const_cast<void *>(ptr));
     }
 
-    output_shape_m = shape_m * (kIsIndexedGemm ? top_k : 1);
+    output_shape_m = ctx.params.shape_m * (kIsIndexedGemm ? ctx.params.top_k : 1);
   }
 
   CUDA_INLINE
@@ -104,14 +100,14 @@ public:
         uint32_t smem_offset_swizzled = smem_row * 8 + smem_col_swizzled;
         uint32_t gmem_row = smem_row % (BlockShape::M / kNumWriteSplits);
         if constexpr (kNumWriteSplits == 2) gmem_row += BlockShape::M / 2 * split_idx;
-        if constexpr (ComputeConfig::kGemmType == GemmType::INDEXED) gmem_row = smem.wr_row_index[gmem_row];
+        if constexpr (Ctx::kIsIndexedGemm) gmem_row = ctx.smem.wr_row_index[gmem_row];
         uint32_t gmem_col = smem_row / (BlockShape::M / kNumWriteSplits) * 8 + smem_col;
         bool pred1 = gmem_row < (kIsIndexedGemm ? output_shape_m : block_output_shape_m);
         bool pred2 = PadShape::N == 0 || (col_offset + gmem_col * 8 < ProblemShape::N - PadShape::N);
 
         if (!pred1 || !pred2) continue;
 
-        int4 val = smem_ptr[smem_offset_swizzled];
+        int4 val = ctx.smem.reduce[smem_offset_swizzled];
         uint32_t gmem_offset = gmem_row * ((ProblemShape::N - PadShape::N) / 8) + gmem_col;
         if (!kUseStreamK || slice_count == 1 || slice_id == 0) {
           gmem_ptr[gmem_offset] = val;
@@ -133,12 +129,12 @@ public:
     const uint32_t col_offset2 = col_offset + 64 * block_idx;
     if (block_idx < count) {
       if constexpr (!kUseStreamK) {
-        tma_store_2d(smem_ptr + smem_offset, tensor_map_ptr, col_offset2, row_offset);
+        tma_store_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, col_offset2, row_offset);
       } else if (slice_count == 1 || slice_id == 0) {
-        tma_store_2d(smem_ptr + smem_offset, tensor_map_ptr, col_offset2, row_offset);
+        tma_store_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, col_offset2, row_offset);
         if (slice_count > 1) tma_wait_store_group<0>();
       } else {
-        tma_reduce_add_2d(smem_ptr + smem_offset, tensor_map_ptr, col_offset2, row_offset);
+        tma_reduce_add_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, col_offset2, row_offset);
         if (slice_id != slice_count - 1) tma_wait_store_group<0>();
       }
     }
