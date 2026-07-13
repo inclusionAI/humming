@@ -240,7 +240,8 @@ int64_t register_kernel(const std::string &cubin_path, const std::string &func_n
         reader.getBool("USE_TMA_C"),
         reader.getBool("USE_TMA_BS"),
         reader.getBool("USE_TMA_BZP"),
-        reader.getBool("USE_TMA_BIAS")};
+        reader.getBool("USE_TMA_BIAS"),
+        reader.getBool("USE_PACKED_K_LAYOUT")};
   };
 
   return hash_id;

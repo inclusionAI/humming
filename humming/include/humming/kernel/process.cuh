@@ -118,7 +118,8 @@ CUDA_INLINE uint32_t extract_packed_value(uint32_t *smem_row, uint32_t index) {
 template <
     uint32_t kNumBitsB, uint32_t kNumBitsA, bool kPackedInput,
     bool kShouldPreprocessForINT2FP, bool kShouldPreprocessWithZP,
-    bool kShouldTransposeMiniBlock, uint32_t kGroupSizeZP>
+    bool kShouldTransposeMiniBlock, uint32_t kGroupSizeZP,
+    bool kUsePackedKLayout = false>
 __global__ void weight_repack_nk(
     const uint32_t *in_ptr, uint32_t *out_ptr, const uint32_t *zp_ptr,
     uint32_t shape_n, uint32_t shape_k,
@@ -261,6 +262,30 @@ __global__ void weight_repack_nk(
 
   constexpr uint32_t num_output_rows = kNumBitsA / 4;
   constexpr uint32_t num_ints_per_row = 16 * kNumBitsB / kNumBitsA;
+
+  if constexpr (kUsePackedKLayout) {
+    static_assert(kNumBitsA == 8);
+    constexpr uint32_t hb = kNumBitsB / 2;
+    uint32_t packed_out_stride = 64 * padded_shape_n * kNumBitsB / 32;
+    uint32_t packed_max_row = gridDim.z * padded_shape_k / 64;
+    uint32_t row = (blockIdx.y * 64 + blockIdx.z * padded_shape_k) / 64;
+    if (row < packed_max_row) {
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < num_output_rows; i++) {
+        PRAGMA_UNROLL
+        for (uint32_t j = 0; j < num_ints_per_row / kNumBitsB; j++) {
+          PRAGMA_UNROLL
+          for (uint32_t k = 0; k < kNumBitsB; k++) {
+            uint32_t region = blockIdx.x * 4 + j * 2 + k / hb;
+            uint32_t s = i * hb + k % hb;
+            uint32_t col = region * (32 * kNumBitsB) + threadIdx.x * kNumBitsB + s;
+            out_ptr[row * packed_out_stride + col] = out_arr[i * num_ints_per_row + j * kNumBitsB + k];
+          }
+        }
+      }
+    }
+    return;
+  }
 
   PRAGMA_UNROLL
   for (uint32_t i = 0; i < num_output_rows; i++) {

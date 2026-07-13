@@ -81,6 +81,7 @@ inline void check_tensor_b(Tensor &tensor, KernelData &kernel_data, int64_t dev)
   uint32_t problem_shape_k = kernel_data.problem_shape_k;
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id);
   uint32_t pack_size_k = 256 / get_dtype_num_bits(kernel_data.a_dtype_id);
+  if (kernel_data.use_packed_k_layout) pack_size_k = 64;
 
   std::vector<int64_t> expected_shape = {};
   if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
@@ -280,14 +281,16 @@ inline CUtensorMap make_tma_desc_b(Tensor &tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_b) return CUtensorMap();
 
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id);
-  uint32_t pack_size_k = 256 / get_dtype_num_bits(kernel_data.a_dtype_id);
   uint32_t block_shape_n = kernel_data.block_shape_n;
   uint32_t block_shape_k = kernel_data.block_shape_k;
 
-  tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  tensor = torch_view_shape(tensor, {tensor.size(0), -1, num_bits * pack_size_k});
+  uint32_t pack_size_k = 256 / get_dtype_num_bits(kernel_data.a_dtype_id);
+  if (kernel_data.use_packed_k_layout) pack_size_k = 64;
 
-  return make_tma_desc(tensor, {num_bits * pack_size_k, block_shape_n / 32, block_shape_k / pack_size_k});
+  tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
+  tensor = torch_view_shape(tensor, {tensor.size(0), -1, pack_size_k});
+
+  return make_tma_desc(tensor, {pack_size_k, block_shape_n * num_bits / 32, block_shape_k / pack_size_k});
 }
 
 inline CUtensorMap make_tma_desc_c(Tensor tensor, KernelData &kernel_data) {

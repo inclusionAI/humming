@@ -384,6 +384,21 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.gemm_type = GemmType.DENSE
         assert self.gemm_type is not None, "gemm_type must be specify for MoE GEMM"
 
+        if self.has_input_scale and self.input_scale_group_size == 0:
+            self.use_m_major_input_scale = True
+
+        if self.use_tma_as and self.is_indexed_gemm:
+            self.use_tma_as = False
+            self.use_m_major_input_scale = True
+
+        if self.use_tma_as:
+            assert self.use_m_major_input_scale, "use_tma_as requires use_m_major_input_scale=True"
+
+        if self.use_packed_k_layout:
+            warp_k = self.warp_shape[2]
+            for gs in (self.input_scale_group_size, self.weight_scale_group_size):
+                assert gs == 0 or gs >= warp_k
+
     def __call__(self):
         msg = (
             "don't call HummingKernel object directly, "
@@ -453,11 +468,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
         res = []
         if os.environ.get("HUMMING_DISABLE_PARALLEL_BUILD", "0") != "1":
-            # Parallelize kernel compilation using multiple threads,
-            # but ensure kernel loading occurs in the main thread to prevent CUDA context issues.
-            # (KernelRuntime would skip loading when running in child thread).
-            # Capture the current CUDA device so worker threads use the correct GPU;
-            # CUDA device is thread-local and new threads default to GPU 0.
             _current_device = torch.cuda.current_device()
             with ThreadPoolExecutor(
                 max_workers=16,
