@@ -54,6 +54,7 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
 
   static constexpr bool kUseWmma = LayerConfig::kMmaType == MmaType::MMA;
   static constexpr bool kUseWgmma = LayerConfig::kMmaType == MmaType::WGMMA;
+  static constexpr bool kUseMxmma = LayerConfig::kMmaType == MmaType::MXMMA;
 
   static constexpr bool kUsePackedKLayout = LayerConfig::kUsePackedKLayout;
   static constexpr uint32_t kPackedKFactor = kUsePackedKLayout ? 2 : 1;

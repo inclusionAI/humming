@@ -80,6 +80,8 @@ class HummingLayerMeta(LayerConfig):
             return self.weight_scale_group_size == 0 or self.a_dtype.num_bits != 16
         elif self.mma_type == MmaType.WGMMA:
             return self.weight_scale_group_size == 0
+        elif self.mma_type == MmaType.MXMMA:
+            return False
         else:
             raise ValueError(f"unsupported mma_type: {self.mma_type}")
 
@@ -128,8 +130,11 @@ class HummingLayerMeta(LayerConfig):
                 self.b_dtype = dataclasses.replace(self.b_dtype, is_signed=False)
 
         if not self.use_fused_e8m0_scale:
+            sm_major = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
+            has_native_mxf8f6f4 = sm_major == 12 and self.a_dtype == dtypes.float8e4m3
             self.use_fused_e8m0_scale = (
-                self.a_dtype in [dtypes.float8e4m3, dtypes.int8]
+                not has_native_mxf8f6f4
+                and self.a_dtype in [dtypes.float8e4m3, dtypes.int8]
                 and self.weight_scale_group_size > 0
                 and self.b_dtype in [dtypes.float4e2m1]
                 and self.bs_dtype in [dtypes.float8e8m0]
@@ -212,6 +217,7 @@ class HummingLayerMethod:
             a_dtype=input_schema.a_dtype or f16_dtype,
             b_dtype=weight_schema.b_dtype,
             bs_dtype=weight_schema.bs_dtype or f16_dtype,
+            as_dtype=input_schema.input_scale_dtype,
             c_dtype=f16_dtype,
             shape_n=shape_n + pad_shape_n,
             shape_k=shape_k + pad_shape_k,
@@ -445,10 +451,17 @@ class HummingLayerMethod:
         )
 
         if weight_scale is not None:
+            is_mxmma = meta.mma_type == MmaType.MXMMA
+            mxmma_scale_vec = None
+            if is_mxmma:
+                mxmma_scale_vec = 256 // meta.a_dtype.num_bits // meta.weight_scale_group_size
+
             weight_scale = prepare_humming_weight_scale(
                 weight_scale,
                 to_apply_on_c=meta.should_apply_bs_on_c,
                 is_blockwise=meta.weight_scale_type == WeightScaleType.BLOCK,
+                is_mxmma=is_mxmma,
+                mxmma_scale_vec=mxmma_scale_vec,
             )
 
         if zero_point is not None:

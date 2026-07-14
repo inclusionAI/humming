@@ -2,6 +2,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 
 #include <humming/datatype/dtypes.cuh>
 #include <humming/kernel/hadamard.cuh>
@@ -52,7 +53,13 @@ CUDA_INLINE uint8_t quant_pair_fp4(float a, float b) {
   uint16_t out;
 #if __CUDA_ARCH__ >= 1000
   if constexpr (std::is_same<TargetType, Float4E2M1>::value) {
-    asm("cvt.rn.satfinite.e2m1x2.f32 %0, %1, %2;" : "=h"(out) : "f"(b), "f"(a));
+    // e2m1x2 packs two fp4 into a .b8 register (low nibble = a, high = b);
+    // widen to u16 so the byte can be returned. %1 -> high, %2 -> low.
+    asm("{\n\t"
+        ".reg .b8 t;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 t, %1, %2;\n\t"
+        "cvt.u16.u8 %0, t;\n\t"
+        "}" : "=h"(out) : "f"(b), "f"(a));
   } else {
     static_assert(sizeof(TargetType) == 0, "quant_pair_fp4: unsupported type");
   }
@@ -73,6 +80,39 @@ CUDA_INLINE uint32_t quant_one_value(float val, float inv_scale) {
   constexpr int32_t hi = (1 << (TargetType::kBits - 1)) - 1;
   v = max(lo, min(hi, v));
   return static_cast<uint32_t>(v) & ((1u << TargetType::kBits) - 1);
+}
+
+
+// Scale storage dtype codes (mirror humming.ops scale_dtype strings).
+static constexpr uint32_t kScaleStoreF32 = 0;
+static constexpr uint32_t kScaleStoreE4M3 = 1;
+static constexpr uint32_t kScaleStoreE8M0 = 2;
+
+
+// Quantize the per-group scale for storage, optionally folding a precomputed
+// per-tensor global scale. `s` is the full-precision scale to store (already
+// including the rsqrt(N) * extra_scale normalization). Returns the *effective*
+// stored scale (== quantized_value * gs) so the caller can derive the matching
+// inverse for data quantization; the encoded scale is written to
+// `store_ptr[idx]` only when `do_write` is true.
+template <uint32_t kScaleStore>
+CUDA_INLINE float finalize_scale(
+    float s, float gs, float inv_gs, void *store_ptr, uint32_t idx, bool do_write) {
+  if constexpr (kScaleStore == kScaleStoreE8M0) {
+    s *= inv_gs;
+    uint32_t u = __float_as_uint(s);
+    u = (u + 0x007FFFFFu) & 0x7F800000u;  // round up to a power of two
+    if (do_write) reinterpret_cast<uint8_t *>(store_ptr)[idx] = static_cast<uint8_t>(u >> 23);
+    return __uint_as_float(u) * gs;
+  } else if constexpr (kScaleStore == kScaleStoreE4M3) {
+    s *= inv_gs;
+    __nv_fp8_e4m3 q = static_cast<__nv_fp8_e4m3>(s);
+    if (do_write) reinterpret_cast<uint8_t *>(store_ptr)[idx] = q.__x;
+    return static_cast<float>(q) * gs;
+  } else {
+    if (do_write) reinterpret_cast<float *>(store_ptr)[idx] = s;
+    return s;
+  }
 }
 
 
@@ -115,15 +155,18 @@ template <
     uint32_t kThreadsPerTile,
     uint32_t kTilesPerBlock,
     bool kHasExtraScale,
-    bool kMMajor = false>
+    bool kMMajor = false,
+    uint32_t kScaleStore = kScaleStoreF32,
+    bool kHasGlobalScale = false>
 __global__ void hadamard_quant_input(
     const SourceType *__restrict__ in_ptr,
     void *__restrict__ out_ptr,
-    float *__restrict__ scales_ptr,
+    void *__restrict__ scales_ptr,
     float extra_scale,
     uint32_t num_tiles,
     uint32_t shape_m = 0,
-    uint32_t groups_per_row = 0) {
+    uint32_t groups_per_row = 0,
+    const float *__restrict__ global_scale_ptr = nullptr) {
 
   static_assert((kBlockSize & (kBlockSize - 1)) == 0);
   static_assert(kBlockSize % kGroupSize == 0);
@@ -308,26 +351,44 @@ __global__ void hadamard_quant_input(
     float dtype_max = fp_target_max_value<TargetType>();
     scale_raw = fmaxf(local_absmax / dtype_max, 1e-30f);
   }
-  float inv_scale = 1.f / scale_raw;
 
-  // ---- Write scale (only one lane per group) ----
+  // ---- Finalize + write scale (only one lane per group) ----
   float norm = rsqrtf((float)kBlockSize);
   if constexpr (kHasExtraScale) norm *= extra_scale;
   float scale_stored = scale_raw * norm;
 
-  if (valid && lane_in_group == 0) {
-    uint32_t scale_idx;
-    if constexpr (kMMajor) {
-      // M-major scale [num_groups_total, M]: scale_idx = group_global * M + row.
-      uint32_t num_blocks_per_row = groups_per_row / kGroupsPerTile;
-      uint32_t row = tile_idx / num_blocks_per_row;
-      uint32_t block_in_row = tile_idx - row * num_blocks_per_row;
-      uint32_t group_global = block_in_row * kGroupsPerTile + group_in_tile;
-      scale_idx = group_global * shape_m + row;
+  uint32_t scale_idx;
+  if constexpr (kMMajor) {
+    uint32_t num_blocks_per_row = groups_per_row / kGroupsPerTile;
+    uint32_t row = tile_idx / num_blocks_per_row;
+    uint32_t block_in_row = tile_idx - row * num_blocks_per_row;
+    uint32_t group_global = block_in_row * kGroupsPerTile + group_in_tile;
+    if constexpr (kScaleStore == kScaleStoreE8M0) {
+      scale_idx = (group_global / 4) * (shape_m * 4) + row * 4 + (group_global % 4);
     } else {
-      scale_idx = tile_idx * kGroupsPerTile + group_in_tile;
+      scale_idx = group_global * shape_m + row;
     }
-    scales_ptr[scale_idx] = scale_stored;
+  } else {
+    scale_idx = tile_idx * kGroupsPerTile + group_in_tile;
+  }
+
+  float inv_scale;
+  if constexpr (kScaleStore == kScaleStoreF32 && !kHasGlobalScale) {
+    // Default path: bit-identical to the original f32-scale kernel.
+    inv_scale = 1.f / scale_raw;
+    if (valid && lane_in_group == 0)
+      reinterpret_cast<float *>(scales_ptr)[scale_idx] = scale_stored;
+  } else {
+    float gs = 1.f, inv_gs = 1.f;
+    if constexpr (kHasGlobalScale) {
+      gs = __ldg(global_scale_ptr);
+      inv_gs = 1.f / gs;
+    }
+    // Effective stored scale (quantized + global folded back in); data is
+    // un-normalized here, so the per-element multiplier carries the norm factor.
+    float eff_scale = finalize_scale<kScaleStore>(
+        scale_stored, gs, inv_gs, scales_ptr, scale_idx, valid && lane_in_group == 0);
+    inv_scale = norm / eff_scale;
   }
 
   // ---- Quantize + store ----

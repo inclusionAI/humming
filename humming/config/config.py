@@ -23,6 +23,7 @@ class LayerConfig(BaseHummingConfig):
     a_dtype: dtypes.DataType
     c_dtype: dtypes.DataType
     bs_dtype: dtypes.DataType | None = None
+    as_dtype: dtypes.DataType | None = None
 
     # quant param config
     input_scale_group_size: int = 0
@@ -44,12 +45,28 @@ class LayerConfig(BaseHummingConfig):
     use_packed_k_layout: bool = False
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
+        "mma_type_id",
         "is_channel_weight_scale",
         "is_block_weight_scale",
         "is_group_weight_scale",
         "is_tensor_weight_scale",
         "has_input_scale",
     )
+
+    def _should_use_mxmma(self, sm_version: int) -> bool:
+        if sm_version != 12:
+            return False
+        if not isinstance(self.a_dtype, dtypes.FloatingPointType):
+            return False
+        if self.a_dtype.num_bits > 8:
+            return False
+        if self.bs_dtype not in (dtypes.float8e8m0, dtypes.float8e4m3):
+            return False
+        group = self.weight_scale_group_size
+        if group <= 0:
+            return False
+        mma_k = 256 // self.a_dtype.num_bits
+        return mma_k % group == 0 and mma_k // group in (1, 2, 4)
 
     def __post_init__(self):
         self.problem_shape = (0, self.shape_n, self.shape_k)
@@ -76,19 +93,28 @@ class LayerConfig(BaseHummingConfig):
             elif self.weight_scale_group_size > 0:
                 self.weight_scale_type = WeightScaleType.GROUP
 
-        if self.mma_type is None:
-            sm_version = torch.cuda.get_device_capability()[0]
-            self.mma_type = MmaType.WGMMA if sm_version == 9 else MmaType.MMA
-        if isinstance(self.mma_type, str):
-            self.mma_type = MmaType(self.mma_type)
-
-        for name in ["a", "b", "c", "bs"]:
+        for name in ["a", "b", "c", "bs", "as"]:
             value = getattr(self, f"{name}_dtype")
             if isinstance(value, str):
                 value = dtypes.DataType.from_str(value)
             setattr(self, f"{name}_dtype", value)
 
+        if self.mma_type is None:
+            sm_version = torch.cuda.get_device_capability()[0]
+            if sm_version == 9:
+                self.mma_type = MmaType.WGMMA
+            elif self._should_use_mxmma(sm_version):
+                self.mma_type = MmaType.MXMMA
+            else:
+                self.mma_type = MmaType.MMA
+        if isinstance(self.mma_type, str):
+            self.mma_type = MmaType(self.mma_type)
+
         self.has_input_scale = self.a_dtype.num_bits != 16
+        if not self.has_input_scale:
+            self.as_dtype = None
+        elif self.as_dtype is None:
+            self.as_dtype = self.bs_dtype if self.mma_type == MmaType.MXMMA else dtypes.float32
         self.is_channel_weight_scale = self.weight_scale_type == WeightScaleType.CHANNEL
         self.is_tensor_weight_scale = self.weight_scale_type in [
             WeightScaleType.TENSOR,
@@ -104,6 +130,20 @@ class LayerConfig(BaseHummingConfig):
             assert self.mma_type == MmaType.WGMMA, "use_packed_k_layout requires wgmma"
             assert self.a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit (fp8/int8) activation"
             assert not self.use_fused_e8m0_scale, "use_packed_k_layout is incompatible with fused-e8m0 scale"
+
+    @property
+    def mma_type_id(self):
+        assert self.mma_type is not None
+        value = self.mma_type.value.lower()
+        return ["mma", "wgmma", "umma_placeholder", "mxmma"].index(value)
+
+    @property
+    def mxmma_native_mixed(self) -> bool:
+        if self.mma_type != MmaType.MXMMA:
+            return False
+        if self.a_dtype not in (dtypes.float8e4m3, dtypes.float8e5m2):
+            return False
+        return self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
 
 
 @dataclasses.dataclass(kw_only=True)

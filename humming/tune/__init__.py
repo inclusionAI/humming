@@ -16,6 +16,7 @@ from humming.tune.sm75 import Sm75Heuristics
 from humming.tune.sm90 import Sm90Heuristics
 from humming.tune.sm90_h20 import Sm90H20Heuristics
 from humming.tune.sm100 import Sm100Heuristics
+from humming.tune.sm120 import Sm120Heuristics
 
 if TYPE_CHECKING:
     from humming.layer import HummingLayerMeta
@@ -29,8 +30,8 @@ heuristics_map: dict[int, type[DeviceHeuristics]] = {
     90: Sm90Heuristics,
     100: Sm100Heuristics,
     103: Sm100Heuristics,
-    120: Sm89Heuristics,
-    121: Sm89Heuristics,
+    120: Sm120Heuristics,
+    121: Sm120Heuristics,
 }
 
 

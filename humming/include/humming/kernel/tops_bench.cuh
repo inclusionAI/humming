@@ -9,6 +9,7 @@
 #include <humming/epilogue/pipeline.cuh>
 #include <humming/memory/g2s_pipeline.cuh>
 #include <humming/memory/s2r_pipeline.cuh>
+#include <humming/mma/mxmma.cuh>
 #include <humming/mma/wgmma.cuh>
 #include <humming/mma/wmma.cuh>
 
@@ -31,6 +32,12 @@ __global__ void tops_bench(uint32_t *out_ptr) {
       wgmma_commit();
       wgmma_wait<0>();
     }
+  } else if constexpr (MmaOpClass::kMmaType == MmaType::MXMMA) {
+    typename MmaOpClass::ARegisters regs_a;
+    typename MmaOpClass::BRegisters regs_b;
+    PRAGMA_UNROLL_COUNT(kUnrollCount)
+    for (uint32_t i = 0; i < kRepeatCount; i++)
+      MmaOpClass::fma(regs_a, regs_b, 0u, 0u, regs_c, regs_c, 0, 0, 0, 0);
   } else {
     typename MmaOpClass::ARegisters regs_a;
     typename MmaOpClass::BRegisters regs_b;

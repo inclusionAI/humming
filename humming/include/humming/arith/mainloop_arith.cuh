@@ -48,7 +48,7 @@ private:
   static constexpr uint32_t kNumKSlabs = WarpShape::K / kPartMmaShapeK;
   static constexpr uint2 kExpOffset = get_mainloop_exp_offset<
       ElementA, ElementB, ElementBS, kHasZeroPoint,
-      kIsF16Accum, kIsGroupInputScale, kIsGroupOrBlockWeightScale>();
+      kIsF16Accum, kIsGroupInputScale, kIsGroupOrBlockWeightScale, MmaOpClass::kNativeMixed>();
 
   static constexpr uint32_t kDequantBSBits = (ElementA::kBits < 16 && !kIsF16Accum) ? 32 : 16;
   static constexpr uint32_t kNumSubBlocksM = CEIL_DIV(WarpShape::M, 16);

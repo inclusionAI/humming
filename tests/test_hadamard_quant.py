@@ -86,7 +86,9 @@ def test_fused_lower_dtype_shape_and_scale(quant_dtype, dtype):
     block_size = 128
     x = torch.randn((4, block_size * 4), device=("cuda"), dtype=dtype) * 0.4
 
-    q_fused, s_fused = hadamard_quant_input(x, block_size=block_size, quant_dtype=quant_dtype)
+    q_fused, s_fused = hadamard_quant_input(
+        x, block_size=block_size, quant_dtype=quant_dtype, group_size=block_size
+    )
     y_ref = hadamard_transform(x, block_size=block_size)
     q_ref, s_ref = quant_input(y_ref, quant_dtype, group_size=block_size)
 
@@ -103,7 +105,7 @@ def test_fused_extra_scale(quant_dtype):
     x = torch.randn((4, block_size * 3), device="cuda", dtype=torch.float32) * 0.3
     scale = 2.0
     q_fused, s_fused = hadamard_quant_input(
-        x, block_size=block_size, quant_dtype=quant_dtype, scale=scale
+        x, block_size=block_size, quant_dtype=quant_dtype, scale=scale, group_size=block_size
     )
     y_ref = hadamard_transform(x, block_size=block_size, scale=scale)
     q_ref, s_ref = quant_input(y_ref, quant_dtype, group_size=block_size)

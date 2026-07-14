@@ -14,6 +14,13 @@ CODE_TEMPLATE = jinja2.Template("""
 #include <humming/kernel/hadamard_quant_wide.cuh>
 """)
 
+_SCALE_DTYPE_CODE = {"float32": 0, "float8e4m3": 1, "float8e8m0": 2}
+_SCALE_DTYPE_TORCH = {
+    "float32": torch.float32,
+    "float8e4m3": torch.float8_e4m3fn,
+    "float8e8m0": torch.uint8,
+}
+
 
 def _pick_wide_launch_params(block_size: int, group_size: int) -> tuple[int, int]:
     assert block_size <= 512, "wide kernel requires block_size (FHT N) <= 512"
@@ -56,6 +63,8 @@ class HadamardQuantInputWideKernel(KernelRuntime):
     group_size: int
     has_extra_scale: bool = False
     m_major: bool = False
+    scale_dtype: str = "float32"
+    has_global_scale: bool = False
 
     def init_kernel(self):
         assert self.group_size > self.block_size, (
@@ -82,7 +91,9 @@ class HadamardQuantInputWideKernel(KernelRuntime):
             f"    {threads_per_tile},\n"
             f"    {tiles_per_thread},\n"
             f"    {int(self.has_extra_scale)},\n"
-            f"    {int(self.m_major)}>"
+            f"    {int(self.m_major)},\n"
+            f"    {_SCALE_DTYPE_CODE[self.scale_dtype]},\n"
+            f"    {int(self.has_global_scale)}>"
         )
         self.arg_types = (
             ctypes.c_void_p,
@@ -92,6 +103,7 @@ class HadamardQuantInputWideKernel(KernelRuntime):
             ctypes.c_uint32,
             ctypes.c_uint32,
             ctypes.c_uint32,
+            ctypes.c_void_p,
         )
         self.prepare()
 
@@ -101,12 +113,14 @@ class HadamardQuantInputWideKernel(KernelRuntime):
         outputs: torch.Tensor,
         scales: torch.Tensor,
         extra_scale: float = 1.0,
+        global_scale: torch.Tensor | None = None,
     ):
         self.check_context()
         assert inputs.is_contiguous() and outputs.is_contiguous() and scales.is_contiguous()
         assert inputs.size(-1) % self.group_size == 0
         assert inputs.dtype == self.source_torch_dtype
-        assert scales.dtype == torch.float32
+        assert scales.dtype == _SCALE_DTYPE_TORCH[self.scale_dtype]
+        assert (global_scale is not None) == self.has_global_scale
 
         num_groups = inputs.numel() // self.group_size
         shape_m = inputs.numel() // inputs.size(-1)
@@ -132,6 +146,7 @@ class HadamardQuantInputWideKernel(KernelRuntime):
             num_groups,
             shape_m,
             groups_per_row,
+            global_scale.data_ptr() if global_scale is not None else 0,
         )
 
         cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), 0)

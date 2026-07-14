@@ -96,8 +96,14 @@ CUDA_INLINE void quant_buffer(
       out_vals[i] = fminf(out_vals[i], (1 << TargetType::kBits) - 1);
     } else if constexpr (TargetType::kIsIntegerType && !kHasZeroPoint) {
       int32_t *out_vals = reinterpret_cast<int32_t *>(out_buffer_ptr);
-      out_vals[i] = __float2int_rn(vals[i] * inv_scale_val);
-      if constexpr (!TargetType::kIsSigned) out_vals[i] += 1 << (TargetType::kBits - 1);
+      int32_t code = __float2int_rn(vals[i] * inv_scale_val);
+      if constexpr (!TargetType::kIsSigned) {
+        code += 1 << (TargetType::kBits - 1);
+        code = min(max(code, 0), (1 << TargetType::kBits) - 1);
+      } else {
+        code = min(max(code, -(1 << (TargetType::kBits - 1))), (1 << (TargetType::kBits - 1)) - 1);
+      }
+      out_vals[i] = code;
     } else {
       static_assert(TargetType::kIsSigned);
 
@@ -155,7 +161,8 @@ CUDA_INLINE float warp_reduce_min(float val) {
 template <
     class SourceType, class TargetType,
     uint32_t kQuantGroupSize, bool kHasScale,
-    bool kUseUE8M0Scale, bool kHasZeroPoint, bool kIsFpZeroPoint>
+    bool kUseUE8M0Scale, bool kHasZeroPoint, bool kIsFpZeroPoint,
+    bool kAllowNegativeScale = true>
 __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_ptr, uint32_t *zero_point_ptr) {
 
   static_assert(std::is_same<SourceType, Float16>::value ||
@@ -221,7 +228,9 @@ __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_
       }
 
       scale_val = max(scale_val1, scale_val2);
-      if (max_val > fabsf(min_val)) scale_val = -scale_val;
+      if constexpr (kAllowNegativeScale) {
+        if (max_val > fabsf(min_val)) scale_val = -scale_val;
+      }
     } else {
       scale_val = (max_val - min_val) / (get_data_type_max_num<TargetType>() * 2 + 1);
       zero_point_float = (-min_val) / scale_val;

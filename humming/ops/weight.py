@@ -62,6 +62,7 @@ def quant_weight(
     use_e8m0_scale: bool,
     has_zero_point: bool,
     is_fp_zero_point: bool,
+    allow_negative_scale: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     group_size = inputs.size(-1) if group_size <= 0 else group_size
     source_dtype = dtypes.DataType.from_str(source_dtype_str)
@@ -94,6 +95,7 @@ def quant_weight(
             has_zero_point=has_zero_point,
             use_e8m0_scale=use_e8m0_scale,
             is_fp_zero_point=is_fp_zero_point,
+            allow_negative_scale=allow_negative_scale,
         )
         kernel(inputs=inputs, outputs=outputs, scales=scales, zero_point=zero_point)
 

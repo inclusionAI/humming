@@ -28,6 +28,9 @@ private:
   static constexpr uint32_t kWeightScaleGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : 1;
   static constexpr uint32_t kMaxGroupSize = MAX(kInputScaleGroupSize, kWeightScaleGroupSize);
 
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
+  static constexpr uint32_t kAsBlocksPerWord = kUseMxmma ? MAX(1u, 4 * kInputScaleGroupSize / BlockShape::K) : 1;
+
   static constexpr uint32_t N_BLOCKS = ProblemShape::N / BlockShape::N / kMultiCastSizeA;
   static constexpr uint32_t K_BLOCKS = ProblemShape::K / BlockShape::K;
 
@@ -102,7 +105,7 @@ public:
 
       streamk_mnk_total_iters = CEIL_DIV(streamk_mnk_blocks, kNumCtaGroups);
 
-      constexpr int32_t blocks_per_group = kMaxGroupSize / BlockShape::K;
+      constexpr int32_t blocks_per_group = MAX(kMaxGroupSize / BlockShape::K, kAsBlocksPerWord);
       constexpr int32_t bpg = blocks_per_group > 1 ? blocks_per_group : 1;
       constexpr int32_t align_iters = bpg / ct_gcd(bpg, (int32_t)kNumStages) * (int32_t)kNumStages;
       if constexpr (align_iters > 1) {

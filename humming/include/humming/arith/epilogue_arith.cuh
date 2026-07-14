@@ -35,7 +35,7 @@ private:
 
   static constexpr uint2 kExpOffset = get_epilogue_exp_offset<
       ElementA, ElementB, ElementC, ElementBS, kHasZeroPoint,
-      kIsF16Accum, kIsGroupInputScale, kIsGroupOrBlockWeightScale>();
+      kIsF16Accum, kIsGroupInputScale, kIsGroupOrBlockWeightScale, MmaOpClass::kNativeMixed>();
 
   static constexpr uint32_t kSizeAS = WarpShape::M / 8;
   static constexpr uint32_t kSizeBS = WarpShape::N / 4 * ElementBS::kBits / 32;

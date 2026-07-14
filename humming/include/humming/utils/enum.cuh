@@ -12,7 +12,8 @@ enum class WeightScaleType : uint32_t {
 
 enum class MmaType : uint32_t {
   MMA,
-  WGMMA
+  WGMMA,
+  MXMMA
 };
 
 

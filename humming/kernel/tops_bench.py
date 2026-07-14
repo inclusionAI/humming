@@ -33,6 +33,7 @@ class TopsBenchKernel(KernelRuntime):
     cd_dtype: str | dtypes.DataType
     repeat_count: int
     unroll_count: int
+    sf_dtype: str | dtypes.DataType | None = None
 
     def init_kernel(self):
         if isinstance(self.mma_type, str):
@@ -41,6 +42,8 @@ class TopsBenchKernel(KernelRuntime):
             self.ab_dtype = dtypes.DataType.from_str(self.ab_dtype)
         if isinstance(self.cd_dtype, str):
             self.cd_dtype = dtypes.DataType.from_str(self.cd_dtype)
+        if isinstance(self.sf_dtype, str):
+            self.sf_dtype = dtypes.DataType.from_str(self.sf_dtype)
 
         self.mma_op_class = MmaOpClass.from_config(
             self.mma_type,
@@ -50,6 +53,7 @@ class TopsBenchKernel(KernelRuntime):
             self.ab_dtype,
             self.ab_dtype,
             self.cd_dtype,
+            sf_dtype=self.sf_dtype,
         )
 
         self.code = CODE_TEMPLATE.render(

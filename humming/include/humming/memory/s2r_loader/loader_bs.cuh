@@ -12,18 +12,54 @@ private:
   using ElementBS = typename Ctx::ElementBS;
 
   static constexpr bool kUseWgmma = Ctx::kUseWgmma;
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr bool kIsChannel = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsBlock = Ctx::kIsBlockWeightScale;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
   static constexpr uint32_t kGroupSize = kIsChannel ? BlockShape::K : Ctx::kWeightScaleGroupSize;
   static constexpr uint32_t kGroupSizeN = Ctx::kWeightScaleGroupSizeN;
   static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
+  static constexpr uint32_t M_WARPS = Ctx::M_WARPS;
+  static constexpr uint32_t N_WARPS = Ctx::N_WARPS;
   static constexpr uint32_t kSmemStride = BlockShape::N * ElementBS::kBits / 32 / 4;
+  static constexpr uint32_t kScaleVec = kPartMmaShapeK / kGroupSize;
 
   Ctx &ctx;
 
 public:
   CUDA_INLINE S2RMemoryLoaderBS(Ctx &ctx) : ctx(ctx) {}
+
+  CUDA_INLINE
+  void load_sf(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {
+    const uint32_t *smem_ptr_load = reinterpret_cast<const uint32_t *>(smem_ptr);
+    uint32_t warp_id = threadIdx.x / 32;
+    uint32_t lane_id = threadIdx.x % 32;
+
+    uint32_t col_in_tile = lane_id / 4;
+    uint32_t k_warp_base = (warp_id / (M_WARPS * N_WARPS)) * WarpShape::K + iter_id * kPartMmaShapeK;
+    uint32_t group_base = k_warp_base / kGroupSize / (kScaleVec == 1 ? 2 : 4);
+    uint32_t n_warp_base = (warp_id % N_WARPS) * WarpShape::N;
+
+    if constexpr (kScaleVec == 1 && WarpShape::N == 16) {
+      uint32_t s_sh_rd = lane_id / 4;
+      regs_ptr[0] = smem_ptr_load[group_base * (BlockShape::N / 2) + (warp_id % N_WARPS) * (WarpShape::N / 2) + s_sh_rd];
+    } else if constexpr (WarpShape::N == 32 && kScaleVec == 1) {
+      uint32_t s_sh_rd = (lane_id % 2) * 8 + lane_id / 4;
+      regs_ptr[0] = smem_ptr_load[group_base * (BlockShape::N / 2) + (warp_id % N_WARPS) * (WarpShape::N / 2) + s_sh_rd];
+    } else if constexpr (WarpShape::N == 16) {
+      uint32_t s_sh_rd = (lane_id / 2) % 2 * 8 + lane_id / 4;
+      regs_ptr[0] = smem_ptr_load[group_base * WarpShape::N + n_warp_base + s_sh_rd];
+    } else {
+      uint32_t s_sh_rd = lane_id % 4 * 8 + lane_id / 4;
+      constexpr uint32_t kRowStride = kScaleVec == 1 ? BlockShape::N / 2 : BlockShape::N;
+      uint32_t nb = (warp_id % N_WARPS) * (kScaleVec == 1 ? WarpShape::N / 2 : WarpShape::N);
+
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < WarpShape::N / (kScaleVec == 1 ? 64 : 32); i++) {
+        regs_ptr[i] = smem_ptr_load[group_base * kRowStride + i * 32 + nb + s_sh_rd];
+      }
+    }
+  }
 
   CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {

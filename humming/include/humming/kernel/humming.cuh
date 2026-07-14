@@ -124,6 +124,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
               if (slice_iters > 1) consumer.wait_stage((stage_id + 1) % kNumStages);
               producer.load_stage(stage_id, slice_iters > kNumStages);
             } else {
+              __syncthreads();
               producer.load_stage(stage_id + kNumStages - 1, slice_iters >= kNumStages);
               if (slice_iters > 1) consumer.wait_stage((stage_id + 1) % kNumStages);
             }

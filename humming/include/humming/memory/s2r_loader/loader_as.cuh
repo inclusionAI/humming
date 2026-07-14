@@ -12,6 +12,7 @@ private:
   using ElementA = typename Ctx::ElementA;
 
   static constexpr bool kUseWgmma = Ctx::kUseWgmma;
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
   static constexpr bool kIsChannelScale = kHasInputScale && Ctx::kInputScaleGroupSize == 0;
   static constexpr bool kIsGroupScale = kHasInputScale && Ctx::kInputScaleGroupSize > 0;
@@ -19,13 +20,41 @@ private:
 
   static constexpr uint32_t kGroupSize = kIsGroupScale ? Ctx::kInputScaleGroupSize : BlockShape::K;
   static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
+  static constexpr uint32_t M_WARPS = Ctx::M_WARPS;
+  static constexpr uint32_t N_WARPS = Ctx::N_WARPS;
   static constexpr uint32_t kNumLinesPerBlock = kUseWgmma && kIsGroupScale ? 2 : 1;
-  static constexpr uint32_t kSmemStride = CEIL_DIV(BlockShape::K, kGroupSize);
+  static constexpr uint32_t kSmemStride = CEIL_DIV(BlockShape::K / (kUseMxmma ? 4 : 1), kGroupSize);
 
   Ctx &ctx;
 
 public:
   CUDA_INLINE S2RMemoryLoaderAS(Ctx &ctx) : ctx(ctx) {}
+
+  CUDA_INLINE
+  void load_sf(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {
+    const uint32_t *smem_ptr_load = reinterpret_cast<const uint32_t *>(smem_ptr);
+    uint32_t warp_id = threadIdx.x / 32;
+    uint32_t lane_id = threadIdx.x % 32;
+
+    uint32_t m_warp_base = (warp_id / N_WARPS % M_WARPS) * WarpShape::M;
+    uint32_t k_warp_base = (warp_id / (M_WARPS * N_WARPS)) * WarpShape::K + iter_id * kPartMmaShapeK;
+    uint32_t word_base = k_warp_base / kGroupSize / 4;
+    uint32_t base = word_base * BlockShape::M + m_warp_base;
+
+    constexpr uint32_t kNumLoadsPart2 = WarpShape::M % 32 == 0 ? 0 : 1;
+    constexpr uint32_t kNumLoadsPart1 = (WarpShape::M - kNumLoadsPart2 * 16) / 32;
+
+    PRAGMA_UNROLL
+    for (uint32_t m = 0; m < kNumLoadsPart1; m++) {
+      uint32_t m_index = lane_id / 4 + lane_id % 4 * 8 + 32 * m;
+      regs_ptr[m] = smem_ptr_load[base + m_index];
+    }
+
+    if constexpr (kNumLoadsPart2 == 1) {
+      uint32_t m_index = lane_id / 4 + lane_id % 2 * 8 + kNumLoadsPart1 * 32;
+      regs_ptr[kNumLoadsPart1] = smem_ptr_load[base + m_index];
+    }
+  }
 
   CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {

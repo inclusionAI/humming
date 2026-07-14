@@ -17,6 +17,7 @@ public:
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
+  static constexpr bool kNativeMixed = MmaOpClass::kNativeMixed;
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
@@ -45,6 +46,15 @@ public:
   CUDA_INLINE
   void transform_b(uint32_t buffer_id) {
     if constexpr (std::is_same<ElementA, ElementB>::value) return;
+
+    if constexpr (kNativeMixed) {
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < WarpShape::N / 16; i++) {
+        uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id][i * 16 / MmaShape::N]);
+        repack_native_mxf8f6f4<ElementB>(regs_qb[buffer_id], regs_b_ptr, i);
+      }
+      return;
+    }
 
     if constexpr (kUseFusedE8m0Scale) {
       uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);

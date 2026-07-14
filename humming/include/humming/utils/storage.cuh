@@ -90,6 +90,7 @@ template <
     class LayerConfig, class ComputeConfig, class TuningConfig>
 struct SharedStorage {
 private:
+  static constexpr bool kUseMxmma = MmaOpClass::kMmaType == MmaType::MXMMA;
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
   static constexpr bool kIsChannelInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize == 0;
   static constexpr bool kIsGroupInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize > 0;
@@ -125,7 +126,10 @@ public:
 
   static constexpr uint32_t kStageSizeA = BlockShape::M * kSmemStrideA;
   static constexpr uint32_t kStageSizeB = BlockShape::K / kPartMmaShapeK * kSmemStrideB;
-  static constexpr uint32_t kStageSizeAS = kNumGroupsA * BlockShape::M / 4;
+  static constexpr uint32_t kNumGroupsAStorage = CEIL_DIV(kNumGroupsA, 4) * 4;
+  static constexpr uint32_t kStageSizeAS = kUseMxmma
+      ? CEIL_DIV(kNumGroupsAStorage * BlockShape::M * ElementBS::kBits / 8, sizeof(int4))
+      : kNumGroupsA * BlockShape::M / 4;
   static constexpr uint32_t kStageSizeBS = kNumGroupsB * kSmemStrideBS;
   static constexpr uint32_t kStageSizeBZP = kNumGroupsB * kSmemStrideBZP;
 
@@ -149,7 +153,7 @@ public:
   static constexpr bool kIsGroupedGemm = ComputeConfig::kGemmType == GemmType::GROUPED_CONTIGUOUS || ComputeConfig::kGemmType == GemmType::GROUPED_MASKED;
 
   struct StageStorage {
-    alignas(128) int4 a[kStageSizeA];
+    alignas(1024) int4 a[kStageSizeA];
     alignas(128) int4 b[kStageSizeB];
     IF_HAS_STAGE_INPUT_SCALE(alignas(128) int4 as[kStageSizeAS];)
     IF_HAS_STAGE_WEIGHT_SCALE(alignas(128) int4 bs[kStageSizeBS];)

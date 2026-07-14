@@ -26,6 +26,7 @@ class QuantWeightKernel(KernelRuntime):
     use_e8m0_scale: bool
     has_zero_point: bool = False
     is_fp_zero_point: bool = False
+    allow_negative_scale: bool = True
 
     def init_kernel(self):
         self.code = CODE_TEMPLATE.render(
@@ -36,6 +37,7 @@ class QuantWeightKernel(KernelRuntime):
             use_e8m0_scale=int(self.use_e8m0_scale),
             has_zero_point=int(self.has_zero_point),
             is_fp_zero_point=int(self.is_fp_zero_point),
+            allow_negative_scale=int(self.allow_negative_scale),
         )
         self.kernel_expr = (
             f"quant_weight<\n"
@@ -45,7 +47,8 @@ class QuantWeightKernel(KernelRuntime):
             f"    {int(self.has_scale)},\n"
             f"    {int(self.use_e8m0_scale)},\n"
             f"    {int(self.has_zero_point)},\n"
-            f"    {int(self.is_fp_zero_point)}>"
+            f"    {int(self.is_fp_zero_point)},\n"
+            f"    {int(self.allow_negative_scale)}>"
         )
         self.arg_types = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
         self.prepare()

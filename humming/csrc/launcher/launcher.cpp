@@ -223,6 +223,7 @@ int64_t register_kernel(const std::string &cubin_path, const std::string &func_n
         reader.getUint32("MULTI_CAST_SIZE_A"),
         reader.getUint32("MULTI_CAST_SIZE_B"),
         reader.getUint32("GEMM_TYPE_ID"),
+        reader.getUint32("MMA_TYPE_ID"),
 
         reader.getBool("USE_STREAM_K"),
         reader.getBool("IS_FP_ZERO_POINT"),

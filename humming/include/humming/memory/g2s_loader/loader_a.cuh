@@ -147,7 +147,7 @@ public:
 
   CUDA_INLINE
   void advance() {
-    col_offset += BlockShape::K;
+    col_offset += BlockShape::K * ElementA::kBits / MAX(ElementA::kBits, 8);
     gmem_ptr += kSmemStride;
   }
 
@@ -159,7 +159,7 @@ public:
     } else {
       row_offset = m_block_id * BlockShape::M;
     }
-    col_offset = k_block_id * BlockShape::K;
+    col_offset = k_block_id * (BlockShape::K * ElementA::kBits / MAX(ElementA::kBits, 8));
     block_shape_m = MIN(shape_m - row_offset, BlockShape::M);
 
     uint32_t gmem_offset = k_block_id * kSmemStride;

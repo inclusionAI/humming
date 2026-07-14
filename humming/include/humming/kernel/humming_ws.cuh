@@ -99,7 +99,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       producer.wait_math_epilogue();
       producer.load_stage<true, true>(0);
       PRAGMA_UNROLL
-      for (uint32_t stage_id = 1; stage_id < kNumStages - 1; stage_id++) {
+      for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
         producer.load_stage(stage_id, stage_id < slice_iters);
       };
 
@@ -108,7 +108,11 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         for (uint32_t stage_id = 0; stage_id < kNumStages; stage_id++) {
           if (slice_iters == 1) producer.load_channel();
           producer.wait_stage(stage_id);
-          producer.load_stage(stage_id + kNumStages - 1, slice_iters >= kNumStages);
+          if constexpr (kNumStages == 2) {
+            producer.load_stage(stage_id, slice_iters > kNumStages);
+          } else {
+            producer.load_stage(stage_id + kNumStages - 1, slice_iters >= kNumStages);
+          }
           slice_iters--;
           if (!slice_iters) break;
         }

@@ -86,6 +86,7 @@ def generate_random_weight(
     has_global_scale=False,
     has_zero_point=False,
     is_fp_zero_point=False,
+    allow_negative_scale=True,
 ):
     e = 1 if num_experts is None else num_experts
     dtype_orig = dtype
@@ -117,6 +118,7 @@ def generate_random_weight(
         has_zero_point=has_zero_point,
         has_global_scale=has_global_scale,
         is_fp_zero_point=is_fp_zero_point,
+        allow_negative_scale=allow_negative_scale,
     )
 
     if dtype.is_integer_type and has_zero_point:

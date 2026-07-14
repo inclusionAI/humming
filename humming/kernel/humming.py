@@ -110,6 +110,33 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         LayerConfig.__post_init__(self)
         ComputeConfig.__post_init__(self)
         TuningConfig.__post_init__(self)
+
+        # NOTE: these flag overrides must run BEFORE KernelRuntime.__post_init__,
+        # which generates the kernel code / cubin (USE_TMA_AS etc.). Overriding
+        # afterwards would leave the cubin metadata out of sync with the launcher.
+
+        # Channel-wise input scale is a [M] vector (inherently M-contiguous), so it
+        # is always M-major; this lets use_tma_as be enabled for it as well.
+        if self.has_input_scale and self.input_scale_group_size == 0:
+            self.use_m_major_input_scale = True
+
+        # AS TMA needs the M-innermost start coord (the expert token offset) to be
+        # 16B-aligned. dense/grouped satisfy this (grouped pads every expert's token
+        # count to a multiple of 4); indexed gemm gathers rows and cannot, so it
+        # falls back to the cp.async M-major path.
+        if self.use_tma_as and self.is_indexed_gemm:
+            self.use_tma_as = False
+            self.use_m_major_input_scale = True
+
+        # TMA loads of the input scale require it to be M-major ([num_groups, M]).
+        # mxmma is exempt: its packed sf is already stored M-major ([num_words, M]).
+        if self.use_tma_as:
+            is_mxmma = self.mma_type == MmaType.MXMMA
+            assert self.use_m_major_input_scale or is_mxmma, (
+                "use_tma_as requires use_m_major_input_scale=True "
+                "(input scale must be stored M-major [num_groups, M])"
+            )
+
         KernelRuntime.__post_init__(self)
 
     def init_kernel(self) -> None:
@@ -176,6 +203,29 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         self.get_kernel_id = module.get_kernel_id
 
     def select_mma_op_class(self):
+        if self.mma_type == MmaType.MXMMA:
+            mma_shape_m, mma_shape_n = 16, 8
+            mma_shape_k = 256 // self.a_dtype.num_bits
+            assert self.warp_shape[0] % mma_shape_m == 0
+            assert self.warp_shape[1] % mma_shape_n == 0
+            assert self.warp_shape[2] % mma_shape_k == 0
+            group = self.weight_scale_group_size or mma_shape_k
+            assert mma_shape_k % group == 0
+            scale_vec = mma_shape_k // group
+
+            mma_b_dtype = self.b_dtype if self.mxmma_native_mixed else self.a_dtype
+            return MmaOpClass.from_config(
+                self.mma_type,
+                mma_shape_m,
+                mma_shape_n,
+                mma_shape_k,
+                self.a_dtype,
+                mma_b_dtype,
+                dtypes.float32,
+                sf_dtype=self.bs_dtype,
+                scale_vec=scale_vec,
+            )
+
         if self.a_dtype in [dtypes.int4, dtypes.int8]:
             mma_cd_dtype = dtypes.int32
         elif self.use_f16_accum:
@@ -203,13 +253,22 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.warp_shape[1] % mma_shape_n == 0
         assert self.warp_shape[2] % mma_shape_k == 0
 
+        mma_native_mixed = (
+            self.mma_type == MmaType.MMA
+            and self.sm_version // 10 == 12
+            and mma_shape_m == 16
+            and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2)
+            and self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
+        )
+        mma_b_dtype = self.b_dtype if mma_native_mixed else self.a_dtype
+
         return MmaOpClass.from_config(
             self.mma_type,
             mma_shape_m,
             mma_shape_n,
             mma_shape_k,
             self.a_dtype,
-            self.a_dtype,
+            mma_b_dtype,
             mma_cd_dtype,
         )
 
@@ -245,6 +304,16 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.warp_shape[2] >= 128
 
     def check_scale(self):
+        if self.mma_type == MmaType.MXMMA:
+            mma_k = 256 // self.a_dtype.num_bits
+            for gs in (self.input_scale_group_size, self.weight_scale_group_size):
+                if gs > 0:
+                    assert mma_k % gs == 0
+                    assert mma_k // gs in (1, 2, 4)
+            if self.input_scale_group_size > 0 and self.weight_scale_group_size > 0:
+                assert self.input_scale_group_size == self.weight_scale_group_size
+            return
+
         if self.input_scale_group_size > 0:
             assert self.input_scale_group_size >= 256 // self.a_dtype.num_bits
         if self.weight_scale_group_size > 0:
