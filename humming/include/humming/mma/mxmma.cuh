@@ -24,6 +24,8 @@ public:
   static constexpr uint32_t kAsBlockGroups = kAsGroup > 0 ? BlockShape::K / kAsGroup : 1;
   static constexpr uint32_t kAsBlocksPerWord = kAsBlockGroups >= 4 ? 1 : 4 / kAsBlockGroups;
   static constexpr uint32_t kWarpKIters = WarpShape::K / kPartMmaShapeK;
+  static constexpr uint32_t M_WARPS = Ctx::M_WARPS;
+  static constexpr uint32_t N_WARPS = Ctx::N_WARPS;
 
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
@@ -40,10 +42,15 @@ public:
   uint32_t regs_sfb[2][WarpShape::N / MmaShape::N][kPartMmaShapeK / MmaShape::K];
   uint32_t as_byte_phase = 0;
   uint32_t k_block_idx = 0;
+  uint32_t k_warp_byte_base = 0;
 
   CUDA_INLINE
   MXMMA(Ctx &ctx, ArithClass &arith)
       : ctx(ctx), arith(arith) {
+    if constexpr (kAsGroup > 0) {
+      uint32_t k_warp_id = (threadIdx.x / 32) / (M_WARPS * N_WARPS);
+      k_warp_byte_base = (k_warp_id * kWarpKIters * kScaleVec) % 4;
+    }
   }
 
   CUDA_INLINE
@@ -95,7 +102,7 @@ public:
 
   CUDA_INLINE
   uint32_t get_byte_id_a(uint32_t stage_id, uint32_t iter_id, uint32_t m_id) {
-    return (as_byte_phase + iter_id * kScaleVec) % 4;
+    return (as_byte_phase + k_warp_byte_base + iter_id * kScaleVec) % 4;
   }
 
   CUDA_INLINE

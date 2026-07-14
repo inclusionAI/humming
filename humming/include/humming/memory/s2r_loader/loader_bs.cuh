@@ -43,7 +43,10 @@ public:
     if constexpr (kScaleVec == 1 && WarpShape::N == 16) {
       uint32_t s_sh_rd = lane_id / 4;
       regs_ptr[0] = smem_ptr_load[group_base * (BlockShape::N / 2) + (warp_id % N_WARPS) * (WarpShape::N / 2) + s_sh_rd];
-    } else if constexpr (WarpShape::N == 32 && kScaleVec == 1 || WarpShape::N == 16) {
+    } else if constexpr (WarpShape::N == 32 && kScaleVec == 1) {
+      uint32_t s_sh_rd = (lane_id % 2) * 8 + lane_id / 4;
+      regs_ptr[0] = smem_ptr_load[group_base * (BlockShape::N / 2) + (warp_id % N_WARPS) * (WarpShape::N / 2) + s_sh_rd];
+    } else if constexpr (WarpShape::N == 16) {
       uint32_t s_sh_rd = (lane_id / 2) % 2 * 8 + lane_id / 4;
       regs_ptr[0] = smem_ptr_load[group_base * WarpShape::N + n_warp_base + s_sh_rd];
     } else {
