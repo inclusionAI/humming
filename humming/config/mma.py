@@ -171,8 +171,6 @@ class WgmmaOpClassImpl:
         self.b_dtype = b_dtype if isinstance(b_dtype, str) else DTYPE_MAP[b_dtype]
         self.cd_dtype = cd_dtype if isinstance(cd_dtype, str) else DTYPE_MAP[cd_dtype]
 
-        # Project B (registers) is sized (project N) x (project K) in b_dtype after
-        # the transpose — that's what fills the wgmma A register operand.
         self.reg_b_count = calc_reg_count(n, k, self.b_dtype) // 4
         self.reg_cd_count = calc_reg_count(m, n, self.cd_dtype) // 4
         if self.cd_dtype == "f16":
@@ -232,7 +230,6 @@ class WgmmaOpClassImpl:
         # the wgmma A slot takes project's b_dtype and the wgmma B slot takes a_dtype.
         asm_op = f"wgmma.mma_async.sync.aligned.m{n}n{m}k{k}"
         asm_op += f".{cd_dtype}.{b_dtype}.{a_dtype}"
-        # satfinite gates on the wgmma-A operand dtype (= project's B).
         if "s" in b_dtype:
             asm_op += ".satfinite"
 
@@ -333,9 +330,6 @@ class MxMmaOpClassImpl:
         self.sf_dtype = sf_dtype
         self.sf_ptx = SF_DTYPE_MAP[sf_dtype]
 
-        # scale_vec = (mma K) / (scale group size), i.e. how many block scales
-        # cover one mma K-tile (1X / 2X / 4X). When unknown, default from the
-        # scale dtype (e4m3 -> nvfp4 4X, e8m0 -> mxfp4 2X) for fp4.
         if scale_vec is None:
             if self.a_dtype == "e2m1":
                 scale_vec = 4 if self.sf_ptx == "ue4m3" else 2
@@ -344,14 +338,10 @@ class MxMmaOpClassImpl:
         self.scale_vec_size = scale_vec
 
         if self.a_dtype == "e2m1":
+            self.kind = "kind::mxf4nvf4"
             if scale_vec == 4:
-                # block16: only nvf4 supports 4X, and it requires a ue4m3 scale.
-                # assert self.sf_ptx == "ue4m3", "fp4 scale_vec::4X (group 16) requires a ue4m3 scale"
-                self.kind = "kind::mxf4nvf4"
                 self.scale_vec = "scale_vec::4X"
             elif scale_vec == 2:
-                # block32: mxf4 for ue8m0, mxf4nvf4 for ue4m3.
-                self.kind = "kind::mxf4nvf4" if self.sf_ptx == "ue4m3" else "kind::mxf4"
                 self.scale_vec = "scale_vec::2X"
             else:
                 raise ValueError(f"unsupported fp4 scale_vec: {scale_vec} (expected 2 or 4)")
@@ -425,10 +415,6 @@ class MxMmaOpClassImpl:
         asm_op += f".m{shape[0]}n{shape[1]}k{shape[2]}.row.col"
         asm_op += f".{cd_dtype}.{a_dtype}.{b_dtype}.{cd_dtype}.{self.sf_ptx}"
 
-        # Placeholders are numbered by operand-binding order: outputs (d) first,
-        # then inputs in the order a, b, c, sfa, byte/thread-id-a, sfb,
-        # byte/thread-id-b -- which matches their left-to-right order in the asm
-        # string below, so a single running counter suffices.
         counter = 0
 
         def take(count):
