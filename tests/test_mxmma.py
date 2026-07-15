@@ -175,15 +175,24 @@ def test_mxmma_fp4(b_dtype, bs_dtype, group_size, c_dtype):
     )
 
 
-# E0M3 is a fixed-point fp4 format; the E0M3 OMMA is only legal with
-# scale_vec::4X, i.e. group_size == mma-K-tile / 4 == 16.
+@pytest.mark.parametrize(
+    "b_dtype",
+    [
+        "float4e0m3",
+        "float3e0m2",
+        "float2e0m1",
+        "uint3",
+        "uint2",
+        "uint1",
+    ],
+)
 @pytest.mark.parametrize("bs_dtype", ["float8e8m0", "float8e4m3"])
 @pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
-def test_mxmma_fp4_e0m3(bs_dtype, c_dtype):
+def test_mxmma_fp4_e0m3(b_dtype, bs_dtype, c_dtype):
     _skip_if_no_mxmma()
     _run_mxmma(
         a_dtype=dtypes.float4e0m3,
-        b_dtype=dtypes.float4e0m3,
+        b_dtype=dtypes.DataType.from_str(b_dtype),
         c_dtype=dtypes.DataType.from_str(c_dtype),
         bs_dtype=dtypes.DataType.from_str(bs_dtype),
         group_size=16,
