@@ -195,6 +195,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
         if mode:
             from humming.utils.cubin import patch_cubin
+
             patch_cubin(cubin_path=cubin_path, mode=mode)
 
     def select_mma_op_class(self):

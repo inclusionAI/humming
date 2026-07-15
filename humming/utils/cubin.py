@@ -53,9 +53,7 @@ def may_build_cubin_patcher():
     if _cached_lib is not None:
         return _cached_lib
 
-    src_path = os.path.join(
-        os.path.dirname(__file__), "..", "csrc", "patch_cubin.cpp"
-    )
+    src_path = os.path.join(os.path.dirname(__file__), "..", "csrc", "patch_cubin.cpp")
     src_path = os.path.abspath(src_path)
     full_hash = jit_utils.hash_path_content(src_path, releative=True)
 
@@ -81,9 +79,7 @@ def may_build_cubin_patcher():
                 "-o",
                 tmp_lib.as_posix(),
             ]
-            result = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            )
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if result.returncode != 0:
                 raise RuntimeError(
                     f"Failed to build libcubinpatch.so:\nCMD: {' '.join(cmd)}\n"
@@ -128,8 +124,7 @@ def patch_cubin_bytes(data, mode, dry_run=False):
     if n < 0:
         rc = -n
         raise RuntimeError(
-            f"patch_cubin_bytes failed (mode={mode}): "
-            f"{_RC_MESSAGE.get(rc, 'error')} (rc={rc})"
+            f"patch_cubin_bytes failed (mode={mode}): {_RC_MESSAGE.get(rc, 'error')} (rc={rc})"
         )
     return buf.raw, n
 
