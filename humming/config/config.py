@@ -128,8 +128,12 @@ class LayerConfig(BaseHummingConfig):
 
         if self.use_packed_k_layout:
             assert self.mma_type == MmaType.WGMMA, "use_packed_k_layout requires wgmma"
-            assert self.a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit (fp8/int8) activation"
-            assert not self.use_fused_e8m0_scale, "use_packed_k_layout is incompatible with fused-e8m0 scale"
+            assert self.a_dtype.num_bits == 8, (
+                "use_packed_k_layout requires 8-bit (fp8/int8) activation"
+            )
+            assert not self.use_fused_e8m0_scale, (
+                "use_packed_k_layout is incompatible with fused-e8m0 scale"
+            )
 
     @property
     def mma_type_id(self):

@@ -622,7 +622,9 @@ def test_block_scale(
         prev_fp16_accum = torch.backends.cuda.matmul.allow_fp16_accumulation
         torch.backends.cuda.matmul.allow_fp16_accumulation = True
         try:
-            outputs_ref = inputs_ref.to(torch_dtype).matmul(weight_ref.to(torch_dtype).T).to(torch_dtype)
+            outputs_ref = (
+                inputs_ref.to(torch_dtype).matmul(weight_ref.to(torch_dtype).T).to(torch_dtype)
+            )
         finally:
             torch.backends.cuda.matmul.allow_fp16_accumulation = prev_fp16_accum
         atol = 0.5

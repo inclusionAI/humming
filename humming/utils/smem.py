@@ -8,6 +8,7 @@ if TYPE_CHECKING:
 
 _INT4 = 16
 
+
 def _align_up(size: int, alignment: int = 128) -> int:
     if size <= 0:
         return 0

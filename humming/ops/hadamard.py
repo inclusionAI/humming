@@ -136,7 +136,9 @@ def hadamard_quant_input(
     mx_pack = m_major_scale and scale_dtype == "float8e8m0"
     if m_major_scale:
         m_pad = (inputs.numel() // last_dim + 3) // 4 * 4
-        scales_shape = ((num_groups_total + 3) // 4, m_pad) if mx_pack else (num_groups_total, m_pad)
+        scales_shape = (
+            ((num_groups_total + 3) // 4, m_pad) if mx_pack else (num_groups_total, m_pad)
+        )
     else:
         scales_shape = inputs.shape[:-1] + (num_groups_total,)
     if outputs is None:

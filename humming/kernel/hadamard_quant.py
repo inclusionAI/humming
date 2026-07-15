@@ -8,7 +8,7 @@ import torch
 
 from humming import dtypes
 from humming.jit.runtime import KernelRuntime
-from humming.kernel.hadamard import _pick_launch_params, _TORCH_TO_CPP_TYPE
+from humming.kernel.hadamard import _TORCH_TO_CPP_TYPE, _pick_launch_params
 
 CODE_TEMPLATE = jinja2.Template("""
 #include <humming/kernel/hadamard_quant.cuh>
@@ -45,9 +45,7 @@ class HadamardQuantInputKernel(KernelRuntime):
     has_global_scale: bool = False
 
     def init_kernel(self):
-        assert self.block_size % self.group_size == 0, (
-            "group_size must divide block_size"
-        )
+        assert self.block_size % self.group_size == 0, "group_size must divide block_size"
         cpp_source = _TORCH_TO_CPP_TYPE[self.source_torch_dtype]
         cpp_target = self.target_dtype.to_cpp_str()
         threads_per_tile, tiles_per_block = _pick_launch_params(self.block_size)

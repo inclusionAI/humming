@@ -334,6 +334,7 @@ _A_DTYPE_MIN_SM = {
 
 def _current_sm_version():
     import pytest
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
     major, minor = torch.cuda.get_device_capability()

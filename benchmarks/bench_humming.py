@@ -124,7 +124,8 @@ def bench_humming(
         def run():
             valid_shape_m = 0
             if gemm_type == GemmType.GROUPED_MASKED:
-                valid_shape_m = shape_m * top_k
+                valid_shape_m = shape_m * top_k  # noqa
+
             return layer(
                 inputs=inputs,  # noqa
                 input_scale=input_scale,  # noqa

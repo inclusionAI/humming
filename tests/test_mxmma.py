@@ -50,7 +50,11 @@ def _run_mxmma(
     # mxmma block-scale formats (ue8m0 / ue4m3) are unsigned, so the weight must
     # be quantized with a non-negative microscale.
     _, weight_ref, weight, weight_scale, _, _ = generate_random_weight(
-        n=n, k=k, group_size=group_size, dtype=b_dtype, scale_dtype=bs_dtype,
+        n=n,
+        k=k,
+        group_size=group_size,
+        dtype=b_dtype,
+        scale_dtype=bs_dtype,
         allow_negative_scale=False,
     )
     weight_ref = weight_ref.squeeze(0) if weight_ref.ndim == 3 else weight_ref

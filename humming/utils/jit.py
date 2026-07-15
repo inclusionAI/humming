@@ -18,9 +18,7 @@ import humming.utils.jit as jit_utils
 
 def popen_and_reap(cmd, **kwargs):
     proc = subprocess.Popen(cmd, **kwargs)
-    threading.Thread(
-        target=proc.wait, name="humming-bg-build-reaper", daemon=True
-    ).start()
+    threading.Thread(target=proc.wait, name="humming-bg-build-reaper", daemon=True).start()
     return proc
 
 

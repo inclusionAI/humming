@@ -43,8 +43,8 @@ CUDA_INLINE void dequant_b1248(const uint32_t *qb, uint32_t *res, uint32_t j, ui
 template <class SourceType>
 CUDA_INLINE void repack_native_mxf8f6f4(const uint32_t *qb, uint32_t *res, uint32_t j) {
   if constexpr (std::is_same<SourceType, Float4E2M1>::value) {
-    res[0] = (qb[2 * j]     & 0x0F0F0F0Fu) << 2;
-    res[1] = (qb[2 * j]     & 0xF0F0F0F0u) >> 2;
+    res[0] = (qb[2 * j] & 0x0F0F0F0Fu) << 2;
+    res[1] = (qb[2 * j] & 0xF0F0F0F0u) >> 2;
     res[2] = (qb[2 * j + 1] & 0x0F0F0F0Fu) << 2;
     res[3] = (qb[2 * j + 1] & 0xF0F0F0F0u) >> 2;
   } else {

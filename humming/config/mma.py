@@ -399,7 +399,7 @@ class MxMmaOpClassImpl:
             "CUDA_INLINE",
             f"static void fma(uint32_t *a, uint32_t *b, uint32_t sfa, uint32_t sfb, "
             f"{reg_cd_type} *c, {reg_cd_type} *d, "
-            f"uint32_t byte_id_a, uint32_t thread_id_a, uint32_t byte_id_b, uint32_t thread_id_b) {{",
+            f"uint32_t byte_id_a, uint32_t thread_id_a, uint32_t byte_id_b, uint32_t thread_id_b) {{",  # noqa
             *self.generate_ptx(indent=2).strip("\n").split("\n"),
             "};",
         ]
@@ -470,7 +470,9 @@ class MxMmaOpClassImpl:
 
 class MmaOpClass:
     @classmethod
-    def from_config(cls, mma_type, m, n, k, a_dtype, b_dtype, cd_dtype, sf_dtype=None, scale_vec=None):
+    def from_config(
+        cls, mma_type, m, n, k, a_dtype, b_dtype, cd_dtype, sf_dtype=None, scale_vec=None
+    ):
         mma_type = mma_type if isinstance(mma_type, MmaType) else getattr(MmaType, mma_type.upper())
 
         if mma_type == MmaType.MMA:
@@ -480,6 +482,8 @@ class MmaOpClass:
         elif mma_type == MmaType.MXMMA:
             if sf_dtype is None:
                 raise ValueError("MXMMA requires sf_dtype (block scale-factor dtype)")
-            return MxMmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype, sf_dtype, scale_vec=scale_vec)
+            return MxMmaOpClassImpl(
+                m, n, k, a_dtype, b_dtype, cd_dtype, sf_dtype, scale_vec=scale_vec
+            )
         else:
             raise ValueError(f"Invalid MMA Type: {mma_type}")

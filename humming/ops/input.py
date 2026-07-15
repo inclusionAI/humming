@@ -252,9 +252,7 @@ def quant_input(
     if m_major_scale:
         assert is_dynamic, "m_major_scale requires dynamic quantization"
 
-    mx_pack_m_major = (
-        m_major_scale and scale_dtype in ("float8e8m0", "float8e4m3") and is_dynamic
-    )
+    mx_pack_m_major = m_major_scale and scale_dtype in ("float8e8m0", "float8e4m3") and is_dynamic
     num_groups_packed = (num_groups + 3) // 4
 
     if scale_dtype == "float32":
