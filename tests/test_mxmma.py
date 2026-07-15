@@ -158,6 +158,39 @@ def test_mxmma_fp8(a_dtype, b_dtype, c_dtype):
     )
 
 
+def _fp4_compatible(a, b, group_size):
+    # E0M3 OMMA is only legal with scale_vec::4X, i.e. group_size == part_k / 4.
+    part_k = 256 // a.num_bits
+    if part_k % group_size != 0:
+        return False
+    if a == dtypes.float4e0m3 and part_k // group_size != 4:
+        return False
+    if b.num_bits > a.num_bits:
+        return False
+    if b.is_integer_type:
+        return (not b.is_signed) and b.num_bits <= a.mantissa_bits + 2
+    return (
+        b.is_signed
+        and b.exponent_bits <= a.exponent_bits
+        and b.mantissa_bits <= a.mantissa_bits
+        and (a.exponent_bits == 0 or b.exponent_bits >= 1)
+    )
+
+
+@pytest.mark.parametrize(
+    "b_dtype",
+    [
+        "float4e2m1",
+        "float3e1m1",
+        "float4e0m3",
+        "float3e0m2",
+        "float2e0m1",
+        "uint3",
+        "uint2",
+        "uint1",
+    ],
+)
+@pytest.mark.parametrize("a_dtype", ["float4e2m1", "float4e0m3"])
 @pytest.mark.parametrize(
     "bs_dtype,group_size",
     [
@@ -167,45 +200,16 @@ def test_mxmma_fp8(a_dtype, b_dtype, c_dtype):
     ],
 )
 @pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
-@pytest.mark.parametrize(
-    "b_dtype",
-    [
-        "float4e2m1",
-        "float3e1m1",
-        "uint3",
-        "uint2",
-    ],
-)
-def test_mxmma_fp4(b_dtype, bs_dtype, group_size, c_dtype):
+def test_mxmma_fp4(a_dtype, b_dtype, bs_dtype, group_size, c_dtype):
     _skip_if_no_mxmma()
+    a = dtypes.DataType.from_str(a_dtype)
+    b = dtypes.DataType.from_str(b_dtype)
+    if not _fp4_compatible(a, b, group_size):
+        pytest.skip(f"{b_dtype}/gs{group_size} incompatible with {a_dtype}")
     _run_mxmma(
-        a_dtype=dtypes.float4e2m1,
-        b_dtype=dtypes.DataType.from_str(b_dtype),
+        a_dtype=a,
+        b_dtype=b,
         c_dtype=dtypes.DataType.from_str(c_dtype),
         bs_dtype=dtypes.DataType.from_str(bs_dtype),
         group_size=group_size,
-    )
-
-
-@pytest.mark.parametrize(
-    "b_dtype",
-    [
-        "float4e0m3",
-        "float3e0m2",
-        "float2e0m1",
-        "uint3",
-        "uint2",
-        "uint1",
-    ],
-)
-@pytest.mark.parametrize("bs_dtype", ["float8e8m0", "float8e4m3"])
-@pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
-def test_mxmma_fp4_e0m3(b_dtype, bs_dtype, c_dtype):
-    _skip_if_no_mxmma()
-    _run_mxmma(
-        a_dtype=dtypes.float4e0m3,
-        b_dtype=dtypes.DataType.from_str(b_dtype),
-        c_dtype=dtypes.DataType.from_str(c_dtype),
-        bs_dtype=dtypes.DataType.from_str(bs_dtype),
-        group_size=16,
     )
