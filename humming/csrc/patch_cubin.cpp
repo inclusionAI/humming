@@ -13,12 +13,13 @@
 //         bit78 = A element format (0=E2M1, 1=E0M3), bit79 = B element format
 //   QMMA (FP8/6/4)           opcode[11:0] = 0x47a (block-scaled) or 0x27a (plain)
 //         A type field = {78,82,83}, B type field = {79,84,85}, 3-bit LE codes:
-//         000=E4M3 001=E5M2 010=E3M4(hidden) ...  E4M3->E3M4: set bit82 (A) / bit84 (B)
+//         000=E4M3 001=E5M2 010=E3M4(hidden) ...  E3M4 is emitted as E5M2, so
+//         E5M2->E3M4: clear bit78 set bit82 (A) / clear bit79 set bit84 (B)
 //   F2FP (narrow-float cvt)  opcode[11:0] = 0x23e, format subfield = (b76,b85,b86,b87)
-//         FP8: E4M3=(1,0,0,1) E5M2=(0,0,0,1) E3M4=(0,1,0,1)  E4M3->E3M4: b76=0,b85=1
+//         FP8: E4M3=(1,0,0,1) E5M2=(0,0,0,1) E3M4=(0,1,0,1)  E5M2->E3M4: b85=1
 //         FP4: E2M1=(1,1,0,0) E0M3=(0,1,0,0)                 E2M1->E0M3: b76=0
 //
-// Only instructions whose original bits are the expected base format (E4M3 for
+// Only instructions whose riginal bits are the expected base format (E5M2 for 
 // e3m4 modes, E2M1 for e0m3 modes) are modified; anything else is skipped.
 // A cubin that is not sm_120a is rejected outright.
 //
@@ -172,25 +173,25 @@ static int handle(std::vector<uint8_t> &d, size_t o, const Mode &m, bool dry, st
     if (op != 0x47a && op != 0x27a) return -1; // QMMA
     int did = 0;
     std::string r;
-    if (m.a) { // A field {78,82,83}==000 is E4M3; E3M4 sets bit82
+    if (m.a) { // A field {78,82,83}==001(LE) is E5M2; E3M4==010 clears bit78, sets bit82
       int f78 = getbit(d, o, 78), f82 = getbit(d, o, 82), f83 = getbit(d, o, 83);
-      if (f78 == 0 && f82 == 0 && f83 == 0) {
-        if (!dry) setbit(d, o, 82, 1);
+      if (f78 == 1 && f82 == 0 && f83 == 0) {
+        if (!dry) { setbit(d, o, 78, 0); setbit(d, o, 82, 1); }
         did = 1;
-        r += "A:E4M3->E3M4 ";
+        r += "A:E5M2->E3M4 ";
       } else {
-        snprintf(buf, 160, "A:not-E4M3(%d%d%d,skip) ", f78, f82, f83);
+        snprintf(buf, 160, "A:not-E5M2(%d%d%d,skip) ", f78, f82, f83);
         r += buf;
       }
     }
-    if (m.b) { // B field {79,84,85}==000 is E4M3; E3M4 sets bit84
+    if (m.b) { // B field {79,84,85}==001(LE) is E5M2; E3M4==010 clears bit79, sets bit84
       int f79 = getbit(d, o, 79), f84 = getbit(d, o, 84), f85 = getbit(d, o, 85);
-      if (f79 == 0 && f84 == 0 && f85 == 0) {
-        if (!dry) setbit(d, o, 84, 1);
+      if (f79 == 1 && f84 == 0 && f85 == 0) {
+        if (!dry) { setbit(d, o, 79, 0); setbit(d, o, 84, 1); }
         did = 1;
-        r += "B:E4M3->E3M4 ";
+        r += "B:E5M2->E3M4 ";
       } else {
-        snprintf(buf, 160, "B:not-E4M3(%d%d%d,skip) ", f79, f84, f85);
+        snprintf(buf, 160, "B:not-E5M2(%d%d%d,skip) ", f79, f84, f85);
         r += buf;
       }
     }
@@ -201,15 +202,14 @@ static int handle(std::vector<uint8_t> &d, size_t o, const Mode &m, bool dry, st
   if (op != 0x23e) return -1;
   int b76 = getbit(d, o, 76), b85 = getbit(d, o, 85), b86 = getbit(d, o, 86), b87 = getbit(d, o, 87);
   if (m.kind == K_CVT_E3M4) {
-    if (b76 == 1 && b85 == 0 && b86 == 0 && b87 == 1) { // FP8 E4M3 -> E3M4
+    if (b76 == 0 && b85 == 0 && b86 == 0 && b87 == 1) { // FP8 E5M2 -> E3M4
       if (!dry) {
-        setbit(d, o, 76, 0);
         setbit(d, o, 85, 1);
       }
-      reason = "E4M3->E3M4";
+      reason = "E5M2->E3M4";
       return 1;
     }
-    snprintf(buf, 160, "not-E4M3-down(b76,85,86,87=%d%d%d%d,skip)", b76, b85, b86, b87);
+    snprintf(buf, 160, "not-E5M2-down(b76,85,86,87=%d%d%d%d,skip)", b76, b85, b86, b87);
     reason = buf;
     return 0;
   } else {

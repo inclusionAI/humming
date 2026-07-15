@@ -35,7 +35,7 @@ DTYPE_MAP = {
 
     # Hardware supports these dtypes (e3m4/e0m3) but exposes no matching PTX types.
     # We substitute other PTX types and patch the cubin afterwards.
-    dtypes.float8e3m4: "e4m3",
+    dtypes.float8e3m4: "e5m2",
     dtypes.float4e0m3: "e2m1",
 }
 

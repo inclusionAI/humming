@@ -5,7 +5,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 
 # Hidden float formats the hardware supports but PTX cannot emit: quantize using
 # the base PTX type below and patch the cubin's cvt to the hidden format.
-_HIDDEN_BASE = {"float8e3m4": "float8e4m3", "float4e0m3": "float4e2m1"}
+_HIDDEN_BASE = {"float8e3m4": "float8e5m2", "float4e0m3": "float4e2m1"}
 _HIDDEN_PATCH_MODE = {"float8e3m4": "cvt_e3m4", "float4e0m3": "cvt_e0m3"}
 
 
@@ -59,9 +59,10 @@ def finalize_scale(scale, scale_dtype: tl.constexpr, gs, inv_gs):
 
 @triton.jit
 def quant_tensor(tensor, dtype):
-    if dtype == "float8e4m3" or dtype == "float8e3m4":
+    if dtype == "float8e4m3":
         tensor = tensor.to(tl.float8e4nv)
-    elif dtype == "float8e5m2":
+    elif dtype == "float8e5m2" or dtype == "float8e3m4":
+        # float8e3m4 emits the e5m2 cvt; the cubin is patched to e3m4 afterwards.
         tensor = tensor.to(tl.float8e5)
     elif dtype == "int8":
         tensor = tl.inline_asm_elementwise(

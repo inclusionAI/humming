@@ -35,12 +35,12 @@ template <class TargetType>
 CUDA_INLINE uint16_t quant_pair_fp8(float a, float b) {
   uint16_t out;
 #if __CUDA_ARCH__ >= 890
-  // Float8E3M4 has no PTX type; emit the e4m3 cvt and patch the cubin's SASS
-  // format bits (mode "cvt_e3m4") afterwards.
-  if constexpr (std::is_same<TargetType, Float8E4M3>::value ||
-                std::is_same<TargetType, Float8E3M4>::value) {
+  if constexpr (std::is_same<TargetType, Float8E4M3>::value) {
     asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(out) : "f"(b), "f"(a));
-  } else if constexpr (std::is_same<TargetType, Float8E5M2>::value) {
+  } else if constexpr (std::is_same<TargetType, Float8E5M2>::value ||
+                       std::is_same<TargetType, Float8E3M4>::value) {
+    // Float8E3M4 has no PTX type; emit the e5m2 cvt and patch the cubin's SASS
+    // format bits (mode "cvt_e3m4") afterwards.
     asm("cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;" : "=h"(out) : "f"(b), "f"(a));
   } else {
     static_assert(sizeof(TargetType) == 0, "quant_pair_fp8: unsupported type");
