@@ -108,38 +108,50 @@ def _run_mxmma(
     torch.testing.assert_close(out.float(), ref, rtol=0.08, atol=0.6)
 
 
-# Weights compatible with an fp8 activation. check_dtype requires a floating
-# point weight to satisfy exp <= a.exp, mant <= a.mant, exp >= 1, and an integer
-# weight to satisfy num_bits <= a.mant + 2. Each activation is paired with its
-# own 8-bit type plus the narrower weights below (which fit both e4m3 and e3m4).
-_FP8_A_DTYPES = ["float8e4m3", "float8e3m4"]
-_FP8_NARROW_WEIGHTS = [
-    "float6e3m2",
-    "float7e3m3",
-    "float6e2m3",
-    "float4e2m1",
-    "float3e1m1",
-    "uint5",
-    "uint4",
-    "uint3",
-    "uint2",
-]
-_FP8_CASES = [(a, a) for a in _FP8_A_DTYPES] + [
-    (a, b) for a in _FP8_A_DTYPES for b in _FP8_NARROW_WEIGHTS
-]
-
-# float4e0m3 (exp_bits == 0) is a fixed-point format. As an fp weight it is only
-# valid paired with an e0m3 activation (check_dtype allows exp 0 == 0), and the
-# E0M3 OMMA is only legal with scale_vec::4X, so it is tested separately below.
+def _fp8_weight_compatible(a, b, c):
+    if b.num_bits > a.num_bits:
+        return False
+    if b.is_integer_type:
+        if a == dtypes.float8e5m2 and c == dtypes.float16:
+            return False
+        return (not b.is_signed) and b.num_bits <= a.mantissa_bits + 2
+    return (
+        b.is_signed
+        and b.exponent_bits <= a.exponent_bits
+        and b.mantissa_bits <= a.mantissa_bits
+        and (a.exponent_bits == 0 or b.exponent_bits >= 1)
+    )
 
 
-@pytest.mark.parametrize("a_dtype,b_dtype", _FP8_CASES)
+@pytest.mark.parametrize(
+    "b_dtype",
+    [
+        "float8e4m3",
+        "float8e5m2",
+        "float8e3m4",
+        "float6e3m2",
+        "float7e3m3",
+        "float6e2m3",
+        "float4e2m1",
+        "float3e1m1",
+        "uint5",
+        "uint4",
+        "uint3",
+        "uint2",
+    ],
+)
+@pytest.mark.parametrize("a_dtype", ["float8e4m3", "float8e5m2", "float8e3m4"])
 @pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
 def test_mxmma_fp8(a_dtype, b_dtype, c_dtype):
     _skip_if_no_mxmma()
+    a = dtypes.DataType.from_str(a_dtype)
+    b = dtypes.DataType.from_str(b_dtype)
+    c = dtypes.DataType.from_str(c_dtype)
+    if not _fp8_weight_compatible(a, b, c):
+        pytest.skip(f"{b_dtype} weight is incompatible with {a_dtype}/{c_dtype}")
     _run_mxmma(
-        a_dtype=dtypes.DataType.from_str(a_dtype),
-        b_dtype=dtypes.DataType.from_str(b_dtype),
+        a_dtype=a,
+        b_dtype=b,
         c_dtype=dtypes.DataType.from_str(c_dtype),
         bs_dtype=dtypes.float8e8m0,
         group_size=32,
