@@ -79,11 +79,11 @@ struct Sec {
 static bool read_file(const char *p, std::vector<uint8_t> &out) {
   FILE *f = fopen(p, "rb");
   if (!f) return false;
-  fseek(f, 0, SEEK_END);
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
   long n = ftell(f);
-  fseek(f, 0, SEEK_SET);
+  if (n < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
   out.resize(n);
-  bool ok = (n >= 0) && (fread(out.data(), 1, n, f) == (size_t)n);
+  bool ok = (fread(out.data(), 1, n, f) == (size_t)n);
   fclose(f);
   return ok;
 }
@@ -127,19 +127,24 @@ static int check_sm120a(const std::vector<uint8_t> &d, std::string &why) {
 }
 
 static void collect_exec_sections(const std::vector<uint8_t> &d, std::vector<Sec> &secs) {
+  if (d.size() < 64) return;
   uint64_t e_shoff = rd<uint64_t>(d, 0x28);
   uint16_t e_shents = rd<uint16_t>(d, 0x3A);
   uint16_t e_shnum = rd<uint16_t>(d, 0x3C);
   uint16_t e_shstr = rd<uint16_t>(d, 0x3E);
-  uint64_t stroff = rd<uint64_t>(d, e_shoff + (uint64_t)e_shstr * e_shents + 0x18);
+  uint64_t shstr = e_shoff + (uint64_t)e_shstr * e_shents;
+  if (shstr + 0x20 > d.size()) return;
+  uint64_t stroff = rd<uint64_t>(d, shstr + 0x18);
   for (uint16_t i = 0; i < e_shnum; i++) {
     uint64_t sh = e_shoff + (uint64_t)i * e_shents;
+    if (sh + 0x28 > d.size()) break;
     uint32_t sh_name = rd<uint32_t>(d, sh + 0x00);
     uint32_t sh_type = rd<uint32_t>(d, sh + 0x04);
     uint64_t sh_flag = rd<uint64_t>(d, sh + 0x08);
     uint64_t sh_off = rd<uint64_t>(d, sh + 0x18);
     uint64_t sh_size = rd<uint64_t>(d, sh + 0x20);
     if (sh_type == 1 && (sh_flag & 0x4)) { // PROGBITS + EXECINSTR
+      if (stroff + sh_name >= d.size()) continue; // guard section-name string
       const char *nm = (const char *)&d[stroff + sh_name];
       secs.push_back({std::string(nm), sh_off, sh_size});
     }
@@ -326,8 +331,13 @@ static PatchStats run_patch(const std::string &path, const std::string &mode_nam
       st.message = "cannot write backup " + bak;
       return st;
     }
-    fwrite(orig.data(), 1, orig.size(), bw);
+    size_t wrote = fwrite(orig.data(), 1, orig.size(), bw);
     fclose(bw);
+    if (wrote != orig.size()) {
+      st.rc = 4;
+      st.message = "failed to write backup " + bak;
+      return st;
+    }
     if (verbose) printf("backed up original -> %s\n", bak.c_str());
   }
   FILE *w = fopen(path.c_str(), "wb");
@@ -336,8 +346,13 @@ static PatchStats run_patch(const std::string &path, const std::string &mode_nam
     st.message = "cannot write back " + path;
     return st;
   }
-  fwrite(d.data(), 1, d.size(), w);
+  size_t wrote = fwrite(d.data(), 1, d.size(), w);
   fclose(w);
+  if (wrote != d.size()) {
+    st.rc = 4;
+    st.message = "failed to write patched cubin " + path;
+    return st;
+  }
   if (verbose) printf("patched in place %s (%d instruction(s) modified).\n", path.c_str(), st.patched);
   return st;
 }
@@ -359,6 +374,7 @@ extern "C" int cubin_patch(const char *path, const char *mode, int dry, int back
 // (2 bad mode, 3 not sm_120a, 5 unsupported instruction config). Nothing is
 // written back when dry != 0.
 extern "C" int cubin_patch_buffer(uint8_t *data, size_t n, const char *mode, int dry) {
+  if (!data || n == 0 || !mode) return -2;
   const Mode *mode_p = nullptr;
   for (auto &M : MODES)
     if (strcmp(mode, M.name) == 0) mode_p = &M;

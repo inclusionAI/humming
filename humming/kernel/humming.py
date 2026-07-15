@@ -184,8 +184,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 mode = "mma_e3m4_a"
             else:
                 mode = "mma_e3m4_ab"
-
-        if dtypes.float4e0m3 in (self.mma_a_dtype, self.mma_b_dtype):
+        elif dtypes.float4e0m3 in (self.mma_a_dtype, self.mma_b_dtype):
             if self.mma_a_dtype != dtypes.float4e0m3:
                 mode = "mma_e0m3_b"
             elif self.mma_b_dtype != dtypes.float4e0m3:
