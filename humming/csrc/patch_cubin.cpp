@@ -338,6 +338,35 @@ extern "C" int cubin_patch(const char *path, const char *mode, int dry, int back
   return st.rc ? -st.rc : st.patched;
 }
 
+// C-ABI entry point that patches a cubin already resident in memory (e.g. the
+// bytes Triton is about to load). Length-preserving: only bit fields inside
+// existing instructions are flipped, so the buffer is edited in place and its
+// size never changes. `data` must point to `n` writable bytes.
+// Returns the number of patched instructions (>=0), or -rc on error
+// (2 bad mode, 3 not sm_120a). Nothing is written back when dry != 0.
+extern "C" int cubin_patch_buffer(uint8_t *data, size_t n, const char *mode, int dry) {
+  const Mode *mode_p = nullptr;
+  for (auto &M : MODES)
+    if (strcmp(mode, M.name) == 0) mode_p = &M;
+  if (!mode_p) return -2;
+
+  std::vector<uint8_t> d(data, data + n);
+  std::string why;
+  if (check_sm120a(d, why)) return -3;
+
+  std::vector<Sec> secs;
+  collect_exec_sections(d, secs);
+  int patched = 0;
+  for (auto &s : secs) {
+    for (uint64_t p = s.off; p + 16 <= s.off + s.size; p += 16) {
+      std::string reason;
+      if (handle(d, p, *mode_p, dry != 0, reason) == 1) patched++;
+    }
+  }
+  if (dry == 0 && patched > 0) memcpy(data, d.data(), n);
+  return patched;
+}
+
 int main(int argc, char **argv) {
   const char *mode_s = nullptr;
   const char *path = nullptr;

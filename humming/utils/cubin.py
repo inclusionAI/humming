@@ -37,6 +37,14 @@ def _load_lib(path):
         ctypes.c_int,
         ctypes.c_int,
     ]
+    # int cubin_patch_buffer(uint8_t* data, size_t n, const char* mode, int dry);
+    lib.cubin_patch_buffer.restype = ctypes.c_int
+    lib.cubin_patch_buffer.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
     return lib
 
 
@@ -107,3 +115,37 @@ def patch_cubin(cubin_path, mode, dry_run=False, backup=False):
             f"{_RC_MESSAGE.get(rc, 'error')} (rc={rc})"
         )
     return n
+
+
+def patch_cubin_bytes(data, mode, dry_run=False):
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}; expected one of {list(MODES)}")
+
+    lib = may_build_cubin_patcher()
+    data = bytes(data)
+    buf = ctypes.create_string_buffer(data, len(data))
+    n = lib.cubin_patch_buffer(buf, len(data), mode.encode(), 1 if dry_run else 0)
+    if n < 0:
+        rc = -n
+        raise RuntimeError(
+            f"patch_cubin_bytes failed (mode={mode}): "
+            f"{_RC_MESSAGE.get(rc, 'error')} (rc={rc})"
+        )
+    return buf.raw, n
+
+
+def patch_triton_compiled_kernel(compiled_kernel, mode):
+    ck = compiled_kernel
+    if getattr(ck, "module", None) is not None:
+        return 0
+
+    patched, n = patch_cubin_bytes(ck.asm["cubin"], mode)
+    ck.asm["cubin"] = patched
+    ck.kernel = patched
+    return n
+
+
+def triton_warmup_and_patch(kernel, *args, mode, grid, **kwargs):
+    ck = kernel.warmup(*args, grid=grid, **kwargs)
+    patch_triton_compiled_kernel(ck, mode)
+    return ck

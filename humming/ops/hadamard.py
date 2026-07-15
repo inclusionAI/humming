@@ -10,7 +10,9 @@ _QUANT_DTYPE_STR_TO_TORCH = {
     "int8": torch.int8,
     "int4": torch.uint8,
     "float4e2m1": torch.uint8,
+    "float4e0m3": torch.uint8,
     "float8e4m3": torch.float8_e4m3fn,
+    "float8e3m4": torch.uint8,
     "float8e5m2": torch.float8_e5m2,
 }
 
@@ -93,7 +95,8 @@ def hadamard_quant_input(
         inputs: shape ``[..., K]``, dtype fp16/bf16/fp32. ``K`` must be a
             multiple of ``block_size``.
         block_size: FHT length ``N``, power of 2 in [2, 4096].
-        quant_dtype: one of ``"int8"``, ``"int4"``, ``"float8e4m3"``,
+        quant_dtype: one of ``"int8"``, ``"int4"``, ``"float4e2m1"``,
+            ``"float4e0m3"``, ``"float8e4m3"``, ``"float8e3m4"``,
             ``"float8e5m2"``.
         group_size: per-group quantization size. Must divide ``block_size``
             (or be a multiple of it). ``None`` or ``0`` means channelwise
@@ -123,7 +126,7 @@ def hadamard_quant_input(
     scale_torch_dtype = _SCALE_DTYPE_TO_TORCH[scale_dtype]
     last_dim = inputs.size(-1)
 
-    if quant_dtype in ("int4", "float4e2m1"):
+    if quant_dtype in ("int4", "float4e2m1", "float4e0m3"):
         assert last_dim % 2 == 0
         out_shape = inputs.shape[:-1] + (last_dim // 2,)
     else:

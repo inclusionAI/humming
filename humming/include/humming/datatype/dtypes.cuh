@@ -58,9 +58,11 @@ using Int8 = IntegerType<true, 8>;
 using Int32 = IntegerType<true, 32>;
 
 using Sign = FloatingPointType<1, 0, 0>;
+using Float4E0M3 = FloatingPointType<4, 0, 3>;
 using Float4E2M1 = FloatingPointType<4, 2, 1>;
 using Float6E3M2 = FloatingPointType<6, 3, 2>;
 using Float6E2M3 = FloatingPointType<6, 2, 3>;
+using Float8E3M4 = FloatingPointType<8, 3, 4>;
 using Float8E4M3 = FloatingPointType<8, 4, 3>;
 using Float8E5M2 = FloatingPointType<8, 5, 2>;
 using Float16 = FloatingPointType<16, 5, 10>;

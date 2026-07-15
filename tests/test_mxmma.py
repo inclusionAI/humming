@@ -19,7 +19,17 @@ def _dequant_act(xq, xs, a_dtype, group_size):
         x_un = ops.unpack_weight(xq.view(torch.int32), 4)
         x_fp = ops.dequant_weight(x_un, 2, 1, True)
         return x_fp.float() * scale
-    return xq.float() * scale
+    elif a_dtype == dtypes.float4e0m3:
+        codes = ops.unpack_weight(xq.view(torch.int32), 4)
+        mag = (codes & 0x7).float()
+        x_fp = torch.where((codes & 0x8) != 0, -mag, mag)
+        return x_fp * scale
+    elif a_dtype == dtypes.float8e3m4:
+        codes = xq.view(torch.uint8).to(torch.int32).contiguous()
+        x_fp = ops.dequant_weight(codes, 3, 4, True)
+        return x_fp * scale
+    else:
+        return xq.float() * scale
 
 
 def _run_mxmma(
@@ -50,9 +60,8 @@ def _run_mxmma(
     )
 
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda") * 0.5
-    a_name = "float4e2m1" if a_dtype == dtypes.float4e2m1 else "float8e4m3"
     xq, xs = ops.quant_input(
-        x, a_name, group_size=group_size, scale_dtype=bs_dtype.to_str()
+        x, a_dtype.to_str(), group_size=group_size, scale_dtype=bs_dtype.to_str()
     )
     x_dq = _dequant_act(xq, xs, a_dtype, group_size)
     xs_packed = xs.view(torch.int32).contiguous()
@@ -95,26 +104,36 @@ def _run_mxmma(
     torch.testing.assert_close(out.float(), ref, rtol=0.08, atol=0.6)
 
 
-@pytest.mark.parametrize(
-    "b_dtype",
-    [
-        "float8e4m3",
-        "float6e3m2",
-        "float7e3m3",
-        "float6e2m3",
-        "float4e2m1",
-        "float3e1m1",
-        "uint5",
-        "uint4",
-        "uint3",
-        "uint2",
-    ],
-)
+# Weights compatible with an fp8 activation. check_dtype requires a floating
+# point weight to satisfy exp <= a.exp, mant <= a.mant, exp >= 1, and an integer
+# weight to satisfy num_bits <= a.mant + 2. Each activation is paired with its
+# own 8-bit type plus the narrower weights below (which fit both e4m3 and e3m4).
+_FP8_A_DTYPES = ["float8e4m3", "float8e3m4"]
+_FP8_NARROW_WEIGHTS = [
+    "float6e3m2",
+    "float7e3m3",
+    "float6e2m3",
+    "float4e2m1",
+    "float3e1m1",
+    "uint5",
+    "uint4",
+    "uint3",
+    "uint2",
+]
+_FP8_CASES = [(a, a) for a in _FP8_A_DTYPES] + [
+    (a, b) for a in _FP8_A_DTYPES for b in _FP8_NARROW_WEIGHTS
+]
+
+# float4e0m3 has exp_bits == 0, so it is neither a valid fp weight (exp >= 1) nor
+# a compilable mxmma activation yet; it is exercised only through quant_input.
+
+
+@pytest.mark.parametrize("a_dtype,b_dtype", _FP8_CASES)
 @pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
-def test_mxmma_fp8(b_dtype, c_dtype):
+def test_mxmma_fp8(a_dtype, b_dtype, c_dtype):
     _skip_if_no_mxmma()
     _run_mxmma(
-        a_dtype=dtypes.float8e4m3,
+        a_dtype=dtypes.DataType.from_str(a_dtype),
         b_dtype=dtypes.DataType.from_str(b_dtype),
         c_dtype=dtypes.DataType.from_str(c_dtype),
         bs_dtype=dtypes.float8e8m0,

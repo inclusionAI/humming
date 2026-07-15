@@ -13,7 +13,7 @@ CUDA_INLINE float get_data_type_max_num() {
   } else if constexpr (DataType::kIsFloatingPointType) {
     uint32_t max_val = (1 << (DataType::kBits - DataType::kIsSigned)) - 1;
 
-    if constexpr (std::is_same<DataType, Float8E4M3>::value) {
+    if constexpr (std::is_same<DataType, Float8E4M3>::value || std::is_same<DataType, Float8E3M4>::value ) {
       // FN format
       max_val = max_val - 1;
     } else if constexpr (std::is_same<DataType, Float8E5M2>::value) {
