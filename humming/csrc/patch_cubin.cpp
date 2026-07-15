@@ -153,6 +153,12 @@ static int handle(std::vector<uint8_t> &d, size_t o, const Mode &m, bool dry, st
 
   if (m.kind == K_MMA_E0M3) {
     if (op != 0x47f) return -1; // OMMA
+    // E0M3 is only legal with scale_vec::4X (bit120). The 2X form (bit83) with
+    // E0M3 is an illegal encoding that faults at launch, so refuse to patch it.
+    if (getbit(d, o, 83)) {
+      reason = "E0M3 OMMA requires scale_vec::4X but found 2X (bit83)";
+      return -2; // fatal: unsupported instruction config
+    }
     int did = 0;
     std::string r;
     auto side = [&](bool en, int bit, const char *tag) {
@@ -270,6 +276,13 @@ static PatchStats run_patch(const std::string &path, const std::string &mode_nam
       std::string reason;
       int r = handle(d, p, *mode, dry, reason);
       if (r == -1) continue;
+      if (r == -2) { // fatal: unsupported instruction config, abort without writing
+        st.rc = 5;
+        st.message = reason;
+        if (verbose)
+          printf("  @0x%06llx [%s]  %s\n", (unsigned long long)p, s.name.c_str(), reason.c_str());
+        return st;
+      }
       st.matched++;
       if (r == 1) {
         st.patched++;
@@ -332,7 +345,7 @@ static PatchStats run_patch(const std::string &path, const std::string &mode_nam
 // C-ABI entry point for loading as a shared library from Python via ctypes:
 //   g++ -O2 -std=c++17 -fPIC -shared patch_cubin.cpp -o libcubinpatch.so
 // Returns the number of patched instructions (>=0), or -rc on error
-// (2 bad mode/read, 3 not sm_120a, 4 I/O).
+// (2 bad mode/read, 3 not sm_120a, 4 I/O, 5 unsupported instruction config).
 extern "C" int cubin_patch(const char *path, const char *mode, int dry, int backup) {
   PatchStats st = run_patch(path, mode, dry != 0, backup != 0, /*verbose=*/false);
   return st.rc ? -st.rc : st.patched;
@@ -343,7 +356,8 @@ extern "C" int cubin_patch(const char *path, const char *mode, int dry, int back
 // existing instructions are flipped, so the buffer is edited in place and its
 // size never changes. `data` must point to `n` writable bytes.
 // Returns the number of patched instructions (>=0), or -rc on error
-// (2 bad mode, 3 not sm_120a). Nothing is written back when dry != 0.
+// (2 bad mode, 3 not sm_120a, 5 unsupported instruction config). Nothing is
+// written back when dry != 0.
 extern "C" int cubin_patch_buffer(uint8_t *data, size_t n, const char *mode, int dry) {
   const Mode *mode_p = nullptr;
   for (auto &M : MODES)

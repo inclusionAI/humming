@@ -32,11 +32,16 @@ __global__ void dequant_unpacked_fp_type(
 #pragma unroll
   for (uint64_t i = 0; i < COUNT; i++) {
     uint32_t val = vals[i];
-    uint32_t part1 = (val & sign_mask) << (31 - (exponent_bits + mantissa_bits));
-    uint32_t part2 = (val & mask) << (23 - mantissa_bits);
-    vals[i] = part1 | part2;
-
-    vals_float[i] = vals_float[i] * scale_factor_float;
+    if (exponent_bits == 0) {
+      // Fixed-point sign-magnitude format (e0mX): value = (-1)^sign * magnitude.
+      float f = (float)(val & mask);
+      vals_float[i] = (is_signed && (val & sign_mask)) ? -f : f;
+    } else {
+      uint32_t part1 = (val & sign_mask) << (31 - (exponent_bits + mantissa_bits));
+      uint32_t part2 = (val & mask) << (23 - mantissa_bits);
+      vals[i] = part1 | part2;
+      vals_float[i] = vals_float[i] * scale_factor_float;
+    }
   }
 
 #pragma unroll

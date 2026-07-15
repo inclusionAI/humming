@@ -128,8 +128,9 @@ _FP8_CASES = [(a, a) for a in _FP8_A_DTYPES] + [
     (a, b) for a in _FP8_A_DTYPES for b in _FP8_NARROW_WEIGHTS
 ]
 
-# float4e0m3 has exp_bits == 0, so it is neither a valid fp weight (exp >= 1) nor
-# a compilable mxmma activation yet; it is exercised only through quant_input.
+# float4e0m3 (exp_bits == 0) is a fixed-point format. As an fp weight it is only
+# valid paired with an e0m3 activation (check_dtype allows exp 0 == 0), and the
+# E0M3 OMMA is only legal with scale_vec::4X, so it is tested separately below.
 
 
 @pytest.mark.parametrize("a_dtype,b_dtype", _FP8_CASES)
@@ -171,4 +172,19 @@ def test_mxmma_fp4(b_dtype, bs_dtype, group_size, c_dtype):
         c_dtype=dtypes.DataType.from_str(c_dtype),
         bs_dtype=dtypes.DataType.from_str(bs_dtype),
         group_size=group_size,
+    )
+
+
+# E0M3 is a fixed-point fp4 format; the E0M3 OMMA is only legal with
+# scale_vec::4X, i.e. group_size == mma-K-tile / 4 == 16.
+@pytest.mark.parametrize("bs_dtype", ["float8e8m0", "float8e4m3"])
+@pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
+def test_mxmma_fp4_e0m3(bs_dtype, c_dtype):
+    _skip_if_no_mxmma()
+    _run_mxmma(
+        a_dtype=dtypes.float4e0m3,
+        b_dtype=dtypes.float4e0m3,
+        c_dtype=dtypes.DataType.from_str(c_dtype),
+        bs_dtype=dtypes.DataType.from_str(bs_dtype),
+        group_size=16,
     )

@@ -22,6 +22,7 @@ _RC_MESSAGE = {
     2: "unknown mode or unreadable file",
     3: "not an sm_120a cubin",
     4: "I/O error while writing",
+    5: "unsupported instruction config (e.g. E0M3 requires scale_vec::4X)",
 }
 
 _cached_lib = None

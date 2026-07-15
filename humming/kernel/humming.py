@@ -186,9 +186,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 mode = "mma_e3m4_ab"
 
         if dtypes.float4e0m3 in (self.mma_a_dtype, self.mma_b_dtype):
-            if self.mma_a_dtype != dtypes.float8e3m4:
+            if self.mma_a_dtype != dtypes.float4e0m3:
                 mode = "mma_e0m3_b"
-            elif self.mma_b_dtype != dtypes.float8e3m4:
+            elif self.mma_b_dtype != dtypes.float4e0m3:
                 mode = "mma_e0m3_a"
             else:
                 mode = "mma_e0m3_ab"
@@ -358,7 +358,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.b_dtype.is_signed
             assert self.b_dtype.exponent_bits <= self.a_dtype.exponent_bits
             assert self.b_dtype.mantissa_bits <= self.a_dtype.mantissa_bits
-            assert self.b_dtype.exponent_bits >= 1
+            assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_integer_type:
             assert self.use_fused_e8m0_scale
             raise NotImplementedError
