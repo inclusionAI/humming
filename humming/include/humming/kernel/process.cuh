@@ -205,8 +205,15 @@ __global__ void weight_repack_nk(
         zp_smem_row[j] = zp_smem[row][j];
       } else {
         constexpr uint32_t extracted_mask = (1 << kNumBitsB) - 1;
-        zp_smem_row[j] = zp_smem[row * kNumBitsB / 32][j];
-        zp_smem_row[j] = (zp_smem_row[j] >> (row * kNumBitsB % 32)) & extracted_mask;
+        uint32_t start_bits = row * kNumBitsB;
+        uint32_t end_bits = (row + 1) * kNumBitsB;
+        uint32_t start_word = start_bits / 32;
+        uint32_t end_word = (end_bits - 1) / 32;
+        uint32_t val = zp_smem[start_word][j] >> (start_bits % 32);
+        if (start_word != end_word) {
+          val |= zp_smem[end_word][j] << (32 - (start_bits % 32));
+        }
+        zp_smem_row[j] = val & extracted_mask;
       }
     }
 
