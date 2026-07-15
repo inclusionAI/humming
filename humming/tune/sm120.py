@@ -7,8 +7,13 @@ from humming.utils.smem import estimate_smem_size_layer
 class Sm120Heuristics(Sm89Heuristics):
     sm_version: int = 120
     max_smem_size: int = 99 * 1024
-    b8_allowed_dtypes: list[dtypes.DataType] = [dtypes.int8, dtypes.float8e4m3, dtypes.float8e5m2]
-    b4_allowed_dtypes: list[dtypes.DataType] = [dtypes.int4, dtypes.float4e2m1]
+    b8_allowed_dtypes: list[dtypes.DataType] = [
+        dtypes.int8,
+        dtypes.float8e4m3,
+        dtypes.float8e5m2,
+        dtypes.float8e3m4,
+    ]
+    b4_allowed_dtypes: list[dtypes.DataType] = [dtypes.float4e2m1, dtypes.float4e0m3]
 
     @classmethod
     def _is_mxmma(cls, a_dtype, group_size, use_fused_e8m0_scale) -> bool:

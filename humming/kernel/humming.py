@@ -175,7 +175,31 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         module = jit_utils.make_humming_module("get_kernel_id", self.kernel_id)
         self.get_kernel_id = module.get_kernel_id
 
+    def postprocess_cubin(self, cubin_path: str):
+        mode = ""
+        if dtypes.float8e3m4 in (self.mma_a_dtype, self.mma_b_dtype):
+            if self.mma_a_dtype != dtypes.float8e3m4:
+                mode = "mma_e3m4_b"
+            elif self.mma_b_dtype != dtypes.float8e3m4:
+                mode = "mma_e3m4_a"
+            else:
+                mode = "mma_e3m4_ab"
+        elif dtypes.float4e0m3 in (self.mma_a_dtype, self.mma_b_dtype):
+            if self.mma_a_dtype != dtypes.float4e0m3:
+                mode = "mma_e0m3_b"
+            elif self.mma_b_dtype != dtypes.float4e0m3:
+                mode = "mma_e0m3_a"
+            else:
+                mode = "mma_e0m3_ab"
+
+        if mode:
+            from humming.utils.cubin import patch_cubin
+
+            patch_cubin(cubin_path=cubin_path, mode=mode)
+
     def select_mma_op_class(self):
+        self.mma_a_dtype = self.a_dtype
+        self.mma_b_dtype = self.a_dtype
         if self.mma_type == MmaType.MXMMA:
             mma_shape_m, mma_shape_n = 16, 8
             mma_shape_k = 256 // self.a_dtype.num_bits
@@ -186,14 +210,14 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert mma_shape_k % group == 0
             scale_vec = mma_shape_k // group
 
-            mma_b_dtype = self.b_dtype if self.mxmma_native_mixed else self.a_dtype
+            self.mma_b_dtype = self.b_dtype if self.mxmma_native_mixed else self.a_dtype
             return MmaOpClass.from_config(
                 self.mma_type,
                 mma_shape_m,
                 mma_shape_n,
                 mma_shape_k,
-                self.a_dtype,
-                mma_b_dtype,
+                self.mma_a_dtype,
+                self.mma_b_dtype,
                 dtypes.float32,
                 sf_dtype=self.bs_dtype,
                 scale_vec=scale_vec,
@@ -230,18 +254,18 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.mma_type == MmaType.MMA
             and self.sm_version // 10 == 12
             and mma_shape_m == 16
-            and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2)
+            and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)
             and self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
         )
-        mma_b_dtype = self.b_dtype if mma_native_mixed else self.a_dtype
+        self.mma_b_dtype = self.b_dtype if mma_native_mixed else self.a_dtype
 
         return MmaOpClass.from_config(
             self.mma_type,
             mma_shape_m,
             mma_shape_n,
             mma_shape_k,
-            self.a_dtype,
-            mma_b_dtype,
+            self.mma_a_dtype,
+            self.mma_b_dtype,
             mma_cd_dtype,
         )
 
@@ -306,7 +330,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         dtype_map = {
             dtypes.int4: 80,
             dtypes.int8: 75,
+            dtypes.float4e0m3: 120,
             dtypes.float4e2m1: 120,
+            dtypes.float8e3m4: 120,
             dtypes.float8e4m3: 89,
             dtypes.float8e5m2: 89,
             dtypes.bfloat16: 80,
@@ -331,7 +357,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.b_dtype.is_signed
             assert self.b_dtype.exponent_bits <= self.a_dtype.exponent_bits
             assert self.b_dtype.mantissa_bits <= self.a_dtype.mantissa_bits
-            assert self.b_dtype.exponent_bits >= 1
+            assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_integer_type:
             assert self.use_fused_e8m0_scale
             raise NotImplementedError

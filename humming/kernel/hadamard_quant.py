@@ -22,6 +22,16 @@ _SCALE_DTYPE_TORCH = {
 }
 
 
+def _cvt_patch_mode(target_dtype):
+    # Hidden formats are emitted as their base PTX cvt, then the cubin's SASS is
+    # patched to the real format (see humming/utils/cubin.py).
+    if target_dtype == dtypes.float8e3m4:
+        return "cvt_e3m4"
+    if target_dtype == dtypes.float4e0m3:
+        return "cvt_e0m3"
+    return None
+
+
 @dataclasses.dataclass(kw_only=True)
 class HadamardQuantInputKernel(KernelRuntime):
     name: ClassVar[str] = "hadamard_quant_input"
@@ -81,6 +91,13 @@ class HadamardQuantInputKernel(KernelRuntime):
             ctypes.c_void_p,
         )
         self.prepare()
+
+    def postprocess_cubin(self, cubin_path: str):
+        mode = _cvt_patch_mode(self.target_dtype)
+        if mode:
+            from humming.utils.cubin import patch_cubin
+
+            patch_cubin(cubin_path=cubin_path, mode=mode)
 
     def __call__(
         self,

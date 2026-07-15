@@ -10,10 +10,13 @@ CUDA_INLINE float get_data_type_max_num() {
   if constexpr (DataType::kIsIntegerType) {
     uint32_t val = (1 << (DataType::kBits - 1)) - 1;
     return (float)val;
+  } else if constexpr (DataType::kExponentBits == 0) {
+    // Fixed-point sign-magnitude format (e0mX): {0, +/-1 .. +/-(2^M - 1)}.
+    return (float)((1 << DataType::kMantissaBits) - 1);
   } else if constexpr (DataType::kIsFloatingPointType) {
     uint32_t max_val = (1 << (DataType::kBits - DataType::kIsSigned)) - 1;
 
-    if constexpr (std::is_same<DataType, Float8E4M3>::value) {
+    if constexpr (std::is_same<DataType, Float8E4M3>::value || std::is_same<DataType, Float8E3M4>::value) {
       // FN format
       max_val = max_val - 1;
     } else if constexpr (std::is_same<DataType, Float8E5M2>::value) {
@@ -104,6 +107,15 @@ CUDA_INLINE void quant_buffer(
         code = min(max(code, -(1 << (TargetType::kBits - 1))), (1 << (TargetType::kBits - 1)) - 1);
       }
       out_vals[i] = code;
+    } else if constexpr (TargetType::kExponentBits == 0) {
+      // Fixed-point sign-magnitude format (e0mX): sign bit at position M, the
+      // magnitude (0 .. 2^M - 1) in the low M bits.
+      static_assert(TargetType::kIsSigned);
+      int32_t code = __float2int_rn(vals[i] * inv_scale_val);
+      int32_t mag = min(abs(code), (1 << TargetType::kMantissaBits) - 1);
+      uint32_t sign = code < 0 ? 1u : 0u;
+      uint32_t *out_vals = reinterpret_cast<uint32_t *>(out_buffer_ptr);
+      out_vals[i] = (sign << TargetType::kMantissaBits) | (uint32_t)mag;
     } else {
       static_assert(TargetType::kIsSigned);
 

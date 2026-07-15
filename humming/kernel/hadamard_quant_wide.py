@@ -9,6 +9,7 @@ import torch
 from humming import dtypes
 from humming.jit.runtime import KernelRuntime
 from humming.kernel.hadamard import _TORCH_TO_CPP_TYPE
+from humming.kernel.hadamard_quant import _cvt_patch_mode
 
 CODE_TEMPLATE = jinja2.Template("""
 #include <humming/kernel/hadamard_quant_wide.cuh>
@@ -104,6 +105,13 @@ class HadamardQuantInputWideKernel(KernelRuntime):
             ctypes.c_void_p,
         )
         self.prepare()
+
+    def postprocess_cubin(self, cubin_path: str):
+        mode = _cvt_patch_mode(self.target_dtype)
+        if mode:
+            from humming.utils.cubin import patch_cubin
+
+            patch_cubin(cubin_path=cubin_path, mode=mode)
 
     def __call__(
         self,

@@ -19,7 +19,17 @@ def _dequant_act(xq, xs, a_dtype, group_size):
         x_un = ops.unpack_weight(xq.view(torch.int32), 4)
         x_fp = ops.dequant_weight(x_un, 2, 1, True)
         return x_fp.float() * scale
-    return xq.float() * scale
+    elif a_dtype == dtypes.float4e0m3:
+        codes = ops.unpack_weight(xq.view(torch.int32), 4)
+        mag = (codes & 0x7).float()
+        x_fp = torch.where((codes & 0x8) != 0, -mag, mag)
+        return x_fp * scale
+    elif a_dtype == dtypes.float8e3m4:
+        codes = xq.view(torch.uint8).to(torch.int32).contiguous()
+        x_fp = ops.dequant_weight(codes, 3, 4, True)
+        return x_fp * scale
+    else:
+        return xq.float() * scale
 
 
 def _run_mxmma(
@@ -54,8 +64,9 @@ def _run_mxmma(
     )
 
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda") * 0.5
-    a_name = "float4e2m1" if a_dtype == dtypes.float4e2m1 else "float8e4m3"
-    xq, xs = ops.quant_input(x, a_name, group_size=group_size, scale_dtype=bs_dtype.to_str())
+    xq, xs = ops.quant_input(
+        x, a_dtype.to_str(), group_size=group_size, scale_dtype=bs_dtype.to_str()
+    )
     x_dq = _dequant_act(xq, xs, a_dtype, group_size)
     xs_packed = xs.view(torch.int32).contiguous()
 
@@ -97,10 +108,27 @@ def _run_mxmma(
     torch.testing.assert_close(out.float(), ref, rtol=0.08, atol=0.6)
 
 
+def _fp8_weight_compatible(a, b, c):
+    if b.num_bits > a.num_bits:
+        return False
+    if b.is_integer_type:
+        if a == dtypes.float8e5m2 and c == dtypes.float16:
+            return False
+        return (not b.is_signed) and b.num_bits <= a.mantissa_bits + 2
+    return (
+        b.is_signed
+        and b.exponent_bits <= a.exponent_bits
+        and b.mantissa_bits <= a.mantissa_bits
+        and (a.exponent_bits == 0 or b.exponent_bits >= 1)
+    )
+
+
 @pytest.mark.parametrize(
     "b_dtype",
     [
         "float8e4m3",
+        "float8e5m2",
+        "float8e3m4",
         "float6e3m2",
         "float7e3m3",
         "float6e2m3",
@@ -112,18 +140,57 @@ def _run_mxmma(
         "uint2",
     ],
 )
+@pytest.mark.parametrize("a_dtype", ["float8e4m3", "float8e5m2", "float8e3m4"])
 @pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
-def test_mxmma_fp8(b_dtype, c_dtype):
+def test_mxmma_fp8(a_dtype, b_dtype, c_dtype):
     _skip_if_no_mxmma()
+    a = dtypes.DataType.from_str(a_dtype)
+    b = dtypes.DataType.from_str(b_dtype)
+    c = dtypes.DataType.from_str(c_dtype)
+    if not _fp8_weight_compatible(a, b, c):
+        pytest.skip(f"{b_dtype} weight is incompatible with {a_dtype}/{c_dtype}")
     _run_mxmma(
-        a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.DataType.from_str(b_dtype),
+        a_dtype=a,
+        b_dtype=b,
         c_dtype=dtypes.DataType.from_str(c_dtype),
         bs_dtype=dtypes.float8e8m0,
         group_size=32,
     )
 
 
+def _fp4_compatible(a, b, group_size):
+    # E0M3 OMMA is only legal with scale_vec::4X, i.e. group_size == part_k / 4.
+    part_k = 256 // a.num_bits
+    if part_k % group_size != 0:
+        return False
+    if a == dtypes.float4e0m3 and part_k // group_size != 4:
+        return False
+    if b.num_bits > a.num_bits:
+        return False
+    if b.is_integer_type:
+        return (not b.is_signed) and b.num_bits <= a.mantissa_bits + 2
+    return (
+        b.is_signed
+        and b.exponent_bits <= a.exponent_bits
+        and b.mantissa_bits <= a.mantissa_bits
+        and (a.exponent_bits == 0 or b.exponent_bits >= 1)
+    )
+
+
+@pytest.mark.parametrize(
+    "b_dtype",
+    [
+        "float4e2m1",
+        "float3e1m1",
+        "float4e0m3",
+        "float3e0m2",
+        "float2e0m1",
+        "uint3",
+        "uint2",
+        "uint1",
+    ],
+)
+@pytest.mark.parametrize("a_dtype", ["float4e2m1", "float4e0m3"])
 @pytest.mark.parametrize(
     "bs_dtype,group_size",
     [
@@ -133,20 +200,15 @@ def test_mxmma_fp8(b_dtype, c_dtype):
     ],
 )
 @pytest.mark.parametrize("c_dtype", ["bfloat16", "float16"])
-@pytest.mark.parametrize(
-    "b_dtype",
-    [
-        "float4e2m1",
-        "float3e1m1",
-        "uint3",
-        "uint2",
-    ],
-)
-def test_mxmma_fp4(b_dtype, bs_dtype, group_size, c_dtype):
+def test_mxmma_fp4(a_dtype, b_dtype, bs_dtype, group_size, c_dtype):
     _skip_if_no_mxmma()
+    a = dtypes.DataType.from_str(a_dtype)
+    b = dtypes.DataType.from_str(b_dtype)
+    if not _fp4_compatible(a, b, group_size):
+        pytest.skip(f"{b_dtype}/gs{group_size} incompatible with {a_dtype}")
     _run_mxmma(
-        a_dtype=dtypes.float4e2m1,
-        b_dtype=dtypes.DataType.from_str(b_dtype),
+        a_dtype=a,
+        b_dtype=b,
         c_dtype=dtypes.DataType.from_str(c_dtype),
         bs_dtype=dtypes.DataType.from_str(bs_dtype),
         group_size=group_size,

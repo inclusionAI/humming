@@ -89,7 +89,7 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   static_assert(SourceType::kExponentBits <= TargetType::kExponentBits);
   static_assert(SourceType::kMantissaBits <= TargetType::kMantissaBits);
   static_assert(SourceType::kBits < TargetType::kBits);
-  static_assert(!SourceType::kIsSigned || TargetType::kIsSigned);
+  static_assert(SourceType::kIsSigned && TargetType::kIsSigned);
   static_assert(TargetType::kBits == 16 || TargetType::kBits == 8 || TargetType::kBits == 4);
 
   constexpr uint32_t repeated_one = TargetType::kBits == 16 ? 0x00010001 : (TargetType::kBits == 8 ? 0x01010101 : 0x11111111);
@@ -98,8 +98,10 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   constexpr uint32_t shifted_mask = (repeated_one << nonsign_bits) - repeated_one;
   constexpr uint32_t mask = shifted_mask << (TargetType::kBits - SourceType::kBits);
 
-  constexpr uint32_t diff_exp_bits = (TargetType::kSignBits + TargetType::kExponentBits) -
-                                     (SourceType::kSignBits + SourceType::kExponentBits);
+  constexpr uint32_t diff_exp_bits =
+      SourceType::kExponentBits == 0
+          ? (TargetType::kMantissaBits - SourceType::kMantissaBits)
+          : (TargetType::kExponentBits - SourceType::kExponentBits);
 
   if constexpr (std::is_same<SourceType, Float8E8M0>::value && std::is_same<TargetType, BFloat16>::value) {
     return lop3_and_or(val, 0, (val & 0xFF00FF00) >> 1);

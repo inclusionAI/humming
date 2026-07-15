@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from humming import ops
 from humming.ops import quant_input
 from humming.ops.hadamard import hadamard_quant_input, hadamard_transform
 
@@ -20,10 +21,20 @@ def _unpack_int4(q: torch.Tensor) -> torch.Tensor:
 def _to_float(q: torch.Tensor, quant_dtype: str) -> torch.Tensor:
     if quant_dtype == "int4":
         return _unpack_int4(q).to(torch.float32)
+    if quant_dtype == "float8e3m4":
+        codes = q.view(torch.uint8).to(torch.int32).contiguous()
+        return ops.dequant_weight(codes, 3, 4, True)
+    if quant_dtype == "float4e0m3":
+        codes = ops.unpack_weight(q.view(torch.int32), 4)
+        mag = (codes & 0x7).float()
+        return torch.where((codes & 0x8) != 0, -mag, mag)
     return q.to(torch.float32)
 
 
-@pytest.mark.parametrize("quant_dtype", ["int8", "int4", "float8e4m3", "float8e5m2"])
+@pytest.mark.parametrize(
+    "quant_dtype",
+    ["int8", "int4", "float8e4m3", "float8e3m4", "float8e5m2", "float4e0m3"],
+)
 @pytest.mark.parametrize("block_size", [64, 128, 256, 512, 1024])
 @pytest.mark.parametrize("group_size_ratio", [1, 2])
 def test_fused_matches_unfused_fp32(quant_dtype, block_size, group_size_ratio):

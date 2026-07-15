@@ -191,6 +191,8 @@ def main():
         "float8e4m3",
         "float8e5m2",
         "float4e2m1",
+        "float8e3m4",
+        "float4e0m3",
         "int8",
         "int4",
     ]

@@ -14,10 +14,14 @@ template <class DataType>
 CUDA_INLINE float fp_target_max_value() {
   if constexpr (std::is_same<DataType, Float8E4M3>::value) {
     return 448.f;
+  } else if constexpr (std::is_same<DataType, Float8E3M4>::value) {
+    return 30.f;
   } else if constexpr (std::is_same<DataType, Float8E5M2>::value) {
     return 57344.f;
   } else if constexpr (std::is_same<DataType, Float4E2M1>::value) {
     return 6.f;
+  } else if constexpr (std::is_same<DataType, Float4E0M3>::value) {
+    return 7.f;
   } else {
     static_assert(sizeof(DataType) == 0, "unsupported FP target type");
     return 0.f;
@@ -33,7 +37,10 @@ CUDA_INLINE uint16_t quant_pair_fp8(float a, float b) {
 #if __CUDA_ARCH__ >= 890
   if constexpr (std::is_same<TargetType, Float8E4M3>::value) {
     asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(out) : "f"(b), "f"(a));
-  } else if constexpr (std::is_same<TargetType, Float8E5M2>::value) {
+  } else if constexpr (std::is_same<TargetType, Float8E5M2>::value ||
+                       std::is_same<TargetType, Float8E3M4>::value) {
+    // Float8E3M4 has no PTX type; emit the e5m2 cvt and patch the cubin's SASS
+    // format bits (mode "cvt_e3m4") afterwards.
     asm("cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;" : "=h"(out) : "f"(b), "f"(a));
   } else {
     static_assert(sizeof(TargetType) == 0, "quant_pair_fp8: unsupported type");
@@ -52,7 +59,10 @@ template <class TargetType>
 CUDA_INLINE uint8_t quant_pair_fp4(float a, float b) {
   uint16_t out;
 #if __CUDA_ARCH__ >= 1000
-  if constexpr (std::is_same<TargetType, Float4E2M1>::value) {
+  // Float4E0M3 has no PTX type; emit the e2m1 cvt and patch the cubin's SASS
+  // format bits (mode "cvt_e0m3") afterwards.
+  if constexpr (std::is_same<TargetType, Float4E2M1>::value ||
+                std::is_same<TargetType, Float4E0M3>::value) {
     // e2m1x2 packs two fp4 into a .b8 register (low nibble = a, high = b);
     // widen to u16 so the byte can be returned. %1 -> high, %2 -> low.
     asm("{\n\t"
@@ -399,6 +409,7 @@ __global__ void hadamard_quant_input(
       uint8_t local_bytes[E];
       constexpr bool kIsFp8 =
           std::is_same<TargetType, Float8E4M3>::value ||
+          std::is_same<TargetType, Float8E3M4>::value ||
           std::is_same<TargetType, Float8E5M2>::value;
       if constexpr (kIsFp8) {
         static_assert(E % 2 == 0, "fp8 requires even E (paired HW cvt)");
@@ -432,7 +443,8 @@ __global__ void hadamard_quant_input(
     } else if constexpr (kBits == 4) {
       // Two elements per byte. Out tile has kBlockSize/2 bytes.
       static_assert(E % 2 == 0);
-      constexpr bool kIsFp4 = std::is_same<TargetType, Float4E2M1>::value;
+      constexpr bool kIsFp4 = std::is_same<TargetType, Float4E2M1>::value ||
+                              std::is_same<TargetType, Float4E0M3>::value;
       uint8_t local_bytes[E / 2];
       PRAGMA_UNROLL
       for (uint32_t i = 0; i < E / 2; i++) {

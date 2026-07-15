@@ -3,6 +3,11 @@ import triton
 import triton.language as tl
 from torch._subclasses.fake_tensor import FakeTensor
 
+# Hidden float formats the hardware supports but PTX cannot emit: quantize using
+# the base PTX type below and patch the cubin's cvt to the hidden format.
+_HIDDEN_BASE = {"float8e3m4": "float8e5m2", "float4e0m3": "float4e2m1"}
+_HIDDEN_PATCH_MODE = {"float8e3m4": "cvt_e3m4", "float4e0m3": "cvt_e0m3"}
+
 
 @triton.jit
 def calc_scale(tensor, dtype):
@@ -15,6 +20,12 @@ def calc_scale(tensor, dtype):
     elif dtype == "float4e2m1":
         absmax = tl.maximum(tl.max(tl.abs(tensor)), 1e-30)
         scale_x = absmax / 6
+    elif dtype == "float8e3m4":
+        absmax = tl.maximum(tl.max(tl.abs(tensor)), 1e-30)
+        scale_x = absmax / 30
+    elif dtype == "float4e0m3":
+        absmax = tl.maximum(tl.max(tl.abs(tensor)), 1e-30)
+        scale_x = absmax / 7
     elif dtype == "int8":
         maxval = tl.maximum(tl.max(tensor), 1e-30)
         minval = tl.minimum(tl.min(tensor), -1e-30)
@@ -50,7 +61,8 @@ def finalize_scale(scale, scale_dtype: tl.constexpr, gs, inv_gs):
 def quant_tensor(tensor, dtype):
     if dtype == "float8e4m3":
         tensor = tensor.to(tl.float8e4nv)
-    elif dtype == "float8e5m2":
+    elif dtype == "float8e5m2" or dtype == "float8e3m4":
+        # float8e3m4 emits the e5m2 cvt; the cubin is patched to e3m4 afterwards.
         tensor = tensor.to(tl.float8e5)
     elif dtype == "int8":
         tensor = tl.inline_asm_elementwise(
@@ -87,7 +99,7 @@ def quant_tensor_x2(tensor1, tensor2, dtype):
             pack=1,
         )
         tensor = tensor.to(tl.uint8)
-    elif dtype == "float4e2m1":
+    elif dtype == "float4e2m1" or dtype == "float4e0m3":
         tensor = tl.inline_asm_elementwise(
             asm="""{
             .reg .b8 t;
@@ -152,7 +164,7 @@ def _quant_tensor_kernel(
         else:
             scale_off = row_id * row_num_blocks + col_block_id
 
-        if dtype == "int4" or dtype == "float4e2m1":
+        if dtype == "int4" or dtype == "float4e2m1" or dtype == "float4e0m3":
             cols = tl.arange(0, BLOCK // 2)
             mask = (cols < GROUP_SIZE // 2) & in_range
             cols1 = cols * 2
@@ -203,16 +215,17 @@ def quant_input(
     scale_dtype: str = "float32",
     global_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if dtype in ["int4", "float4e2m1"]:
+    storage_dtype = _HIDDEN_BASE.get(dtype, dtype)
+    if storage_dtype in ["int4", "float4e2m1"]:
         output_shape = (*inputs.shape[:-1], inputs.size(-1) // 2)
         output_dtype = torch.uint8
-    elif dtype == "int8":
+    elif storage_dtype == "int8":
         output_shape = inputs.shape
         output_dtype = torch.int8
-    elif dtype == "float8e4m3":
+    elif storage_dtype == "float8e4m3":
         output_shape = inputs.shape
         output_dtype = torch.float8_e4m3fn
-    elif dtype == "float8e5m2":
+    elif storage_dtype == "float8e5m2":
         output_shape = inputs.shape
         output_dtype = torch.float8_e5m2
     else:
@@ -278,11 +291,12 @@ def quant_input(
             # Small group_size (e.g. 128) with massive block count
             groups_per_block = min(1024 // group_size, num_blocks)
         grid_blocks = (num_blocks + groups_per_block - 1) // groups_per_block
-        effective_block = BLOCK // 2 if dtype in ("int4", "float4e2m1") else BLOCK
+        packed = storage_dtype in ("int4", "float4e2m1")
+        effective_block = BLOCK // 2 if packed else BLOCK
         num_warps = min(max(effective_block // 256, 1), 8)
         num_stages = 1
 
-        _quant_tensor_kernel[(grid_blocks,)](
+        launch_args = (
             inputs,
             outputs,
             scales,
@@ -300,9 +314,22 @@ def quant_input(
             has_global_scale,
             global_scale,
             mx_pack_m_major,
-            num_warps=num_warps,
-            num_stages=num_stages,
         )
+        launch_kwargs = dict(num_warps=num_warps, num_stages=num_stages)
+
+        patch_mode = _HIDDEN_PATCH_MODE.get(dtype)
+        if patch_mode is not None:
+            from humming.utils.cubin import triton_warmup_and_patch
+
+            triton_warmup_and_patch(
+                _quant_tensor_kernel,
+                *launch_args,
+                mode=patch_mode,
+                grid=(grid_blocks,),
+                **launch_kwargs,
+            )
+
+        _quant_tensor_kernel[(grid_blocks,)](*launch_args, **launch_kwargs)
 
     if scales is None:
         scales = torch.empty(0)
@@ -315,5 +342,9 @@ def quant_input(
 
     if scale_dtype == "float8e8m0" and scales.numel() > 0 and not mx_pack_m_major:
         scales = scales.view(torch.float8_e8m0fnu)
+
+    # Hidden formats are raw bytes reinterpreted by the MMA; expose them as uint8.
+    if dtype in _HIDDEN_BASE and outputs.dtype != torch.uint8:
+        outputs = outputs.view(torch.uint8)
 
     return outputs, scales

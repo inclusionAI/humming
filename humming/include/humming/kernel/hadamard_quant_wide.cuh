@@ -267,6 +267,7 @@ __global__ void hadamard_quant_input_wide(
     uint8_t bytes[kElemsPerThread];
     constexpr bool kIsFp8 =
         std::is_same<TargetType, Float8E4M3>::value ||
+        std::is_same<TargetType, Float8E3M4>::value ||
         std::is_same<TargetType, Float8E5M2>::value;
     if constexpr (kIsFp8) {
       static_assert(kElemsPerThread % 2 == 0,
@@ -358,7 +359,8 @@ __global__ void hadamard_quant_input_wide(
   } else if constexpr (kBits == 4) {
     // Pair adjacent elements within each tile, then write per-tile.
     static_assert(E_lane >= 2 && E_lane % 2 == 0);
-    constexpr bool kIsFp4 = std::is_same<TargetType, Float4E2M1>::value;
+    constexpr bool kIsFp4 = std::is_same<TargetType, Float4E2M1>::value ||
+                            std::is_same<TargetType, Float4E0M3>::value;
     uint8_t bytes[kElemsPerThread / 2];
     PRAGMA_UNROLL
     for (uint32_t m = 0; m < kTilesPerThread; m++) {
