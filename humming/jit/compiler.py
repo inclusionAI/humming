@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from cuda.bindings import nvrtc
 from filelock import FileLock
@@ -36,7 +37,14 @@ class Compiler:
         return json.dumps(data, ensure_ascii=False)
 
     @classmethod
-    def compile(cls, code, sm_version, kernel_expr, disable_fast_math=False):
+    def compile(
+        cls,
+        code,
+        sm_version,
+        kernel_expr,
+        disable_fast_math=False,
+        postprocess_cubin: Callable | None = None,
+    ):
         flags = cls.get_flags(sm_version, disable_fast_math)
         signature = f"{cls.__name__}$${cls.signature()}$${flags}$${kernel_expr}$${code}"
         signature += "$$" + Compiler.cuh_last_update_time()
@@ -60,6 +68,10 @@ class Compiler:
 
             compile_res = cls._compile(source_path, cache_dirname, sm_version, kernel_expr, flags)
             returncode, stdout, stderr = compile_res
+
+            if returncode == 0 and postprocess_cubin is not None:
+                filename = cache_dirname / "kernel_tmp.cubin"
+                postprocess_cubin(filename.as_posix())
 
             with open(cache_dirname / "stdout.log", "w") as f:
                 f.write(stdout)
