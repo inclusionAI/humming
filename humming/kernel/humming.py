@@ -110,33 +110,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         LayerConfig.__post_init__(self)
         ComputeConfig.__post_init__(self)
         TuningConfig.__post_init__(self)
-
-        # NOTE: these flag overrides must run BEFORE KernelRuntime.__post_init__,
-        # which generates the kernel code / cubin (USE_TMA_AS etc.). Overriding
-        # afterwards would leave the cubin metadata out of sync with the launcher.
-
-        # Channel-wise input scale is a [M] vector (inherently M-contiguous), so it
-        # is always M-major; this lets use_tma_as be enabled for it as well.
-        if self.has_input_scale and self.input_scale_group_size == 0:
-            self.use_m_major_input_scale = True
-
-        # AS TMA needs the M-innermost start coord (the expert token offset) to be
-        # 16B-aligned. dense/grouped satisfy this (grouped pads every expert's token
-        # count to a multiple of 4); indexed gemm gathers rows and cannot, so it
-        # falls back to the cp.async M-major path.
-        if self.use_tma_as and self.is_indexed_gemm:
-            self.use_tma_as = False
-            self.use_m_major_input_scale = True
-
-        # TMA loads of the input scale require it to be M-major ([num_groups, M]).
-        # mxmma is exempt: its packed sf is already stored M-major ([num_words, M]).
-        if self.use_tma_as:
-            is_mxmma = self.mma_type == MmaType.MXMMA
-            assert self.use_m_major_input_scale or is_mxmma, (
-                "use_tma_as requires use_m_major_input_scale=True "
-                "(input scale must be stored M-major [num_groups, M])"
-            )
-
         KernelRuntime.__post_init__(self)
 
     def init_kernel(self) -> None:
