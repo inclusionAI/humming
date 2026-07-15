@@ -80,12 +80,8 @@ def may_build_cubin_patcher():
                 "-o",
                 tmp_lib.as_posix(),
             ]
-            try:
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            except FileNotFoundError:
-                raise RuntimeError(
-                    "g++ not found; install a C++ compiler on PATH to build the cubin patcher"
-                )
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
             if result.returncode != 0:
                 raise RuntimeError(
                     f"Failed to build libcubinpatch.so:\nCMD: {' '.join(cmd)}\n"
