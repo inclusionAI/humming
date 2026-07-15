@@ -49,8 +49,7 @@ def _pick_wide_launch_params(block_size: int, group_size: int) -> tuple[int, int
             return best[1], best[2]
 
     raise AssertionError(
-        f"no valid wide-kernel launch params for block_size={block_size}, "
-        f"group_size={group_size}"
+        f"no valid wide-kernel launch params for block_size={block_size}, group_size={group_size}"
     )
 
 
@@ -68,8 +67,7 @@ class HadamardQuantInputWideKernel(KernelRuntime):
 
     def init_kernel(self):
         assert self.group_size > self.block_size, (
-            "wide kernel only for group_size > block_size; "
-            "use HadamardQuantInputKernel otherwise"
+            "wide kernel only for group_size > block_size; use HadamardQuantInputKernel otherwise"
         )
         threads_per_tile, tiles_per_thread = _pick_wide_launch_params(
             self.block_size, self.group_size

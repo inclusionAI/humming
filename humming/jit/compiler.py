@@ -180,8 +180,10 @@ class NVRTCCompiler(Compiler):
         target_path = (Path(cache_dirname) / "kernel_tmp.cubin").as_posix()
         cmd = [
             binary_path,
-            "--input", source_path,
-            "--output", target_path,
+            "--input",
+            source_path,
+            "--output",
+            target_path,
             *header_args,
         ]
         if kernel_expr:

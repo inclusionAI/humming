@@ -128,8 +128,8 @@ public:
   static constexpr uint32_t kStageSizeB = BlockShape::K / kPartMmaShapeK * kSmemStrideB;
   static constexpr uint32_t kNumGroupsAStorage = CEIL_DIV(kNumGroupsA, 4) * 4;
   static constexpr uint32_t kStageSizeAS = kUseMxmma
-      ? CEIL_DIV(kNumGroupsAStorage * BlockShape::M * ElementBS::kBits / 8, sizeof(int4))
-      : kNumGroupsA * BlockShape::M / 4;
+                                               ? CEIL_DIV(kNumGroupsAStorage * BlockShape::M * ElementBS::kBits / 8, sizeof(int4))
+                                               : kNumGroupsA * BlockShape::M / 4;
   static constexpr uint32_t kStageSizeBS = kNumGroupsB * kSmemStrideBS;
   static constexpr uint32_t kStageSizeBZP = kNumGroupsB * kSmemStrideBZP;
 

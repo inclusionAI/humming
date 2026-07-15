@@ -40,7 +40,11 @@ def _run_mxmma(
     # mxmma block-scale formats (ue8m0 / ue4m3) are unsigned, so the weight must
     # be quantized with a non-negative microscale.
     _, weight_ref, weight, weight_scale, _, _ = generate_random_weight(
-        n=n, k=k, group_size=group_size, dtype=b_dtype, scale_dtype=bs_dtype,
+        n=n,
+        k=k,
+        group_size=group_size,
+        dtype=b_dtype,
+        scale_dtype=bs_dtype,
         allow_negative_scale=False,
     )
     weight_ref = weight_ref.squeeze(0) if weight_ref.ndim == 3 else weight_ref
@@ -51,9 +55,7 @@ def _run_mxmma(
 
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda") * 0.5
     a_name = "float4e2m1" if a_dtype == dtypes.float4e2m1 else "float8e4m3"
-    xq, xs = ops.quant_input(
-        x, a_name, group_size=group_size, scale_dtype=bs_dtype.to_str()
-    )
+    xq, xs = ops.quant_input(x, a_name, group_size=group_size, scale_dtype=bs_dtype.to_str())
     x_dq = _dequant_act(xq, xs, a_dtype, group_size)
     xs_packed = xs.view(torch.int32).contiguous()
 

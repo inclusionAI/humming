@@ -101,7 +101,7 @@ CUDA_INLINE float finalize_scale(
   if constexpr (kScaleStore == kScaleStoreE8M0) {
     s *= inv_gs;
     uint32_t u = __float_as_uint(s);
-    u = (u + 0x007FFFFFu) & 0x7F800000u;  // round up to a power of two
+    u = (u + 0x007FFFFFu) & 0x7F800000u; // round up to a power of two
     if (do_write) reinterpret_cast<uint8_t *>(store_ptr)[idx] = static_cast<uint8_t>(u >> 23);
     return __uint_as_float(u) * gs;
   } else if constexpr (kScaleStore == kScaleStoreE4M3) {

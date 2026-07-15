@@ -160,7 +160,8 @@ public:
     if constexpr (final_regs_c_index() != 0) {
       constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
       PRAGMA_UNROLL
-      for (uint32_t j = 0; j < kNumIters; j++) fence_regs(regs_c[0][delta_j + j][0]);
+      for (uint32_t j = 0; j < kNumIters; j++)
+        fence_regs(regs_c[0][delta_j + j][0]);
     }
   }
 
