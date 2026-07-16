@@ -270,6 +270,7 @@ class CompressedTensorsInputSchema(BaseInputSchema):
             "int-quantized",
             "float-quantized",
             "naive-quantized",
+            "pack-quantized",
             "nvfp4-pack-quantized",
             "mxfp4-pack-quantized",
         ]
