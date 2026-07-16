@@ -91,8 +91,8 @@ def test_scale(
     )
 
     _, weight_ref, weight, weight_scale, _, _ = random_weight_data
-    if a_dtype == dtypes.int8 and b_dtype == dtypes.int8:
-        weight = (weight.view(torch.int8) + 128).view(torch.int32)
+    if a_dtype == b_dtype and a_dtype in (dtypes.int4, dtypes.int8):
+        weight = (weight.view(torch.int8) + (1 << (a_dtype.num_bits - 1))).view(torch.int32)
 
     if mma_type == "mma":
         to_apply_on_c = weight_scale_group_size == 0 or a_dtype.num_bits != 16
@@ -221,8 +221,8 @@ def test_global_scale(
 
     _, weight_ref, weight, weight_scale, _, global_scale = random_weight_data
     global_scale = global_scale.float().view(1)
-    if a_dtype == dtypes.int8 and b_dtype == dtypes.int8:
-        weight = (weight.view(torch.int8) + 128).view(torch.int32)
+    if a_dtype == b_dtype and a_dtype in (dtypes.int4, dtypes.int8):
+        weight = (weight.view(torch.int8) + (1 << (a_dtype.num_bits - 1))).view(torch.int32)
 
     to_apply_on_c = weight_scale_group_size == 0 or a_dtype.num_bits != 16
 
@@ -334,8 +334,8 @@ def test_int_weight_scale(
 
     _, weight_ref, weight, weight_scale, _, global_scale = random_weight_data
     dtype = weight_scale.dtype
-    if a_dtype == dtypes.int8 and b_dtype == dtypes.int8:
-        weight = (weight.view(torch.int8) + 128).view(torch.int32)
+    if a_dtype == b_dtype and a_dtype in (dtypes.int4, dtypes.int8):
+        weight = (weight.view(torch.int8) + (1 << (a_dtype.num_bits - 1))).view(torch.int32)
 
     to_apply_on_c = weight_scale_group_size == 0 or a_dtype.num_bits != 16
 
@@ -560,8 +560,8 @@ def test_block_scale(
     )
 
     _, weight_ref, weight, weight_scale, _, _ = random_weight_data
-    if a_dtype == dtypes.int8 and b_dtype == dtypes.int8:
-        weight = (weight.view(torch.int8) + 128).view(torch.int32)
+    if a_dtype == b_dtype and a_dtype in (dtypes.int4, dtypes.int8):
+        weight = (weight.view(torch.int8) + (1 << (a_dtype.num_bits - 1))).view(torch.int32)
 
     weight = prepare_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
     weight_scale = weight_scale.transpose(-1, -2).contiguous()
