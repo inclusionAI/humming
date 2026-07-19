@@ -252,6 +252,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
         mma_native_mixed = (
             self.mma_type == MmaType.MMA
+            and not self.use_fused_e8m0_scale
             and self.sm_version // 10 == 12
             and mma_shape_m == 16
             and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)

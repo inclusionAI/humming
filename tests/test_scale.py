@@ -778,3 +778,50 @@ def test_block_scale(
     else:
         outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch_dtype)
     torch.testing.assert_close(outputs, outputs_ref, rtol=0.05, atol=atol)
+
+
+@pytest.mark.parametrize("weight_scale_2_type", ["tensor", "channel"])
+def test_fused_e8m0_layer(weight_scale_2_type):
+    skip_if_unsupported(a_dtype="float8e4m3")
+    from humming.layer import HummingLayer
+
+    torch.manual_seed(0)
+    layer = HummingLayer(
+        shape_n=1024,
+        shape_k=1024,
+        weight_config={
+            "quant_method": "humming",
+            "dtype": "float4e2m1",
+            "scale_dtype": "float8e8m0",
+            "group_size": 64,
+            "scale_type": "group",
+            "scale_2_type": weight_scale_2_type,
+        },
+        input_config={"quant_method": "humming", "dtype": "float8e4m3", "group_size": 64},
+        torch_dtype=torch.bfloat16,
+    )
+    weight = torch.randn((1024, 1024), dtype=torch.float32, device="cuda")
+    if weight_scale_2_type == "channel":
+        # wide per-row magnitude spread: per-tensor exponent-window extraction
+        # would clamp, per-channel extraction must survive it
+        row_mag = torch.logspace(-3, 3, 1024, base=10, device="cuda").view(-1, 1)
+        weight = weight * row_mag
+    weight = weight.to(torch.bfloat16)
+
+    layer.load_from_unquantized(weight)
+    tensors = {k: v.cuda() for k, v in layer.state_dict().items() if k != "locks"}
+    weight_ref = layer.weight_schema.dequant_tensors(tensors).float()
+    layer.cuda()
+    layer.transform()
+
+    meta = layer.humming_metas[""]
+    assert meta.use_fused_e8m0_scale is True
+    assert meta.weight_scale_2_type.value == weight_scale_2_type
+
+    inputs = torch.randn((64, 1024), dtype=torch.bfloat16, device="cuda")
+    outputs = layer(inputs)
+    outputs_ref = inputs.float().matmul(weight_ref.T)
+    row_err = (outputs.float() - outputs_ref).abs().mean(0)
+    row_err = row_err / outputs_ref.abs().mean(0).clamp_min(1e-30)
+    assert float(row_err.median()) < 0.1
+    assert float(row_err.max()) < 0.3

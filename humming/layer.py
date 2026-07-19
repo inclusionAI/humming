@@ -137,7 +137,6 @@ class HummingLayerMeta(LayerConfig):
             )
             self.use_fused_e8m0_scale = (
                 not has_native_mxf8f6f4
-                and not is_channel_scale_2
                 and self.a_dtype in [dtypes.float8e4m3, dtypes.int8]
                 and self.weight_scale_group_size > 0
                 and self.b_dtype in [dtypes.float4e2m1]
@@ -154,17 +153,25 @@ class HummingLayerMeta(LayerConfig):
             )
 
         if self.use_int_weight_scale:
+            assert not is_channel_scale_2, (
+                "use_int_weight_scale is incompatible with channel weight_scale_2"
+            )
             self.weight_scale_type = WeightScaleType.GROUP
             self.weight_scale_2_type = WeightScale2Type.TENSOR
             self.is_group_weight_scale = True
             self.is_tensor_weight_scale_2 = True
+            self.has_tensor_weight_scale = True
             self.bs_dtype = self.c_dtype
 
         if self.use_fused_e8m0_scale:
             self.weight_scale_type = WeightScaleType.GROUP
-            self.weight_scale_2_type = WeightScale2Type.TENSOR
             self.is_group_weight_scale = True
-            self.is_tensor_weight_scale_2 = True
+            # the extracted min-exponent factor becomes the secondary scale:
+            # per-channel when channel2 is requested, per-tensor otherwise
+            if self.weight_scale_2_type != WeightScale2Type.CHANNEL:
+                self.weight_scale_2_type = WeightScale2Type.TENSOR
+                self.is_tensor_weight_scale_2 = True
+                self.has_tensor_weight_scale = True
 
         self.use_packed_k_layout = (
             self.mma_type == MmaType.WGMMA
@@ -269,11 +276,21 @@ class HummingLayerMethod:
 
         if meta.use_int_weight_scale or meta.use_fused_e8m0_scale:
             if "weight_scale_2" not in tensors:
-                tensors["weight_scale_2"] = torch.ones(
-                    (meta.num_experts or 1),
-                    device=tensors["weight_scale"].device,
-                    dtype=torch.float32,
-                )
+                if meta.weight_scale_2_type == WeightScale2Type.CHANNEL:
+                    shape: tuple[int, ...] = (meta.shape_n - meta.pad_shape_n,)
+                    if meta.num_experts:
+                        shape = (meta.num_experts,) + shape
+                    tensors["weight_scale_2"] = torch.ones(
+                        shape,
+                        device=tensors["weight_scale"].device,
+                        dtype=meta.param_dtype,
+                    )
+                else:
+                    tensors["weight_scale_2"] = torch.ones(
+                        (meta.num_experts or 1),
+                        device=tensors["weight_scale"].device,
+                        dtype=torch.float32,
+                    )
 
         schema.validate_tensors(
             tensors,
@@ -345,10 +362,13 @@ class HummingLayerMethod:
         origin_dtype = weight_scale.dtype
         origin_shape = weight_scale.shape
         assert origin_dtype in [torch.uint8, torch.float8_e8m0fnu]
-        weight_scale = weight_scale.view(torch.uint8).view(meta.num_experts or 1, -1)
+        num_experts = meta.num_experts or 1
+        is_channel = meta.weight_scale_2_type == WeightScale2Type.CHANNEL
+        num_rows = meta.shape_n if is_channel else 1
+        weight_scale = weight_scale.view(torch.uint8).view(num_experts, num_rows, -1)
 
-        scale_max = weight_scale.max(1)[0].unsqueeze(-1)
-        scale_min = weight_scale.min(1)[0].unsqueeze(-1)
+        scale_max = weight_scale.amax(-1, keepdim=True)
+        scale_min = weight_scale.amin(-1, keepdim=True)
         scale_range = scale_max - scale_min
         if meta.a_dtype == dtypes.int8:
             max_range_val = 3
@@ -361,16 +381,22 @@ class HummingLayerMethod:
         scale_range = scale_range.minimum(max_range)
         scale_min_new = scale_max - scale_range
         delta_scale_offsets = weight_scale.maximum(scale_min_new) - weight_scale
+        delta_scale_offsets = delta_scale_offsets.view(num_experts, -1)
         weight_scale = weight_scale.maximum(scale_min_new) - scale_min_new
         if meta.a_dtype == dtypes.float8e4m3:
             weight_scale = weight_scale + 1
         weight_scale = weight_scale.view(origin_dtype).view(origin_shape)
         ops.process_mxfp4_w4a8_weight(weight, delta_scale_offsets, inplace=True)
 
-        scale_factor = 2 ** (scale_min_new.view(-1).float() - 127)
+        scale_factor = 2 ** (scale_min_new.view(num_experts, num_rows).float() - 127)
         scale_factor = scale_factor / 2
+        if is_channel:
+            if not meta.num_experts:
+                scale_factor = scale_factor.squeeze(0)
+        else:
+            scale_factor = scale_factor.view(-1)
         if weight_scale_2 is not None:
-            out_weight_scale_2 = weight_scale_2 * scale_factor
+            out_weight_scale_2 = weight_scale_2.float() * scale_factor
         else:
             out_weight_scale_2 = scale_factor
 
