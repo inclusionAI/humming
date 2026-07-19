@@ -58,7 +58,7 @@ ScalarType dtype_id_to_tensor_dtype(uint32_t dtype_id) {
 };
 
 struct KernelData {
-  CUmodule module;
+  CUlibrary library;
   CUfunction func;
 
   uint32_t smem_size;

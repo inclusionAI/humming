@@ -3,6 +3,7 @@
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <map>
+#include <vector>
 #include <pybind11/pybind11.h>
 
 #include "./elf.h"
@@ -187,21 +188,45 @@ Tensor launch_kernel_impl(
   return c;
 };
 
-int64_t register_kernel(const std::string &cubin_path, const std::string &func_name) {
-  std::string hash_str = cubin_path + "\n" + func_name;
+std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) {
+  static std::unordered_map<std::string, std::tuple<int64_t, std::string>> g_path_ids;
+  auto it = g_path_ids.find(cubin_path);
+  if (it != g_path_ids.end()) return it->second;
+
+  CUlibrary library;
+  check_curesult(
+      cuLibraryLoadFromFile(&library, cubin_path.c_str(), nullptr, nullptr, 0, nullptr, nullptr, 0),
+      "cuLibraryLoadFromFile");
+
+  unsigned int num_kernels = 0;
+  check_curesult(cuLibraryGetKernelCount(&num_kernels, library), "cuLibraryGetKernelCount");
+  std::vector<CUkernel> kernels(num_kernels);
+  check_curesult(cuLibraryEnumerateKernels(kernels.data(), num_kernels, library), "cuLibraryEnumerateKernels");
+
+  CUkernel kernel = nullptr;
+  std::string kernel_name;
+  for (CUkernel candidate : kernels) {
+    const char *name = nullptr;
+    check_curesult(cuKernelGetName(&name, candidate), "cuKernelGetName");
+    if (std::string(name).find("humming") == std::string::npos) continue;
+    ASSERT_CHECK(kernel == nullptr, "multiple humming kernels found in ", cubin_path);
+    kernel = candidate;
+    kernel_name = name;
+  }
+  ASSERT_CHECK(kernel != nullptr, "no humming kernel found in ", cubin_path);
+
+  CUfunction func;
+  check_curesult(cuKernelGetFunction(&func, kernel), "cuKernelGetFunction");
+
   int64_t hash_id = manual_crc32(cubin_path);
-  hash_id = (hash_id << 30) + manual_crc32(func_name);
+  hash_id = (hash_id << 30) + manual_crc32(kernel_name);
 
   if (g_kernel_data.find(hash_id) == g_kernel_data.end()) {
-    CUmodule hModule;
-    CUfunction hKernel;
-    check_curesult(cuModuleLoad(&hModule, cubin_path.c_str()), "cuModuleLoad");
-    check_curesult(cuModuleGetFunction(&hKernel, hModule, func_name.c_str()), "cuModuleGetFunction");
     auto reader = CubinReader(cubin_path);
 
     g_kernel_data[hash_id] = {
-        hModule,
-        hKernel,
+        library,
+        func,
 
         reader.getUint32("SMEM_SIZE"),
         reader.getUint32("NUM_THREADS"),
@@ -248,7 +273,9 @@ int64_t register_kernel(const std::string &cubin_path, const std::string &func_n
         reader.getBool("USE_PACKED_K_LAYOUT")};
   };
 
-  return hash_id;
+  auto result = std::make_tuple(hash_id, kernel_name);
+  g_path_ids[cubin_path] = result;
+  return result;
 }
 
 Tensor launch_kernel(
@@ -284,7 +311,7 @@ COMMON_TORCH_LIBRARY(humming, m) {
       "Tensor? bs2, Tensor? as_, Tensor? bzp, Tensor? bias, Tensor? c, "
       "Tensor? sorted_ids, Tensor? expert_ids, Tensor? num_tokens_padded, Tensor? expert_layout, "
       "Tensor? locks, SymInt top_k, SymInt valid_shape_m, bool should_check_tensor = True) -> Tensor");
-  m.def("register_kernel(str cubin_path, str func_name) -> int");
+  m.def("register_kernel(str cubin_path) -> (int, str)");
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, CUDA, m) {

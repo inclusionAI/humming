@@ -20,9 +20,9 @@ from humming.ops.weight import (
 )
 
 
-def register_kernel(cubin_path: str, func_name: str) -> int:
+def register_kernel(cubin_path: str) -> tuple[int, str]:
     init_humming_launcher()
-    return torch.ops.humming.register_kernel(cubin_path, func_name)
+    return torch.ops.humming.register_kernel(cubin_path)
 
 
 def launch_kernel(

@@ -6,7 +6,6 @@ from typing import Any, ClassVar
 import cuda.bindings.driver as cbd
 import torch
 
-import humming.utils.jit as jit_utils
 from humming import dtypes
 from humming.jit.compiler import NVCCCompiler, NVRTCCompiler
 
@@ -88,8 +87,6 @@ class KernelRuntime:
             disable_fast_math=self.disable_fast_math,
             postprocess_cubin=self.postprocess_cubin,
         )
-        kernel_name = jit_utils.find_kernel_name_in_cubin_cached(kernel_filename, self.name)
-        self.kernel_name = kernel_name
         self.kernel_filename = kernel_filename
         if threading.current_thread() is threading.main_thread():
             self.load_cubin()
@@ -101,13 +98,23 @@ class KernelRuntime:
         if self.cubin_loaded:
             return None
         kernel_filename = self.kernel_filename
-        kernel_name = self.kernel_name
         result, lib = cbd.cuLibraryLoadFromFile(kernel_filename.encode(), [], [], 0, [], [], 0)
         assert result == 0, repr(result)
-        result, kernel = cbd.cuLibraryGetKernel(lib, kernel_name.encode())
+        result, num_kernels = cbd.cuLibraryGetKernelCount(lib)
         assert result == 0, repr(result)
-        self.kernel = kernel
-        result, func = cbd.cuKernelGetFunction(kernel)
+        result, kernels = cbd.cuLibraryEnumerateKernels(num_kernels, lib)
+        assert result == 0, repr(result)
+        keyword = self.name.encode()
+        matched = []
+        for kernel in kernels:
+            result, name = cbd.cuKernelGetName(kernel)
+            assert result == 0, repr(result)
+            if keyword in name:
+                matched.append((kernel, name))
+        assert len(matched) == 1, (kernel_filename, self.name, [x[1] for x in matched])
+        self.kernel, kernel_name = matched[0]
+        self.kernel_name = kernel_name.decode()
+        result, func = cbd.cuKernelGetFunction(self.kernel)
         assert result == 0, repr(result)
         self.func = func
         self.cubin_loaded = True
@@ -116,28 +123,6 @@ class KernelRuntime:
         assert threading.current_thread() is threading.main_thread()
         if not self.cubin_loaded:
             self.load_cubin()
-
-    def get_cubin_symbol_value(self, name):
-        return jit_utils.read_symbol_value(self.kernel_filename, name)
-
-    def list_kernel_attr_name_list(self):
-        return list(cbd.CUkernel_attribute)
-
-    def get_kernel_attr_value(self, attr_name, device_index=0):
-        device = cbd.CUdevice(device_index)
-        attr_enum = getattr(cbd.CUkernel_attribute, attr_name)
-        result, value = cbd.cuKernelGetAttribute(attr_enum, self.kernel, device)
-        assert result == 0, repr(result)
-        return value
-
-    def list_kernel_all_attrs(self, device_index=0):
-        attrs = {}
-        for name in self.list_kernel_attr_name_list():
-            try:
-                attrs[name] = self.get_kernel_attr_value(name, device_index)
-            except BaseException:
-                continue
-        return attrs
 
     def __call__(self, *args, **kwargs):
         raise NotImplementedError

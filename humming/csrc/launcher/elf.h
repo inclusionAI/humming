@@ -1,12 +1,12 @@
 #pragma once
 
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
-
-#include "./torch_api.h"
 
 #define SHT_NOBITS 8
 typedef uint64_t Elf64_Addr;
@@ -58,36 +58,38 @@ struct Elf64_Sym {
 class CubinReader {
 private:
   std::map<std::string, uint64_t> symbolOffsets;
-  std::string cubinPath;
+  std::vector<char> data;
 
 public:
-  CubinReader(const std::string &path) : cubinPath(path) {
+  CubinReader(const std::string &path) {
     std::ifstream fs(path, std::ios::binary);
     if (!fs) return;
 
-    Elf64_Ehdr ehdr;
-    fs.read((char *)&ehdr, sizeof(ehdr));
+    fs.seekg(0, std::ios::end);
+    data.resize(static_cast<size_t>(fs.tellg()));
+    fs.seekg(0);
+    fs.read(data.data(), data.size());
+    if (data.size() < sizeof(Elf64_Ehdr)) return;
 
-    std::vector<Elf64_Shdr> shdrs(ehdr.e_shnum);
-    fs.seekg(ehdr.e_shoff);
-    fs.read((char *)shdrs.data(), sizeof(Elf64_Shdr) * ehdr.e_shnum);
+    const Elf64_Ehdr *ehdr = reinterpret_cast<const Elf64_Ehdr *>(data.data());
+    const Elf64_Shdr *shdrs = reinterpret_cast<const Elf64_Shdr *>(data.data() + ehdr->e_shoff);
 
-    for (int i = 0; i < ehdr.e_shnum; ++i) {
+    for (int i = 0; i < ehdr->e_shnum; ++i) {
       if (shdrs[i].sh_type == 2) {
-        readSymbolTable(fs, shdrs, i);
+        readSymbolTable(shdrs, ehdr->e_shnum, i);
       }
     }
   }
 
   uint32_t getUint32(const std::string &name) {
     auto it = symbolOffsets.find(name);
-    ASSERT_CHECK(it != symbolOffsets.end(), name);
+    if (it == symbolOffsets.end()) {
+      throw std::runtime_error("cubin symbol not found: " + name);
+    }
     if (it->second == 0ULL) return 0;
 
-    std::ifstream fs(cubinPath, std::ios::binary);
     uint32_t val = 0;
-    fs.seekg(symbolOffsets[name]);
-    fs.read((char *)&val, sizeof(uint32_t));
+    std::memcpy(&val, data.data() + it->second, sizeof(uint32_t));
     return val;
   }
 
@@ -95,23 +97,19 @@ public:
     return getUint32(name) > 0;
   }
 
-  void readSymbolTable(std::ifstream &fs, const std::vector<Elf64_Shdr> &shdrs, int symIdx) {
+  void readSymbolTable(const Elf64_Shdr *shdrs, int num_shdrs, int symIdx) {
     const Elf64_Shdr &symtab = shdrs[symIdx];
     const Elf64_Shdr &strtab = shdrs[symtab.sh_link];
 
-    std::vector<char> names(strtab.sh_size);
-    fs.seekg(strtab.sh_offset);
-    fs.read(names.data(), strtab.sh_size);
-
+    const char *names = data.data() + strtab.sh_offset;
     int count = symtab.sh_size / symtab.sh_entsize;
-    std::vector<Elf64_Sym> syms(count);
-    fs.seekg(symtab.sh_offset);
-    fs.read((char *)syms.data(), symtab.sh_size);
+    const Elf64_Sym *syms = reinterpret_cast<const Elf64_Sym *>(data.data() + symtab.sh_offset);
 
-    for (const auto &sym : syms) {
-      if (sym.st_name == 0 || sym.st_name >= names.size()) continue;
-      if (sym.st_shndx >= shdrs.size()) continue;
-      std::string sName = &names[sym.st_name];
+    for (int i = 0; i < count; ++i) {
+      const Elf64_Sym &sym = syms[i];
+      if (sym.st_name == 0 || sym.st_name >= strtab.sh_size) continue;
+      if (sym.st_shndx >= num_shdrs) continue;
+      std::string sName = names + sym.st_name;
 
       const auto &shdr = shdrs[sym.st_shndx];
       if (shdr.sh_type == SHT_NOBITS) {

@@ -4,13 +4,11 @@ import hashlib
 import importlib
 import os
 import re
-import struct
 import subprocess
 import sys
 import threading
 from pathlib import Path
 
-from elftools.elf.elffile import ELFFile
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
@@ -20,72 +18,6 @@ def popen_and_reap(cmd, **kwargs):
     proc = subprocess.Popen(cmd, **kwargs)
     threading.Thread(target=proc.wait, name="humming-bg-build-reaper", daemon=True).start()
     return proc
-
-
-def read_symbol_value(filename, symbol_name, default_value=None):
-    with open(filename, "rb") as f:
-        elffile = ELFFile(f)
-
-        symbol_table = elffile.get_section_by_name(".symtab")
-        symbol = symbol_table.get_symbol_by_name(symbol_name)
-
-        if symbol is None:
-            return default_value
-
-        symbol = symbol[0]
-        section = elffile.get_section(symbol["st_shndx"])
-        offset = symbol["st_value"]
-        size = symbol["st_size"]
-
-        raw_data = section.data()[offset : offset + size]
-        symbol_value = struct.unpack("<i", raw_data)[0]
-
-    return symbol_value
-
-
-def find_kernel_name_in_cubin_cached(filename, func_keyword):
-    # Pure-python ELF symbol iteration takes seconds per cubin and holds the
-    # GIL, so warm-cache kernel loading is slower than cold compilation when
-    # many kernels load concurrently. Persist the resolved name next to the
-    # cubin and reuse it on later runs.
-    cache_filename = filename + ".name"
-    try:
-        with open(cache_filename) as f:
-            cached = f.read().strip()
-    except OSError:
-        cached = ""
-    if cached and re.match(f"^_Z\\d+{func_keyword}", cached):
-        return cached
-
-    kernel_name = find_kernel_name_in_cubin(filename, func_keyword)
-    tmp_filename = f"{cache_filename}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        with open(tmp_filename, "w") as f:
-            f.write(kernel_name)
-        os.replace(tmp_filename, cache_filename)
-    except OSError:
-        try:
-            os.remove(tmp_filename)
-        except OSError:
-            pass
-    return kernel_name
-
-
-def find_kernel_name_in_cubin(filename, func_keyword):
-    with open(filename, "rb") as f:
-        elffile = ELFFile(f)
-        symbol_table = elffile.get_section_by_name(".symtab")
-
-        func_symbol_names = []
-        for symbol in symbol_table.iter_symbols():
-            if symbol["st_info"]["type"] != "STT_FUNC":
-                continue
-            if re.findall(f"^_Z\\d+{func_keyword}", symbol.name):
-                func_symbol_names.append(symbol.name)
-
-        assert len(func_symbol_names) == 1
-
-    return func_symbol_names[0]
 
 
 def hash_to_hex(s: str) -> str:

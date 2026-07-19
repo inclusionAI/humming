@@ -1,7 +1,7 @@
 import dataclasses
+import functools
 import json
 import os
-import zlib
 from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
@@ -165,15 +165,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.cubin_loaded:
             return None
         kernel_filename = self.kernel_filename
-        kernel_name = self.kernel_name
-        self.kernel_id = ops.register_kernel(kernel_filename, kernel_name)
+        self.kernel_id, self.kernel_name = ops.register_kernel(kernel_filename)
         self._id2kernel[self.kernel_id] = self
         self.kernel_dirname = os.path.dirname(kernel_filename)
-        ref_kernel_id = zlib.crc32(kernel_filename.encode()) << 30
-        ref_kernel_id += zlib.crc32(kernel_name.encode())
-        assert ref_kernel_id == self.kernel_id
+        self.cubin_loaded = True
+
+    @functools.cached_property
+    def get_kernel_id(self):
         module = jit_utils.make_humming_module("get_kernel_id", self.kernel_id)
-        self.get_kernel_id = module.get_kernel_id
+        return module.get_kernel_id
 
     def postprocess_cubin(self, cubin_path: str):
         mode = ""
