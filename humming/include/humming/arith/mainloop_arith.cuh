@@ -32,7 +32,6 @@ private:
   static constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
   static constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
   static constexpr bool kIsChannelWeightScale = Ctx::kIsChannelWeightScale;
-  static constexpr bool kIsTensorWeightScale = Ctx::kIsTensorWeightScale;
   static constexpr bool kIsGroupOrBlockWeightScale = kIsGroupWeightScale || kIsBlockWeightScale;
 
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;

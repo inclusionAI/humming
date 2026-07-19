@@ -43,7 +43,6 @@ def generate_random_inputs(
             scale_dtype=dtypes.float32,
             group_size=group_size,
             has_zero_point=False,
-            has_global_scale=False,
         )
 
         inputs_ref = inputs.float()
@@ -83,7 +82,7 @@ def generate_random_weight(
     scale_dtype,
     group_size_n=None,
     num_experts=None,
-    has_global_scale=False,
+    weight_scale_2_type=None,
     has_zero_point=False,
     is_fp_zero_point=False,
     allow_negative_scale=True,
@@ -109,14 +108,14 @@ def generate_random_weight(
     weight_orig = weight_orig * init_weight_scale.repeat_interleave(group_size, -1)
     weight_orig = weight_orig / weight_orig.std()
 
-    quanted_weight, weight_scale, zero_point, global_scale = quantize_weight(
+    quanted_weight, weight_scale, zero_point, weight_scale_2 = quantize_weight(
         weight_orig,
         dtype=dtype,
         scale_dtype=scale_dtype,
         group_size=group_size,
         group_size_n=group_size_n,
         has_zero_point=has_zero_point,
-        has_global_scale=has_global_scale,
+        weight_scale_2_type=weight_scale_2_type,
         is_fp_zero_point=is_fp_zero_point,
         allow_negative_scale=allow_negative_scale,
     )
@@ -142,8 +141,10 @@ def generate_random_weight(
             weight_scale_tmp = weight_scale_tmp.repeat_interleave(group_size_n, -2)
         weight_ref = weight_ref * weight_scale_tmp
 
-    if has_global_scale:
-        weight_ref = weight_ref * global_scale.view(-1, 1, 1)
+    if weight_scale_2_type == "channel":
+        weight_ref = weight_ref * weight_scale_2.view(e, n, 1)
+    elif weight_scale_2_type == "tensor":
+        weight_ref = weight_ref * weight_scale_2.view(-1, 1, 1)
 
     if dtype_orig.is_integer_type and dtype_orig.is_signed:
         quanted_weight = quanted_weight - 2 ** (dtype.num_bits - 1)
@@ -154,12 +155,12 @@ def generate_random_weight(
         quanted_weight = quanted_weight.squeeze(0)
         if weight_scale is not None:
             weight_scale = weight_scale.squeeze(0)
-        if global_scale is not None:
-            global_scale = global_scale.squeeze(0)
+        if weight_scale_2 is not None:
+            weight_scale_2 = weight_scale_2.squeeze(0)
         if zero_point is not None:
             zero_point = zero_point.squeeze(0)
 
-    return weight_orig, weight_ref, quanted_weight, weight_scale, zero_point, global_scale
+    return weight_orig, weight_ref, quanted_weight, weight_scale, zero_point, weight_scale_2
 
 
 def generate_random_bias(n, dtype):

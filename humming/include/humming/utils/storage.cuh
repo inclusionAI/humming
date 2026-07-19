@@ -34,6 +34,12 @@
 #define IF_HAS_CHANNEL_WEIGHT_SCALE(x)
 #endif
 
+#if HUMMING_IS_CHANNEL_WEIGHT_SCALE_2
+#define IF_HAS_CHANNEL_WEIGHT_SCALE_2(x) x
+#else
+#define IF_HAS_CHANNEL_WEIGHT_SCALE_2(x)
+#endif
+
 #if HUMMING_HAS_BIAS
 #define IF_HAS_BIAS(x) x
 #else
@@ -95,6 +101,7 @@ private:
   static constexpr bool kIsChannelInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize == 0;
   static constexpr bool kIsGroupInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize > 0;
   static constexpr bool kIsChannelWeightScale = LayerConfig::kIsChannelWeightScale;
+  static constexpr bool kIsChannelWeightScale2 = LayerConfig::kIsChannelWeightScale2;
   static constexpr bool kIsGroupWeightScale = LayerConfig::kIsGroupWeightScale;
   static constexpr bool kIsBlockWeightScale = LayerConfig::kIsBlockWeightScale;
   static constexpr bool kIsGroupOrBlockWeightScale = kIsGroupWeightScale || kIsBlockWeightScale;
@@ -135,6 +142,7 @@ public:
 
   static constexpr uint32_t kChannelSizeAS = kIsChannelInputScale ? BlockShape::M / 4 : 0;
   static constexpr uint32_t kChannelSizeBS = kIsChannelWeightScale ? kSmemStrideBS : 0;
+  static constexpr uint32_t kChannelSizeBS2 = kIsChannelWeightScale2 ? kSmemStrideBias : 0;
   static constexpr uint32_t kChannelSizeBZP = (kIsChannelWeightScale && kHasZeroPoint) ? kSmemStrideBZP : 0;
   static constexpr uint32_t kBiasSize = LayerConfig::kHasBias ? kSmemStrideBias : 0;
 
@@ -145,6 +153,7 @@ public:
   static constexpr uint32_t kStageBytesBZP = kStageSizeBZP * sizeof(int4);
   static constexpr uint32_t kChannelBytesAS = kChannelSizeAS * sizeof(int4);
   static constexpr uint32_t kChannelBytesBS = kChannelSizeBS * sizeof(int4);
+  static constexpr uint32_t kChannelBytesBS2 = kChannelSizeBS2 * sizeof(int4);
   static constexpr uint32_t kBiasBytes = kBiasSize * sizeof(int4);
 
   static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
@@ -165,6 +174,7 @@ public:
       IF_HAS_CHANNEL_ZERO_POINT(alignas(128) int4 bzp_c[kChannelSizeBZP];)
       StageStorage stages[kNumStages];
       IF_HAS_CHANNEL_WEIGHT_SCALE(alignas(128) int4 bs_c[kChannelSizeBS];)
+      IF_HAS_CHANNEL_WEIGHT_SCALE_2(alignas(128) int4 bs2_c[kChannelSizeBS2];)
       IF_HAS_BIAS(alignas(128) int4 bias[kBiasSize];)
       IF_HAS_CHANNEL_INPUT_SCALE(alignas(128) int4 as_c[kChannelSizeAS];)
     };

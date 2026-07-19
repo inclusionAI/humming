@@ -21,9 +21,8 @@ private:
   static constexpr bool kIsChannel = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsGroup = Ctx::kIsGroupWeightScale;
   static constexpr bool kIsBlock = Ctx::kIsBlockWeightScale;
-  static constexpr bool kIsTensor = Ctx::kIsTensorWeightScale;
   static constexpr bool kIsGroupOrBlock = kIsGroup || kIsBlock;
-  static constexpr uint32_t kGroupSize = !kIsGroupOrBlock ? ProblemShape::K : Ctx::kWeightScaleGroupSize;
+  static constexpr uint32_t kGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : ProblemShape::K;
   static constexpr uint32_t kGroupSizeN = kIsBlock ? Ctx::kWeightScaleGroupSizeN : 1;
 
   static constexpr uint32_t kSmemStride = CEIL_DIV(BlockShape::N, kGroupSizeN) * ElementBS::kBits / 32 / 4;

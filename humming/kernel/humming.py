@@ -323,8 +323,10 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert self.input_scale_group_size == self.weight_scale_group_size
             assert self.weight_scale_group_size_n > 0
             assert not self.has_zero_point
-        if self.is_tensor_weight_scale and not self.is_group_weight_scale:
+        if self.is_tensor_weight_scale:
             self.bs_dtype = self.c_dtype
+        if self.is_channel_weight_scale_2:
+            assert self.is_group_weight_scale
 
     def check_dtype(self):
         dtype_map = {
@@ -375,6 +377,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         is_group_weight_scale = self.is_group_weight_scale
         if not (is_channel_weight_scale or is_group_weight_scale):
             self.use_tma_bs = False
+        if not self.is_channel_weight_scale_2:
+            self.use_tma_bs2 = False
         if not self.has_zero_point:
             self.use_tma_bzp = False
         if not self.has_bias:

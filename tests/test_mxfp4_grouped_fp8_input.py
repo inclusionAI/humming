@@ -102,7 +102,7 @@ def _prepare_weight(*, use_fused_e8m0_scale: bool, num_experts: int | None = Non
             meta,
             weight=weight,
             weight_scale=weight_scale,
-            global_scale=global_scale,
+            weight_scale_2=global_scale,
         )
         weight = prepare_humming_weight(
             weight,
@@ -134,7 +134,8 @@ def _dense_kernel(*, use_fused_e8m0_scale: bool):
         use_warp_spec=False,
         input_scale_group_size=INPUT_GROUP,
         weight_scale_group_size=WEIGHT_GROUP,
-        weight_scale_type="group_tensor" if use_fused_e8m0_scale else "group",
+        weight_scale_type="group",
+        weight_scale_2_type="tensor" if use_fused_e8m0_scale else None,
         use_fused_e8m0_scale=use_fused_e8m0_scale,
         use_f16_accum=False,
         use_tma=False,
@@ -149,7 +150,7 @@ def test_layer_auto_fuses_e8m0_with_grouped_input_scale():
         meta = _make_meta(input_scale_group_size)
         assert meta.use_fused_e8m0_scale is True
         assert meta.is_group_weight_scale is True
-        assert meta.is_tensor_weight_scale is True
+        assert meta.is_tensor_weight_scale_2 is True
 
 
 def test_layer_quant_input_uses_meta_group_size(monkeypatch):
@@ -192,7 +193,7 @@ def test_dense_fused_mxfp4_grouped_fp8_input_wgmma():
         outputs=outputs,
         input_scale=input_scale,
         weight_scale=weight_scale,
-        global_scale=global_scale,
+        weight_scale_2=global_scale,
     )
 
     outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch.bfloat16)
@@ -249,7 +250,8 @@ def test_grouped_masked_moe_fused_mxfp4_grouped_fp8_input_wgmma():
         use_warp_spec=False,
         input_scale_group_size=INPUT_GROUP,
         weight_scale_group_size=WEIGHT_GROUP,
-        weight_scale_type="group_tensor",
+        weight_scale_type="group",
+        weight_scale_2_type="tensor",
         use_fused_e8m0_scale=True,
         use_f16_accum=False,
         has_bias=False,
@@ -268,7 +270,7 @@ def test_grouped_masked_moe_fused_mxfp4_grouped_fp8_input_wgmma():
         outputs=outputs,
         input_scale=input_scale,
         weight_scale=weight_scale,
-        global_scale=global_scale,
+        weight_scale_2=global_scale,
         expert_layout=expert_layout,
     ).view(-1, N)
 
@@ -319,7 +321,8 @@ def test_indexed_moe_fused_mxfp4_grouped_fp8_input_wgmma():
         use_warp_spec=False,
         input_scale_group_size=INPUT_GROUP,
         weight_scale_group_size=WEIGHT_GROUP,
-        weight_scale_type="group_tensor",
+        weight_scale_type="group",
+        weight_scale_2_type="tensor",
         use_fused_e8m0_scale=True,
         use_f16_accum=False,
         has_bias=False,
@@ -338,7 +341,7 @@ def test_indexed_moe_fused_mxfp4_grouped_fp8_input_wgmma():
         outputs=outputs,
         input_scale=input_scale,
         weight_scale=weight_scale,
-        global_scale=global_scale,
+        weight_scale_2=global_scale,
         expert_ids=expert_ids,
         num_tokens_padded=num_tokens_padded,
         sorted_ids=sorted_token_ids,

@@ -16,7 +16,7 @@ private:
   static constexpr bool kIsChannel = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsBlock = Ctx::kIsBlockWeightScale;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
-  static constexpr uint32_t kGroupSize = kIsChannel ? BlockShape::K : Ctx::kWeightScaleGroupSize;
+  static constexpr uint32_t kGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : BlockShape::K;
   static constexpr uint32_t kGroupSizeN = Ctx::kWeightScaleGroupSizeN;
   static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
   static constexpr uint32_t M_WARPS = Ctx::M_WARPS;

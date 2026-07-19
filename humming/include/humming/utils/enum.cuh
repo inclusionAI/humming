@@ -6,7 +6,13 @@ enum class WeightScaleType : uint32_t {
   BLOCK,
   CHANNEL,
   TENSOR,
-  GROUP_TENSOR,
+};
+
+
+enum class WeightScale2Type : uint32_t {
+  NONE,
+  CHANNEL,
+  TENSOR,
 };
 
 

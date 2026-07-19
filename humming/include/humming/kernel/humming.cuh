@@ -37,7 +37,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     const __grid_constant__ typename KernelTensorParamType<TuningConfig::kUseTmaBS>::Type BS,
     const __grid_constant__ typename KernelTensorParamType<TuningConfig::kUseTmaBZP>::Type BZP,
     const __grid_constant__ typename KernelTensorParamType<TuningConfig::kUseTmaBias>::Type Bias,
-    const uint32_t *GS,
+    const __grid_constant__ typename KernelTensorParamType<TuningConfig::kUseTmaBS2>::Type BS2,
     const uint32_t *sorted_ids_ptr,
     const uint32_t *expert_ids_ptr,
     const uint32_t *num_tokens_padded_ptr,
@@ -73,7 +73,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   const KernelParams params{
       shape_m, top_k, use_int64_expert_layout,
       param_to_ptr(A), param_to_ptr(B), param_to_ptr(AS), param_to_ptr(BS),
-      param_to_ptr(BZP), param_to_ptr(Bias), param_to_ptr(C), GS,
+      param_to_ptr(BZP), param_to_ptr(Bias), param_to_ptr(C), param_to_ptr(BS2),
       sorted_ids_ptr, expert_ids_ptr, num_tokens_padded_ptr, expert_layout_ptr,
       tensor_map_buffer, locks};
   auto ctx = Ctx(smem, params);

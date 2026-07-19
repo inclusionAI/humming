@@ -7,6 +7,7 @@
 #include <humming/memory/g2s_loader/loader_b.cuh>
 #include <humming/memory/g2s_loader/loader_bias.cuh>
 #include <humming/memory/g2s_loader/loader_bs.cuh>
+#include <humming/memory/g2s_loader/loader_bs2.cuh>
 #include <humming/memory/g2s_loader/loader_bzp.cuh>
 #include <humming/utils/all.cuh>
 
@@ -28,6 +29,7 @@ private:
   static constexpr bool kUseTmaAS = Ctx::kUseTmaAS && !Ctx::kIsIndexedGemm;
   static constexpr bool kUseTmaB = Ctx::kUseTmaB;
   static constexpr bool kUseTmaBS = Ctx::kUseTmaBS;
+  static constexpr bool kUseTmaBS2 = Ctx::kUseTmaBS2;
   static constexpr bool kUseTmaBZP = Ctx::kUseTmaBZP;
   static constexpr bool kUseTmaBias = Ctx::kUseTmaBias;
 
@@ -35,11 +37,12 @@ private:
   static constexpr bool kIsChannelInputScale = kHasInputScale && Ctx::kInputScaleGroupSize == 0;
   static constexpr bool kIsGroupInputScale = kHasInputScale && Ctx::kInputScaleGroupSize > 0;
   static constexpr bool kIsChannelWeightScale = Ctx::kIsChannelWeightScale;
+  static constexpr bool kIsChannelWeightScale2 = Ctx::kIsChannelWeightScale2;
   static constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
   static constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
   static constexpr bool kHasBias = Ctx::kHasBias;
-  static constexpr bool kHasChannelData = kIsChannelInputScale || kIsChannelWeightScale || kHasBias;
+  static constexpr bool kHasChannelData = kIsChannelInputScale || kIsChannelWeightScale || kIsChannelWeightScale2 || kHasBias;
 
   static constexpr uint32_t kNumStages = Ctx::kNumStages;
 
@@ -86,6 +89,11 @@ private:
       else legacy_load_bytes += SharedStorage::kChannelBytesBS;
     }
 
+    if constexpr (kIsChannelWeightScale2) {
+      if constexpr (kUseTmaBS2) tma_load_bytes += SharedStorage::kChannelBytesBS2;
+      else legacy_load_bytes += SharedStorage::kChannelBytesBS2;
+    }
+
     if constexpr (kHasBias) {
       if constexpr (kUseTmaBias) tma_load_bytes += SharedStorage::kBiasBytes;
       else legacy_load_bytes += SharedStorage::kBiasBytes;
@@ -109,6 +117,7 @@ public:
   using LoaderB = G2SMemoryLoaderB<Ctx>;
   using LoaderAS = G2SMemoryLoaderAS<Ctx>;
   using LoaderBS = G2SMemoryLoaderBS<Ctx>;
+  using LoaderBS2 = G2SMemoryLoaderBS2<Ctx>;
   using LoaderBZP = G2SMemoryLoaderBZP<Ctx>;
   using LoaderBias = G2SMemoryLoaderBias<Ctx>;
 
@@ -117,6 +126,7 @@ public:
   LoaderB loader_b;
   LoaderAS loader_as;
   LoaderBS loader_bs;
+  LoaderBS2 loader_bs2;
   LoaderBZP loader_bzp;
   LoaderBias loader_bias;
   uint32_t phases[Ctx::kNumStages + 1] = {0};
@@ -128,6 +138,7 @@ public:
         loader_b(ctx),
         loader_as(ctx),
         loader_bs(ctx),
+        loader_bs2(ctx),
         loader_bzp(ctx),
         loader_bias(ctx) {
 
@@ -136,6 +147,7 @@ public:
       if constexpr (kUseTmaAS) prefetch_tensor_map(ctx.params.as);
       if constexpr (kUseTmaB) prefetch_tensor_map(ctx.params.b);
       if constexpr (kUseTmaBS) prefetch_tensor_map(ctx.params.bs);
+      if constexpr (kUseTmaBS2) prefetch_tensor_map(ctx.params.bs2);
       if constexpr (kUseTmaBZP) prefetch_tensor_map(ctx.params.bzp);
       if constexpr (kUseTmaBias) prefetch_tensor_map(ctx.params.bias);
     }
@@ -211,6 +223,7 @@ public:
     if constexpr (kUseMBarrier) channel_mbar_ptr = &smem.load_mbar[kNumStages + 1];
     if constexpr (kIsChannelInputScale) loader_as.load(smem.as_c, channel_mbar_ptr);
     if constexpr (kIsChannelWeightScale) loader_bs.load(smem.bs_c, channel_mbar_ptr);
+    if constexpr (kIsChannelWeightScale2) loader_bs2.load(smem.bs2_c, channel_mbar_ptr);
     if constexpr (kHasBias) loader_bias.load(smem.bias, channel_mbar_ptr);
 
     constexpr uint2 load_bytes = get_channel_load_bytes();
@@ -260,6 +273,7 @@ public:
     loader_b.seek(expert_id, n_block_id, k_block_id);
     loader_as.seek(m_block_id, k_block_id, current_shape_m, m_offset);
     loader_bs.seek(expert_id, n_block_id, k_block_id);
+    loader_bs2.seek(expert_id, n_block_id);
     loader_bzp.seek(expert_id, n_block_id, k_block_id);
     loader_bias.seek(expert_id, n_block_id);
   }
@@ -281,8 +295,9 @@ private:
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
   static constexpr bool kIsChannelInputScale = kHasInputScale && Ctx::kInputScaleGroupSize == 0;
   static constexpr bool kIsChannelWeightScale = Ctx::kIsChannelWeightScale;
+  static constexpr bool kIsChannelWeightScale2 = Ctx::kIsChannelWeightScale2;
   static constexpr bool kHasBias = Ctx::kHasBias;
-  static constexpr bool kHasChannelData = kIsChannelInputScale || kIsChannelWeightScale || kHasBias;
+  static constexpr bool kHasChannelData = kIsChannelInputScale || kIsChannelWeightScale || kIsChannelWeightScale2 || kHasBias;
 
   static constexpr uint32_t kNumStages = Ctx::kNumStages;
   static constexpr uint32_t kMultiCastSizeA = Ctx::kMultiCastSizeA;

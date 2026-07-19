@@ -6,7 +6,7 @@ import torch
 
 from humming import dtypes
 from humming.config.base import BaseHummingConfig
-from humming.config.enum import GemmType, MmaType, WeightScaleType
+from humming.config.enum import GemmType, MmaType, WeightScale2Type, WeightScaleType
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -30,6 +30,7 @@ class LayerConfig(BaseHummingConfig):
     weight_scale_group_size: int = 0
     weight_scale_group_size_n: int = 0
     weight_scale_type: WeightScaleType | None = None
+    weight_scale_2_type: WeightScale2Type | None = None
     use_int_weight_scale: bool = False
     use_fused_e8m0_scale: bool = False
     has_zero_point: bool = False
@@ -50,6 +51,10 @@ class LayerConfig(BaseHummingConfig):
         "is_block_weight_scale",
         "is_group_weight_scale",
         "is_tensor_weight_scale",
+        "is_channel_weight_scale_2",
+        "is_tensor_weight_scale_2",
+        "has_channel_weight_scale",
+        "has_tensor_weight_scale",
         "has_input_scale",
     )
 
@@ -93,6 +98,24 @@ class LayerConfig(BaseHummingConfig):
             elif self.weight_scale_group_size > 0:
                 self.weight_scale_type = WeightScaleType.GROUP
 
+        if isinstance(self.weight_scale_2_type, str):
+            self.weight_scale_2_type = WeightScale2Type(self.weight_scale_2_type)
+        if self.weight_scale_2_type is None:
+            self.weight_scale_2_type = WeightScale2Type.NONE
+        if self.weight_scale_2_type != WeightScale2Type.NONE:
+            assert self.weight_scale_type == WeightScaleType.GROUP, (
+                "weight_scale_2_type requires weight_scale_type='group'"
+            )
+
+        if self.weight_scale_type in [WeightScaleType.CHANNEL, WeightScaleType.TENSOR]:
+            assert self.weight_scale_group_size == 0, (
+                f"{self.weight_scale_type} requires weight_scale_group_size=0"
+            )
+        elif self.weight_scale_type in [WeightScaleType.GROUP, WeightScaleType.BLOCK]:
+            assert self.weight_scale_group_size > 0, (
+                f"{self.weight_scale_type} requires weight_scale_group_size>0"
+            )
+
         for name in ["a", "b", "c", "bs", "as"]:
             value = getattr(self, f"{name}_dtype")
             if isinstance(value, str):
@@ -115,16 +138,14 @@ class LayerConfig(BaseHummingConfig):
             self.as_dtype = None
         elif self.as_dtype is None:
             self.as_dtype = self.bs_dtype if self.mma_type == MmaType.MXMMA else dtypes.float32
-        self.is_channel_weight_scale = self.weight_scale_type == WeightScaleType.CHANNEL
-        self.is_tensor_weight_scale = self.weight_scale_type in [
-            WeightScaleType.TENSOR,
-            WeightScaleType.GROUP_TENSOR,
-        ]
+        self.is_group_weight_scale = self.weight_scale_type == WeightScaleType.GROUP
         self.is_block_weight_scale = self.weight_scale_type == WeightScaleType.BLOCK
-        self.is_group_weight_scale = self.weight_scale_type in [
-            WeightScaleType.GROUP,
-            WeightScaleType.GROUP_TENSOR,
-        ]
+        self.is_channel_weight_scale = self.weight_scale_type == WeightScaleType.CHANNEL
+        self.is_tensor_weight_scale = self.weight_scale_type == WeightScaleType.TENSOR
+        self.is_channel_weight_scale_2 = self.weight_scale_2_type == WeightScale2Type.CHANNEL
+        self.is_tensor_weight_scale_2 = self.weight_scale_2_type == WeightScale2Type.TENSOR
+        self.has_channel_weight_scale = self.is_channel_weight_scale or self.is_channel_weight_scale_2  # noqa
+        self.has_tensor_weight_scale = self.is_tensor_weight_scale or self.is_tensor_weight_scale_2
 
         if self.use_packed_k_layout:
             assert self.mma_type == MmaType.WGMMA, "use_packed_k_layout requires wgmma"
@@ -200,6 +221,7 @@ class TuningConfig(BaseHummingConfig):
     use_tma_b: bool | None = None
     use_tma_c: bool | None = None
     use_tma_bs: bool | None = None
+    use_tma_bs2: bool | None = None
     use_tma_bzp: bool | None = None
     use_tma_bias: bool | None = None
 
@@ -221,6 +243,7 @@ class TuningConfig(BaseHummingConfig):
         "use_mbarrier": "kUseMBarrier",
         "use_tma_as": "kUseTmaAS",
         "use_tma_bs": "kUseTmaBS",
+        "use_tma_bs2": "kUseTmaBS2",
         "use_tma_bzp": "kUseTmaBZP",
     }
 

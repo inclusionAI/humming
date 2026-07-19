@@ -12,7 +12,12 @@ class WeightScaleType(enum.Enum):
     BLOCK = "block"
     CHANNEL = "channel"
     TENSOR = "tensor"
-    GROUP_TENSOR = "group_tensor"
+
+
+class WeightScale2Type(enum.Enum):
+    NONE = "none"
+    CHANNEL = "channel"
+    TENSOR = "tensor"
 
 
 class GemmType(enum.Enum):

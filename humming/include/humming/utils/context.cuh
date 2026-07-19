@@ -14,7 +14,7 @@ struct KernelParams {
   const void *bzp;
   const void *bias;
   const void *c;
-  const uint32_t *gs;
+  const void *bs2;
   const uint32_t *sorted_ids_ptr;
   const uint32_t *expert_ids_ptr;
   const uint32_t *num_tokens_padded_ptr;

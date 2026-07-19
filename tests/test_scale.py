@@ -4,11 +4,13 @@ import torch
 from humming import dtypes, ops
 from humming.kernel.humming import HummingKernel
 from humming.utils.test import (
+    generate_random_bias,
     generate_random_inputs,
     generate_random_weight,
     skip_if_unsupported,
 )
 from humming.utils.weight import (
+    prepare_humming_bias,
     prepare_humming_weight,
     prepare_humming_weight_scale,
 )
@@ -216,7 +218,7 @@ def test_global_scale(
         group_size=weight_scale_group_size,
         dtype=b_dtype,
         scale_dtype=bs_dtype,
-        has_global_scale=True,
+        weight_scale_2_type="tensor",
     )
 
     _, weight_ref, weight, weight_scale, _, global_scale = random_weight_data
@@ -227,7 +229,13 @@ def test_global_scale(
     to_apply_on_c = weight_scale_group_size == 0 or a_dtype.num_bits != 16
 
     weight = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+    if weight_scale is not None:
+        weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+        weight_scale_2 = global_scale
+    else:
+        # tensor-only: the lone scalar rides the weight_scale (bs) slot
+        weight_scale = global_scale
+        weight_scale_2 = None
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=128,
@@ -248,7 +256,8 @@ def test_global_scale(
         num_stages=3,
         use_warp_spec=False,
         input_scale_group_size=input_scale_group_size,
-        weight_scale_type="tensor" if bs_dtype is None else "group_tensor",
+        weight_scale_type="tensor" if bs_dtype is None else "group",
+        weight_scale_2_type=None if bs_dtype is None else "tensor",
         weight_scale_group_size=weight_scale_group_size,
         use_f16_accum=use_f16_accum,
         use_tma=False,
@@ -267,13 +276,149 @@ def test_global_scale(
         outputs=outputs,
         input_scale=input_scale,
         weight_scale=weight_scale,
-        global_scale=global_scale,
+        weight_scale_2=weight_scale_2,
+    )
+
+    if a_dtype.num_bits == 16 and weight_scale.ndim >= 2 and weight_scale.size(-2) > 1:
+        weight_ref = weight_ref.to(torch_dtype).float()
+
+    outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch_dtype)
+    torch.testing.assert_close(outputs, outputs_ref, rtol=0.05, atol=0.5)
+
+
+@pytest.mark.parametrize("a_dtype", ["float16", "bfloat16", "float8e4m3", "int8"])
+@pytest.mark.parametrize("b_dtype", ["uint5", "float6e1m4"])
+@pytest.mark.parametrize("c_dtype", ["float16", "bfloat16"])
+@pytest.mark.parametrize("bs_dtype", ["float16", "bfloat16", "float8e4m3"])
+@pytest.mark.parametrize("input_scale_group_size", [0, 64])
+@pytest.mark.parametrize("weight_scale_group_size", [16, 64])
+@pytest.mark.parametrize("use_f16_accum", [True, False])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("use_tma", [False, True])
+def test_group_channel_scale(
+    a_dtype,
+    b_dtype,
+    c_dtype,
+    bs_dtype,
+    input_scale_group_size,
+    weight_scale_group_size,
+    use_f16_accum,
+    has_bias,
+    use_tma,
+):
+    skip_if_unsupported(a_dtype=a_dtype, use_tma=use_tma)
+    a_dtype = dtypes.DataType.from_str(a_dtype)
+    b_dtype = dtypes.DataType.from_str(b_dtype)
+    c_dtype = dtypes.DataType.from_str(c_dtype)
+    bs_dtype = dtypes.DataType.from_str(bs_dtype)
+
+    if use_f16_accum and c_dtype != dtypes.float16:
+        return
+    if use_f16_accum and not isinstance(a_dtype, dtypes.FloatingPointType):
+        return
+
+    if b_dtype.is_integer_type and a_dtype.is_integer_type:
+        if a_dtype.num_bits < b_dtype.num_bits:
+            return
+        elif a_dtype.num_bits == b_dtype.num_bits and not b_dtype.is_signed:
+            return
+        elif a_dtype.num_bits > b_dtype.num_bits and b_dtype.is_signed:
+            return
+    elif b_dtype.is_integer_type and a_dtype.is_floating_point_type:
+        if b_dtype.is_signed or b_dtype.num_bits > a_dtype.mantissa_bits + 2:
+            return
+    elif b_dtype.is_floating_point_type and a_dtype.is_floating_point_type:
+        if b_dtype.exponent_bits > a_dtype.exponent_bits:
+            return
+        if b_dtype.mantissa_bits > a_dtype.mantissa_bits:
+            return
+    elif b_dtype.is_floating_point_type and a_dtype.is_integer_type:
+        return
+
+    if a_dtype in [dtypes.float16, dtypes.bfloat16] and a_dtype != c_dtype:
+        return
+    if bs_dtype in [dtypes.float16, dtypes.bfloat16] and bs_dtype != c_dtype:
+        return
+
+    if weight_scale_group_size < 256 // a_dtype.num_bits:
+        return
+    if input_scale_group_size > 0 and input_scale_group_size != weight_scale_group_size:
+        return
+
+    random_weight_data = generate_random_weight(
+        n=1024,
+        k=1024,
+        group_size=weight_scale_group_size,
+        dtype=b_dtype,
+        scale_dtype=bs_dtype,
+        weight_scale_2_type="channel",
+    )
+
+    _, weight_ref, weight, weight_scale, _, weight_scale_2 = random_weight_data
+    if a_dtype == b_dtype and a_dtype in (dtypes.int4, dtypes.int8):
+        weight = (weight.view(torch.int8) + (1 << (a_dtype.num_bits - 1))).view(torch.int32)
+
+    to_apply_on_c = a_dtype.num_bits != 16
+
+    torch_dtype = dtypes.torch_dtype_map[c_dtype]
+    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+    weight_scale_2 = prepare_humming_bias(weight_scale_2.to(torch_dtype))
+
+    bias = None
+    if has_bias:
+        bias = generate_random_bias(1024, c_dtype)
+
+    _, inputs_ref, inputs, input_scale = generate_random_inputs(
+        m=128,
+        k=1024,
+        group_size=input_scale_group_size,
+        dtype=a_dtype,
+    )
+
+    humming_kernel = HummingKernel(
+        shape_n=1024,
+        shape_k=1024,
+        block_shape=(16, a_dtype.num_bits * 16, 512 // a_dtype.num_bits),
+        warp_shape=(16, a_dtype.num_bits * 4, 512 // a_dtype.num_bits),
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=c_dtype,
+        bs_dtype=bs_dtype,
+        num_stages=3,
+        use_warp_spec=False,
+        input_scale_group_size=input_scale_group_size,
+        weight_scale_type="group",
+        weight_scale_2_type="channel",
+        weight_scale_group_size=weight_scale_group_size,
+        use_f16_accum=use_f16_accum,
+        has_bias=has_bias,
+        use_tma=use_tma,
+        use_cp_async=use_tma,
+        mma_type="mma",
+        use_stream_k=False,
+    )
+
+    outputs = torch.zeros((128, 1024), dtype=torch_dtype, device=inputs.device)
+
+    outputs = ops.launch_kernel(
+        configs=[humming_kernel.kernel_id],
+        inputs=inputs,
+        weight=weight,
+        outputs=outputs,
+        input_scale=input_scale,
+        weight_scale=weight_scale,
+        weight_scale_2=weight_scale_2,
+        bias=None if bias is None else prepare_humming_bias(bias),
     )
 
     if a_dtype.num_bits == 16 and weight_scale is not None and weight_scale.size(-2) > 1:
         weight_ref = weight_ref.to(torch_dtype).float()
 
-    outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch_dtype)
+    outputs_ref = inputs_ref.matmul(weight_ref.T)
+    if bias is not None:
+        outputs_ref = outputs_ref + bias.float()
+    outputs_ref = outputs_ref.to(torch_dtype)
     torch.testing.assert_close(outputs, outputs_ref, rtol=0.05, atol=0.5)
 
 
@@ -329,7 +474,7 @@ def test_int_weight_scale(
         group_size=weight_scale_group_size,
         dtype=b_dtype,
         scale_dtype=bs_dtype,
-        has_global_scale=has_global_scale,
+        weight_scale_2_type="tensor" if has_global_scale else None,
     )
 
     _, weight_ref, weight, weight_scale, _, global_scale = random_weight_data
@@ -371,7 +516,8 @@ def test_int_weight_scale(
         num_stages=3,
         use_warp_spec=False,
         weight_scale_group_size=weight_scale_group_size,
-        weight_scale_type="group_tensor",
+        weight_scale_type="group",
+        weight_scale_2_type="tensor",
         use_int_weight_scale=True,
         use_tma=False,
         use_cp_async=False,
@@ -389,7 +535,7 @@ def test_int_weight_scale(
         outputs=outputs,
         input_scale=input_scale,
         weight_scale=weight_scale,
-        global_scale=global_scale,
+        weight_scale_2=global_scale,
     )
 
     if a_dtype.num_bits == 16 and weight_scale.size(-2) > 1:
@@ -419,7 +565,7 @@ def test_fused_e8m0_weight_scale(
         group_size=weight_scale_group_size,
         dtype=b_dtype,
         scale_dtype=bs_dtype,
-        has_global_scale=has_global_scale,
+        weight_scale_2_type="tensor" if has_global_scale else None,
     )
 
     _, weight_ref, weight, weight_scale, _, global_scale = random_weight_data
@@ -470,7 +616,8 @@ def test_fused_e8m0_weight_scale(
         use_warp_spec=False,
         input_scale_group_size=input_scale_group_size,
         weight_scale_group_size=weight_scale_group_size,
-        weight_scale_type="group_tensor",
+        weight_scale_type="group",
+        weight_scale_2_type="tensor",
         use_fused_e8m0_scale=True,
         use_tma=False,
         use_cp_async=False,
@@ -488,7 +635,7 @@ def test_fused_e8m0_weight_scale(
         outputs=outputs,
         input_scale=input_scale,
         weight_scale=weight_scale,
-        global_scale=global_scale,
+        weight_scale_2=global_scale,
     )
 
     outputs_ref = inputs_ref.matmul(weight_ref.T).to(torch_dtype)
