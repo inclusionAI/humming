@@ -162,7 +162,7 @@ class NVRTCCompiler(Compiler):
             "-extra-device-vectorization",
             "--ptxas-options=-O3",
             "--ptxas-options=--register-usage-level=10",
-            "--diag-suppress=39,161,174,177,940",
+            "--diag-suppress=39,161,174,177,940,1444",
             "-default-device",
         ]
         for d in cls._get_include_dirs():
@@ -236,7 +236,7 @@ class NVCCCompiler(Compiler):
             "-std=c++17",
             "--ptxas-options=--register-usage-level=10",
             "--use_fast_math",
-            "--diag-suppress=39,161,174,177,940,177",
+            "--diag-suppress=39,161,174,177,940,1444",
             *[f"-I{d}" for d in cls.include_dirs()],
             f"-gencode=arch=compute_{sm_version},code=sm_{sm_version}",
             "-cubin",

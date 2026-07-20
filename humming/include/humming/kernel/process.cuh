@@ -162,14 +162,16 @@ __global__ void weight_repack_nk(
     for (uint32_t i = 0; i < CEIL_DIV(zp_smem_num_rows, 32); i++) {
       if (i * 32 + threadIdx.x < zp_smem_num_rows) {
 
-        PRAGMA_UNROLL
-        for (uint32_t j = 0; j < zp_smem_stride; j++) {
-          uint32_t row = blockIdx.x * zp_smem_num_rows + i * 32 + threadIdx.x;
-          uint32_t col = (blockIdx.y * 64 + j * kGroupSizeZP) / kGroupSizeZP;
-          uint32_t glob_offset = row * zp_gmem_stride + col + blockIdx.z * (zp_gmem_stride * (shape_n * kNumBitsB / 32));
+        if constexpr (zp_smem_stride > 0) {
+          PRAGMA_UNROLL
+          for (uint32_t j = 0; j < zp_smem_stride; j++) {
+            uint32_t row = blockIdx.x * zp_smem_num_rows + i * 32 + threadIdx.x;
+            uint32_t col = (blockIdx.y * 64 + j * kGroupSizeZP) / kGroupSizeZP;
+            uint32_t glob_offset = row * zp_gmem_stride + col + blockIdx.z * (zp_gmem_stride * (shape_n * kNumBitsB / 32));
 
-          if (row < zp_max_row && col < zp_gmem_stride) {
-            zp_smem[i * 32 + threadIdx.x][j] = zp_ptr[glob_offset];
+            if (row < zp_max_row && col < zp_gmem_stride) {
+              zp_smem[i * 32 + threadIdx.x][j] = zp_ptr[glob_offset];
+            }
           }
         }
       }
@@ -199,21 +201,23 @@ __global__ void weight_repack_nk(
     uint32_t row = i * 8 + threadIdx.x / 4;
     uint32_t zp_smem_row[MAX(zp_smem_stride, 1)];
 
-    PRAGMA_UNROLL
-    for (uint32_t j = 0; j < zp_smem_stride; j++) {
-      if constexpr (!kPackedInput) {
-        zp_smem_row[j] = zp_smem[row][j];
-      } else {
-        constexpr uint32_t extracted_mask = (1 << kNumBitsB) - 1;
-        uint32_t start_bits = row * kNumBitsB;
-        uint32_t end_bits = (row + 1) * kNumBitsB;
-        uint32_t start_word = start_bits / 32;
-        uint32_t end_word = (end_bits - 1) / 32;
-        uint32_t val = zp_smem[start_word][j] >> (start_bits % 32);
-        if (start_word != end_word) {
-          val |= zp_smem[end_word][j] << (32 - (start_bits % 32));
+    if constexpr (zp_smem_stride > 0) {
+      PRAGMA_UNROLL
+      for (uint32_t j = 0; j < zp_smem_stride; j++) {
+        if constexpr (!kPackedInput) {
+          zp_smem_row[j] = zp_smem[row][j];
+        } else {
+          constexpr uint32_t extracted_mask = (1 << kNumBitsB) - 1;
+          uint32_t start_bits = row * kNumBitsB;
+          uint32_t end_bits = (row + 1) * kNumBitsB;
+          uint32_t start_word = start_bits / 32;
+          uint32_t end_word = (end_bits - 1) / 32;
+          uint32_t val = zp_smem[start_word][j] >> (start_bits % 32);
+          if (start_word != end_word) {
+            val |= zp_smem[end_word][j] << (32 - (start_bits % 32));
+          }
+          zp_smem_row[j] = val & extracted_mask;
         }
-        zp_smem_row[j] = val & extracted_mask;
       }
     }
 
