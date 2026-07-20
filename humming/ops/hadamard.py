@@ -115,9 +115,7 @@ def hadamard_quant_input(
     if group_size > block_size:
         assert group_size % block_size == 0, "block_size must divide group_size"
     else:
-        assert (group_size & (group_size - 1)) == 0, (
-            "group_size must be a power of 2 when <= block_size"
-        )
+        assert (group_size & (group_size - 1)) == 0, "group_size must be a power of 2 when <= block_size"
         assert block_size % group_size == 0, "group_size must divide block_size"
     assert quant_dtype in _QUANT_DTYPE_STR_TO_TORCH, f"unsupported quant_dtype: {quant_dtype}"
     assert scale_dtype in _SCALE_DTYPE_TO_TORCH, f"unsupported scale_dtype: {scale_dtype}"
@@ -136,9 +134,7 @@ def hadamard_quant_input(
     mx_pack = m_major_scale and scale_dtype == "float8e8m0"
     if m_major_scale:
         m_pad = (inputs.numel() // last_dim + 3) // 4 * 4
-        scales_shape = (
-            ((num_groups_total + 3) // 4, m_pad) if mx_pack else (num_groups_total, m_pad)
-        )
+        scales_shape = ((num_groups_total + 3) // 4, m_pad) if mx_pack else (num_groups_total, m_pad)
     else:
         scales_shape = inputs.shape[:-1] + (num_groups_total,)
     if outputs is None:

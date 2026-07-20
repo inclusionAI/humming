@@ -16,9 +16,7 @@ class Fp8WeightSchema(BaseWeightSchema):
     def __post_init__(self):
         if isinstance(self.weight_block_size, list):
             self.weight_block_size = tuple(self.weight_block_size)
-        self.weight_scale_key = (
-            "weight_scale" if self.weight_block_size is None else "weight_scale_inv"
-        )
+        self.weight_scale_key = "weight_scale" if self.weight_block_size is None else "weight_scale_inv"
 
     def get_tensors_attrs(
         self,

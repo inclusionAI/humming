@@ -109,8 +109,7 @@ def patch_cubin(cubin_path, mode, dry_run=False, backup=False):
     if n < 0:
         rc = -n
         raise RuntimeError(
-            f"patch_cubin failed on {cubin_path!r} (mode={mode}): "
-            f"{_RC_MESSAGE.get(rc, 'error')} (rc={rc})"
+            f"patch_cubin failed on {cubin_path!r} (mode={mode}): {_RC_MESSAGE.get(rc, 'error')} (rc={rc})"
         )
     return n
 

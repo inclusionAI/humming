@@ -59,14 +59,10 @@ def _run_mxmma(
     )
     weight_ref = weight_ref.squeeze(0) if weight_ref.ndim == 3 else weight_ref
     weight_k = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale_k = prepare_humming_weight_scale(
-        weight_scale, is_mxmma=True, mxmma_scale_vec=scale_vec
-    )
+    weight_scale_k = prepare_humming_weight_scale(weight_scale, is_mxmma=True, mxmma_scale_vec=scale_vec)
 
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda") * 0.5
-    xq, xs = ops.quant_input(
-        x, a_dtype.to_str(), group_size=group_size, scale_dtype=bs_dtype.to_str()
-    )
+    xq, xs = ops.quant_input(x, a_dtype.to_str(), group_size=group_size, scale_dtype=bs_dtype.to_str())
     x_dq = _dequant_act(xq, xs, a_dtype, group_size)
     xs_packed = xs.view(torch.int32).contiguous()
 

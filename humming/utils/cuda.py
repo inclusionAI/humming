@@ -104,9 +104,7 @@ def _find_nvidia_pypi_cuda_paths():
         if not os.path.isdir(nvidia_root) or nvidia_root in seen:
             continue
         seen.add(nvidia_root)
-        if any(
-            os.path.isdir(os.path.join(nvidia_root, sub)) for sub in ("cuda_runtime", "cuda_nvcc")
-        ):
+        if any(os.path.isdir(os.path.join(nvidia_root, sub)) for sub in ("cuda_runtime", "cuda_nvcc")):
             results.append(
                 {
                     "source": "pypi",

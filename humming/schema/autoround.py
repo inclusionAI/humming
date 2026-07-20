@@ -23,17 +23,14 @@ class AutoRoundWeightSchema(BaseWeightSchema):
         fmt = self.packing_format
 
         # fp formats (fp8 / nvfp / mxfp) are rejected outright.
-        is_fp = "fp" in self.data_type or any(
-            tag in fmt for tag in ("fp8", "nvfp", "mxfp", "nv_fp", "mx_fp")
-        )
+        is_fp = "fp" in self.data_type or any(tag in fmt for tag in ("fp8", "nvfp", "mxfp", "nv_fp", "mx_fp"))
         assert not is_fp and self.data_type == "int", (
             f"autoround fp quantization is not supported by humming "
             f"(data_type={self.data_type!r}, packing_format={fmt!r}); "
             "only weight-only int quantization is supported"
         )
         assert self.act_bits >= 16, (
-            f"autoround act_bits={self.act_bits} (activation quantization) "
-            "is not supported by humming"
+            f"autoround act_bits={self.act_bits} (activation quantization) is not supported by humming"
         )
 
         if "awq" in fmt:

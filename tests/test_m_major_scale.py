@@ -37,9 +37,7 @@ def test_m_major_dense(a_dtype, b_dtype, c_dtype, shape_m, use_tma_as):
     # store the scale M-major [num_groups, M] with M padded to a multiple of 4.
     num_groups = 1024 // group_size
     m_pad = (shape_m + 3) // 4 * 4
-    input_scale_m_major = torch.zeros(
-        (num_groups, m_pad), dtype=torch.float32, device=inputs.device
-    )
+    input_scale_m_major = torch.zeros((num_groups, m_pad), dtype=torch.float32, device=inputs.device)
     input_scale_m_major[:, :shape_m] = input_scale.transpose(0, 1)
 
     humming_kernel = HummingKernel(
@@ -98,9 +96,7 @@ def test_m_major_grouped(a_dtype, b_dtype, c_dtype, expert_max_tokens, use_tma_a
     if expert_max_tokens is None:
         tokens_per_expert = 512
         m_new = num_experts * tokens_per_expert
-        expert_layout = torch.arange(
-            0, m_new + 1, tokens_per_expert, dtype=torch.int64, device="cuda:0"
-        )
+        expert_layout = torch.arange(0, m_new + 1, tokens_per_expert, dtype=torch.int64, device="cuda:0")
     else:
         _, expert_layout, *_ = generate_random_moe_tensors(
             m,

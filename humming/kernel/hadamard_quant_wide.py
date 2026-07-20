@@ -70,9 +70,7 @@ class HadamardQuantInputWideKernel(KernelRuntime):
         assert self.group_size > self.block_size, (
             "wide kernel only for group_size > block_size; use HadamardQuantInputKernel otherwise"
         )
-        threads_per_tile, tiles_per_thread = _pick_wide_launch_params(
-            self.block_size, self.group_size
-        )
+        threads_per_tile, tiles_per_thread = _pick_wide_launch_params(self.block_size, self.group_size)
         self.threads_per_tile = threads_per_tile
         self.tiles_per_thread = tiles_per_thread
         tiles_per_group = self.group_size // self.block_size
