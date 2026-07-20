@@ -198,6 +198,14 @@ class Sm90H20Heuristics(DeviceHeuristics):
             block_shape_k = block_shape_k // 2
             assert block_shape_k >= warp_shape_k
 
+        if (
+            meta.a_dtype.num_bits == 8
+            and meta.input_scale_group_size > 0
+            and gemm_type != GemmType.GROUPED_MASKED
+            and shape_m >= 6144
+        ):
+            num_ctas_per_sm = min(num_ctas_per_sm, 2)
+
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
