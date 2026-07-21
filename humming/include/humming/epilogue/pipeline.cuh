@@ -59,6 +59,9 @@ public:
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kNumWriteSplits; i++) {
       smem_writer.write(regs_c_ptr, slice_count, i);
+      if constexpr (Ctx::kUseTmaC) {
+        if (ctx.is_math_thread()) tma_fence_async_shared();
+      }
       ctx.sync_math_threads();
       gmem_writer.write(slice_id, slice_count, i);
       ctx.sync_math_threads();

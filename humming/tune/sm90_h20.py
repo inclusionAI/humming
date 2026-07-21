@@ -98,6 +98,8 @@ class Sm90H20Heuristics(DeviceHeuristics):
         block_shape_m, block_shape_n, block_shape_k = config["block_shape"]
         num_ctas_per_sm = config.get("num_ctas_per_sm", 1)
         warp_shape_m, warp_shape_n, warp_shape_k = config["warp_shape"]
+        if meta.use_packed_k_layout:
+            warp_shape_n = max(warp_shape_n, 32)
         num_stages = 3
         assert meta.shape_n % block_shape_n == 0
 

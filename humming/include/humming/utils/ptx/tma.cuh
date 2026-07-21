@@ -110,6 +110,10 @@ CUDA_INLINE void tma_commit_store_group() {
   asm volatile("cp.async.bulk.commit_group;\n");
 };
 
+CUDA_INLINE void tma_fence_async_shared() {
+  asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+};
+
 template <uint32_t N, bool only_wait_read = false>
 CUDA_INLINE void tma_wait_store_group() {
   if constexpr (only_wait_read) {
