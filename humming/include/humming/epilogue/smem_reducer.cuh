@@ -30,7 +30,8 @@ public:
   CUDA_INLINE
   void reduce(uint32_t *regs_ptr) {
     constexpr uint32_t num_int4s = sizeof(CRegistersArrayType) / 16;
-    constexpr uint32_t num_int4s_per_time = num_int4s / MAX(WarpShape::M / 16, 1);
+    constexpr uint32_t num_reduce_iters = MAX(CEIL_DIV(WarpShape::M, 16), 1);
+    constexpr uint32_t num_int4s_per_time = CEIL_DIV(num_int4s, num_reduce_iters);
     constexpr uint32_t group_num_warps = BlockShape::K / WarpShape::K;
     constexpr uint32_t num_groups = Ctx::kNumMathThreads / 32 / group_num_warps;
     uint32_t group_id = ctx.warp_id() % num_groups;
@@ -45,7 +46,9 @@ public:
 
       PRAGMA_UNROLL
       for (uint32_t i = 0; i < num_int4s_per_time; i++) {
-        smem_arr[buffer_id][group_id][i][laneid] = regs_int4_ptr[i];
+        if (m * num_int4s_per_time + i < num_int4s) {
+          smem_arr[buffer_id][group_id][i][laneid] = regs_int4_ptr[i];
+        }
       };
     };
 
@@ -54,6 +57,7 @@ public:
 
       PRAGMA_UNROLL
       for (uint32_t i = 0; i < num_int4s_per_time; i++) {
+        if (m * num_int4s_per_time + i >= num_int4s) continue;
         int4 val = smem_arr[buffer_id][group_id][i][laneid];
 
         ValTypeC32 *sval_scalar_ptr = reinterpret_cast<ValTypeC32 *>(&val);
@@ -71,7 +75,7 @@ public:
     };
 
     PRAGMA_UNROLL
-    for (uint32_t m = 0; m < MAX(WarpShape::M / 16, 1); m++) {
+    for (uint32_t m = 0; m < num_reduce_iters; m++) {
       PRAGMA_UNROLL
       for (uint32_t i = 1; i < group_num_warps; i *= 2) {
         uint32_t buffer_id = group_warp_id % (group_num_warps / (2 * i));

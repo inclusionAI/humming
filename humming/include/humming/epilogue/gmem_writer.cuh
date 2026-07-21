@@ -132,10 +132,12 @@ public:
         tma_store_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, col_offset2, row_offset);
       } else if (slice_count == 1 || slice_id == 0) {
         tma_store_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, col_offset2, row_offset);
-        if (slice_count > 1) tma_wait_store_group<0>();
       } else {
         tma_reduce_add_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, col_offset2, row_offset);
-        if (slice_id != slice_count - 1) tma_wait_store_group<0>();
+      }
+      tma_commit_store_group();
+      if constexpr (kUseStreamK) {
+        if (slice_count > 1 && slice_id != slice_count - 1) tma_wait_store_group<0>();
       }
     }
   }
