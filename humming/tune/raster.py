@@ -47,17 +47,17 @@ def _device_l2_sms(device_index: int) -> tuple[int, int]:
     return l2, p.multi_processor_count
 
 
-def raster_group_m_for_config(meta, block_shape, multicast_a: int = 1) -> int:
+def raster_group_m_for_config(layer_config, block_shape, multicast_a: int = 1) -> int:
     block_m, block_n = block_shape[0], block_shape[1]
     l2_bytes, num_sms = _device_l2_sms(torch.cuda.current_device())
     return raster_group_m(
         shape_m=block_m * 4096,
-        shape_n=meta.shape_n,
-        shape_k=meta.shape_k,
+        shape_n=layer_config.shape_n,
+        shape_k=layer_config.shape_k,
         block_m=block_m,
         block_n=block_n,
-        a_dtype_bits=meta.a_dtype.num_bits,
-        b_dtype_bits=meta.b_dtype.num_bits,
+        a_dtype_bits=layer_config.a_dtype.num_bits,
+        b_dtype_bits=layer_config.b_dtype.num_bits,
         l2_bytes=l2_bytes,
         num_sms=num_sms,
         multicast_a=multicast_a,

@@ -5,16 +5,16 @@ import torch
 
 from humming import dtypes, ops
 from humming.kernel.humming import HummingKernel
+from humming.transform import (
+    transform_humming_bias,
+    transform_humming_weight,
+    transform_humming_weight_scale,
+)
 from humming.utils.test import (
     generate_random_bias,
     generate_random_inputs,
     generate_random_weight,
     skip_if_unsupported,
-)
-from humming.utils.weight import (
-    prepare_humming_bias,
-    prepare_humming_weight,
-    prepare_humming_weight_scale,
 )
 
 
@@ -103,14 +103,14 @@ def test_pipeline(
     elif mma_type == "wgmma":
         to_apply_on_c = weight_scale_group_size == 0
 
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
-    weight_scale = prepare_humming_weight_scale(
+    weight = transform_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
+    weight_scale = transform_humming_weight_scale(
         weight_scale,
         to_apply_on_c=to_apply_on_c,
     )
 
     bias_ref = generate_random_bias(1024, c_dtype).half()
-    bias = prepare_humming_bias(bias_ref)
+    bias = transform_humming_bias(bias_ref)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=128,
@@ -229,14 +229,14 @@ def test_write_splits(
     elif mma_type == "wgmma":
         to_apply_on_c = weight_scale_group_size == 0
 
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
-    weight_scale = prepare_humming_weight_scale(
+    weight = transform_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
+    weight_scale = transform_humming_weight_scale(
         weight_scale,
         to_apply_on_c=to_apply_on_c,
     )
 
     bias_ref = generate_random_bias(1024, c_dtype).half()
-    bias = prepare_humming_bias(bias_ref)
+    bias = transform_humming_bias(bias_ref)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=1024,

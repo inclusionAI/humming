@@ -3,14 +3,14 @@ import torch
 
 from humming import dtypes, ops
 from humming.kernel.humming import HummingKernel
+from humming.transform import (
+    transform_humming_weight,
+    transform_humming_weight_scale,
+)
 from humming.utils.test import (
     generate_random_inputs,
     generate_random_weight,
     skip_if_unsupported,
-)
-from humming.utils.weight import (
-    prepare_humming_weight,
-    prepare_humming_weight_scale,
 )
 
 
@@ -90,8 +90,8 @@ def test_datatype(a_dtype, b_dtype, c_dtype):
     if a_dtype == b_dtype and a_dtype in (dtypes.int4, dtypes.int8):
         weight = (weight.view(torch.int8) + (1 << (a_dtype.num_bits - 1))).view(torch.int32)
 
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=True)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=True)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=128,

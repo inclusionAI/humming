@@ -61,45 +61,49 @@ class Sm120Heuristics(Sm89Heuristics):
     @classmethod
     def get_config(
         cls,
-        meta,
+        layer_config,
         shape_m: int,
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        config = super().get_config(meta, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+        config = super().get_config(
+            layer_config,
+            shape_m,
+            use_f16_accum,
+            use_batch_invariant,
+            gemm_type,
+        )
         if use_batch_invariant:
             return config
 
-        a = meta.a_dtype
+        a = layer_config.a_dtype
         is_wna16 = a.is_floating_point_type and a.num_bits == 16 and not use_f16_accum
-        if a.is_floating_point_type and a.num_bits <= 8 and not meta.use_fused_e8m0_scale:
+        if a.is_floating_point_type and a.num_bits <= 8 and not layer_config.use_fused_e8m0_scale:
             config["use_tma"] = True
             config["use_warp_spec"] = True
         elif is_wna16:
             config["use_tma"] = True
             config["use_warp_spec"] = True
-            config["num_stages"] = cls._fit_num_stages(
-                meta, config, gemm_type, reduce_overlap=False
-            )
+            config["num_stages"] = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=False)
 
         if gemm_type == GemmType.INDEXED:
             config["use_tma_a"] = False
             config["use_tma_c"] = False
 
-        group_size = meta.input_scale_group_size or meta.weight_scale_group_size
-        if cls._is_mxmma(meta.a_dtype, group_size, meta.use_fused_e8m0_scale):
+        group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
+        if cls._is_mxmma(layer_config.a_dtype, group_size, layer_config.use_fused_e8m0_scale):
             config["reduce_overlap_last_stage_only"] = True
-            config["num_stages"] = cls._fit_num_stages(meta, config, gemm_type, reduce_overlap=True)
+            config["num_stages"] = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=True)
 
         return config
 
     @classmethod
-    def _fit_num_stages(cls, meta, config, gemm_type, reduce_overlap: bool) -> int:
+    def _fit_num_stages(cls, layer_config, config, gemm_type, reduce_overlap: bool) -> int:
         best = 2
         for num_stages in (3, 4):
             smem = estimate_smem_size_layer(
-                meta,
+                layer_config,
                 config["block_shape"],
                 gemm_type,
                 num_stages,
