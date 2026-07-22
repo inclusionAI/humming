@@ -5,8 +5,12 @@ on:
     types: [published]
 
 jobs:
-  build-and-publish:
-    runs-on: ubuntu-latest
+  build:
+    uses: ./.github/workflows/build-wheel.yml
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/p/humming-kernels
@@ -14,18 +18,9 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/download-artifact@v4
         with:
-          python-version: "3.10"
-
-      - name: Install build tooling
-        run: python -m pip install --upgrade pip build
-
-      - name: Build sdist and wheel
-        run: python -m build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          pattern: humming-kernels-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

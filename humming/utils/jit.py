@@ -3,6 +3,7 @@ import glob
 import hashlib
 import importlib
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -12,6 +13,32 @@ from pathlib import Path
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
+
+
+def get_native_arch() -> str | None:
+    return {
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+        "arm64": "aarch64",
+        "aarch64": "aarch64",
+    }.get(platform.machine().lower())
+
+
+def get_precompiled_artifact_path(source_path, artifact_name) -> Path | None:
+    arch = get_native_arch()
+    if arch is None:
+        return None
+
+    source_path = Path(source_path)
+    artifact_path = Path(__file__).parents[1] / "_native" / arch / artifact_name
+    if not artifact_path.is_file():
+        return None
+
+    if source_path.is_dir():
+        source_mtime = max(path.stat().st_mtime_ns for path in source_path.rglob("*") if path.is_file())
+    else:
+        source_mtime = source_path.stat().st_mtime_ns
+    return artifact_path if source_mtime < artifact_path.stat().st_mtime_ns else None
 
 
 def popen_and_reap(cmd, **kwargs):

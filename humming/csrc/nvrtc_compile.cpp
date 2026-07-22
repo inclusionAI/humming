@@ -1,4 +1,5 @@
 #include <nvrtc.h>
+#include <dlfcn.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -10,9 +11,56 @@
 
 namespace {
 
+decltype(&::nvrtcAddNameExpression) p_nvrtcAddNameExpression;
+decltype(&::nvrtcCompileProgram) p_nvrtcCompileProgram;
+decltype(&::nvrtcCreateProgram) p_nvrtcCreateProgram;
+decltype(&::nvrtcDestroyProgram) p_nvrtcDestroyProgram;
+decltype(&::nvrtcGetCUBIN) p_nvrtcGetCUBIN;
+decltype(&::nvrtcGetCUBINSize) p_nvrtcGetCUBINSize;
+decltype(&::nvrtcGetErrorString) p_nvrtcGetErrorString;
+decltype(&::nvrtcGetPTX) p_nvrtcGetPTX;
+decltype(&::nvrtcGetPTXSize) p_nvrtcGetPTXSize;
+decltype(&::nvrtcGetProgramLog) p_nvrtcGetProgramLog;
+decltype(&::nvrtcGetProgramLogSize) p_nvrtcGetProgramLogSize;
+
+#define nvrtcAddNameExpression p_nvrtcAddNameExpression
+#define nvrtcCompileProgram p_nvrtcCompileProgram
+#define nvrtcCreateProgram p_nvrtcCreateProgram
+#define nvrtcDestroyProgram p_nvrtcDestroyProgram
+#define nvrtcGetCUBIN p_nvrtcGetCUBIN
+#define nvrtcGetCUBINSize p_nvrtcGetCUBINSize
+#define nvrtcGetErrorString p_nvrtcGetErrorString
+#define nvrtcGetPTX p_nvrtcGetPTX
+#define nvrtcGetPTXSize p_nvrtcGetPTXSize
+#define nvrtcGetProgramLog p_nvrtcGetProgramLog
+#define nvrtcGetProgramLogSize p_nvrtcGetProgramLogSize
+
 void die(const std::string &msg) {
   std::fprintf(stderr, "nvrtc_compile: %s\n", msg.c_str());
   std::exit(2);
+}
+
+template <typename T>
+void load_symbol(void *library, T &symbol, const char *name) {
+  symbol = reinterpret_cast<T>(dlsym(library, name));
+  if (symbol == nullptr) die(std::string("cannot load ") + name + ": " + dlerror());
+}
+
+void load_nvrtc(const std::string &configured_path) {
+  void *library = dlopen(configured_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (library == nullptr)
+    die("cannot load NVRTC from " + configured_path + ": " + dlerror());
+  load_symbol(library, p_nvrtcAddNameExpression, "nvrtcAddNameExpression");
+  load_symbol(library, p_nvrtcCompileProgram, "nvrtcCompileProgram");
+  load_symbol(library, p_nvrtcCreateProgram, "nvrtcCreateProgram");
+  load_symbol(library, p_nvrtcDestroyProgram, "nvrtcDestroyProgram");
+  load_symbol(library, p_nvrtcGetCUBIN, "nvrtcGetCUBIN");
+  load_symbol(library, p_nvrtcGetCUBINSize, "nvrtcGetCUBINSize");
+  load_symbol(library, p_nvrtcGetErrorString, "nvrtcGetErrorString");
+  load_symbol(library, p_nvrtcGetPTX, "nvrtcGetPTX");
+  load_symbol(library, p_nvrtcGetPTXSize, "nvrtcGetPTXSize");
+  load_symbol(library, p_nvrtcGetProgramLog, "nvrtcGetProgramLog");
+  load_symbol(library, p_nvrtcGetProgramLogSize, "nvrtcGetProgramLogSize");
 }
 
 std::string read_file(const std::string &path) {
@@ -38,6 +86,7 @@ void write_file(const std::string &path, const void *data, size_t size) {
   } while (0)
 
 struct Args {
+  std::string nvrtc_path;
   std::string input;
   std::string output;
   std::string log_path;
@@ -59,7 +108,8 @@ Args parse_args(int argc, char **argv) {
     if (s == "--") {
       ++i;
       break;
-    } else if (s == "-i" || s == "--input") a.input = need("--input");
+    } else if (s == "--nvrtc-path") a.nvrtc_path = need("--nvrtc-path");
+    else if (s == "-i" || s == "--input") a.input = need("--input");
     else if (s == "-o" || s == "--output") a.output = need("--output");
     else if (s == "--log") a.log_path = need("--log");
     else if (s == "--ptx") a.emit_ptx = true;
@@ -72,7 +122,7 @@ Args parse_args(int argc, char **argv) {
     } else if (s == "-h" || s == "--help") {
       std::printf(
           "Usage: nvrtc_compile --input X.cu --output Y.cubin "
-          "[--ptx] [--log path] "
+          "[--nvrtc-path libnvrtc.so] [--ptx] [--log path] "
           "[--name-expression EXPR ...] [--header NAME=PATH ...] "
           "-- <nvrtc flag> ...\n");
       std::exit(0);
@@ -80,6 +130,7 @@ Args parse_args(int argc, char **argv) {
   }
   for (; i < argc; ++i)
     a.nvrtc_flags.emplace_back(argv[i]);
+  if (a.nvrtc_path.empty()) die("--nvrtc-path is required");
   if (a.input.empty()) die("--input is required");
   if (a.output.empty()) die("--output is required");
   return a;
@@ -89,6 +140,7 @@ Args parse_args(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   Args args = parse_args(argc, argv);
+  load_nvrtc(args.nvrtc_path);
 
   std::string src = read_file(args.input);
 

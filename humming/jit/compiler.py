@@ -10,7 +10,7 @@ from filelock import FileLock
 
 import humming.utils.jit as jit_utils
 from humming.utils.cuda import filter_cuda_paths
-from humming.utils.nvrtc import may_build_nvrtc_compile_binary
+from humming.utils.nvrtc import get_nvrtc_library_path, may_build_nvrtc_compile_binary
 
 
 class Compiler:
@@ -192,6 +192,8 @@ class NVRTCCompiler(Compiler):
         target_path = (Path(cache_dirname) / "kernel_tmp.cubin").as_posix()
         cmd = [
             binary_path,
+            "--nvrtc-path",
+            get_nvrtc_library_path(),
             "--input",
             source_path,
             "--output",
