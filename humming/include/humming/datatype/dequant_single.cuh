@@ -89,7 +89,7 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   static_assert(SourceType::kExponentBits <= TargetType::kExponentBits);
   static_assert(SourceType::kMantissaBits <= TargetType::kMantissaBits);
   static_assert(SourceType::kBits < TargetType::kBits);
-  static_assert(SourceType::kIsSigned && TargetType::kIsSigned);
+  static_assert(!SourceType::kIsSigned || TargetType::kIsSigned);
   static_assert(TargetType::kBits == 16 || TargetType::kBits == 8 || TargetType::kBits == 4);
 
   constexpr uint32_t repeated_one = TargetType::kBits == 16 ? 0x00010001 : (TargetType::kBits == 8 ? 0x01010101 : 0x11111111);
