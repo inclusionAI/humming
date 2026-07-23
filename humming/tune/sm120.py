@@ -83,6 +83,10 @@ class Sm120Heuristics(Sm89Heuristics):
                 meta, config, gemm_type, reduce_overlap=False
             )
 
+        if gemm_type == GemmType.INDEXED:
+            config["use_tma_a"] = False
+            config["use_tma_c"] = False
+
         group_size = meta.input_scale_group_size or meta.weight_scale_group_size
         if cls._is_mxmma(meta.a_dtype, group_size, meta.use_fused_e8m0_scale):
             config["reduce_overlap_last_stage_only"] = True
