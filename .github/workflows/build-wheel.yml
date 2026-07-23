@@ -44,6 +44,7 @@ jobs:
                 nvidia-cuda-nvrtc-cu12 \
                 --index-url https://download.pytorch.org/whl/cu126 \
                 --extra-index-url https://pypi.org/simple
+              "$PYTHON" -m pip install .
               "$PYTHON" tools/build_native.py
               "$PYTHON" -m build --wheel --no-isolation
               "$PYTHON" -m wheel tags --remove \
