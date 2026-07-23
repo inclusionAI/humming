@@ -15,6 +15,13 @@ def calculate_gpu_bandwidth(gpu_index=0):
     try:
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+        if (major, minor) == (12, 1):
+            # NVIDIA GB10 (DGX Spark, sm_121): unified LPDDR5X memory with no
+            # discrete memory-clock domain, so NVML_CLOCK_MEM raises
+            # NVML_ERROR_NOT_SUPPORTED (and the reported bus width is 0).
+            # Use the platform's known memory bandwidth instead.
+            return 273.0
         gpu_name = pynvml.nvmlDeviceGetName(handle)
         try:
             bus_width = pynvml.nvmlDeviceGetMemoryBusWidth(handle)
