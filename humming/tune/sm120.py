@@ -90,6 +90,7 @@ class Sm120Heuristics(Sm89Heuristics):
         if gemm_type == GemmType.INDEXED:
             config["use_tma_a"] = False
             config["use_tma_c"] = False
+            config["use_warp_spec"] = False
 
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         if cls._is_mxmma(layer_config.a_dtype, group_size, layer_config.use_fused_e8m0_scale):
