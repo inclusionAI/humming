@@ -1,3 +1,5 @@
+import itertools
+
 import pytest
 import torch
 
@@ -16,25 +18,45 @@ from humming.utils.weight import (
 )
 
 
-@pytest.mark.parametrize("a_dtype", ["float16", "bfloat16", "float8e4m3", "int8", "int4"])
 @pytest.mark.parametrize(
-    "b_dtype",
+    (
+        "a_dtype",
+        "b_dtype",
+        "c_dtype",
+        "bs_dtype",
+        "input_scale_group_size",
+        "weight_scale_group_size",
+    ),
     [
-        "uint3",
-        "uint4",
-        "uint5",
-        "uint8",
-        "int4",
-        "int8",
-        "float3e2m0",
-        "float4e1m2",
-        "float8e1m6",
+        *itertools.product(
+            ["float16", "bfloat16", "float8e4m3", "int8", "int4"],
+            [
+                "uint3",
+                "uint4",
+                "uint5",
+                "uint8",
+                "int4",
+                "int8",
+                "float3e2m0",
+                "float4e1m2",
+                "float8e1m6",
+            ],
+            ["float16", "bfloat16"],
+            ["float16", "bfloat16", "float8e5m2", "float8e4m3"],
+            [16, 32, 64, 128, 0],
+            [16, 32, 64, 128, 0],
+        ),
+        pytest.param(
+            "bfloat16",
+            "float4e2m1",
+            "bfloat16",
+            "float8e8m0",
+            0,
+            32,
+            id="e8m0-to-bfloat16-group-scale",
+        ),
     ],
 )
-@pytest.mark.parametrize("c_dtype", ["float16", "bfloat16"])
-@pytest.mark.parametrize("bs_dtype", ["float16", "bfloat16", "float8e5m2", "float8e4m3"])
-@pytest.mark.parametrize("input_scale_group_size", [16, 32, 64, 128, 0])
-@pytest.mark.parametrize("weight_scale_group_size", [16, 32, 64, 128, 0])
 @pytest.mark.parametrize("mma_type", ["mma", "wgmma"])
 def test_scale(
     a_dtype,
