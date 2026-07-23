@@ -79,13 +79,13 @@ class Sm120Heuristics(Sm89Heuristics):
         elif is_wna16:
             config["use_tma"] = True
             config["use_warp_spec"] = True
-            config["num_stages"] = cls._fit_num_stages(
-                meta, config, gemm_type, reduce_overlap=False
-            )
+            config["num_stages"] = cls._fit_num_stages(meta, config, gemm_type, reduce_overlap=False)
 
         if gemm_type == GemmType.INDEXED:
+            # Indexed addressing is incompatible with the warp-specialized pipeline.
             config["use_tma_a"] = False
             config["use_tma_c"] = False
+            config["use_warp_spec"] = False
 
         group_size = meta.input_scale_group_size or meta.weight_scale_group_size
         if cls._is_mxmma(meta.a_dtype, group_size, meta.use_fused_e8m0_scale):
