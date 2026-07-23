@@ -36,6 +36,7 @@ jobs:
             "${{ matrix.image }}" \
             bash -euxo pipefail -c '
               PYTHON=/opt/python/cp310-cp310/bin/python
+              export PIP_ROOT_USER_ACTION=ignore
               "$PYTHON" -m pip install --upgrade pip build wheel setuptools_scm
               "$PYTHON" -m pip install \
                 torch==2.11.0 \
