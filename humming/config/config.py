@@ -9,7 +9,7 @@ from humming.config.base import BaseHummingConfig
 from humming.config.enum import GemmType, MmaType, WeightScale2Type, WeightScaleType
 
 
-@dataclasses.dataclass(kw_only=True)
+@dataclasses.dataclass(kw_only=True, unsafe_hash=True)
 class LayerConfig(BaseHummingConfig):
     # shape config
     shape_n: int
@@ -31,8 +31,8 @@ class LayerConfig(BaseHummingConfig):
     weight_scale_group_size_n: int = 0
     weight_scale_type: WeightScaleType | None = None
     weight_scale_2_type: WeightScale2Type | None = None
-    use_int_weight_scale: bool = False
-    use_fused_e8m0_scale: bool = False
+    use_int_weight_scale: bool | None = None
+    use_fused_e8m0_scale: bool | None = None
     has_zero_point: bool = False
     is_fp_zero_point: bool = False
 
@@ -43,7 +43,7 @@ class LayerConfig(BaseHummingConfig):
     mma_type: MmaType | None = None
 
     # packed-K layout (wgmma + 8-bit activation only)
-    use_packed_k_layout: bool = False
+    use_packed_k_layout: bool | None = None
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
         "mma_type_id",
@@ -58,44 +58,39 @@ class LayerConfig(BaseHummingConfig):
         "has_input_scale",
     )
 
-    def _should_use_mxmma(self, sm_version: int) -> bool:
-        if sm_version != 12:
+    @property
+    def mxmma_supported(self):
+        if torch.cuda.get_device_capability()[0] != 12:
             return False
-        if not isinstance(self.a_dtype, dtypes.FloatingPointType):
+        if not self.is_group_weight_scale:
             return False
-        if self.a_dtype.num_bits > 8:
-            return False
-        if self.bs_dtype not in (dtypes.float8e8m0, dtypes.float8e4m3):
-            return False
-        group = self.weight_scale_group_size
-        if group <= 0:
-            return False
-        mma_k = 256 // self.a_dtype.num_bits
-        return mma_k % group == 0 and mma_k // group in (1, 2, 4)
+        if self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4):
+            return self.weight_scale_group_size == 32 and self.bs_dtype == dtypes.float8e8m0
+        if self.a_dtype in (dtypes.float4e2m1, dtypes.float4e0m3):
+            if self.a_dtype == dtypes.float4e0m3 and self.weight_scale_group_size == 32:
+                return False
+
+            return (
+                self.weight_scale_group_size == 16
+                and self.bs_dtype in (dtypes.float8e8m0, dtypes.float8e4m3)
+                or self.weight_scale_group_size == 32
+                and self.bs_dtype == dtypes.float8e8m0
+            )
+
+        return False
 
     def __post_init__(self):
         self.problem_shape = (0, self.shape_n, self.shape_k)
         self.pad_shape = (0, self.pad_shape_n, self.pad_shape_k)
 
-        if self.bs_dtype is None:
-            self.bs_dtype = self.c_dtype
-
+        if isinstance(self.weight_scale_type, str):
+            self.weight_scale_type = WeightScaleType(self.weight_scale_type)
         if self.weight_scale_type is None:
             if self.weight_scale_group_size_n > 1:
                 self.weight_scale_type = WeightScaleType.BLOCK
             elif self.weight_scale_group_size == 0:
                 self.weight_scale_type = WeightScaleType.CHANNEL
-            elif self.weight_scale_group_size > 0:
-                self.weight_scale_type = WeightScaleType.GROUP
-
-        if isinstance(self.weight_scale_type, str):
-            self.weight_scale_type = WeightScaleType(self.weight_scale_type)
-        if self.weight_scale_type is None:
-            if self.weight_scale_group_size == 0:
-                self.weight_scale_type = WeightScaleType.CHANNEL
-            elif self.weight_scale_group_size > 0 and self.weight_scale_group_size_n > 1:
-                self.weight_scale_type = WeightScaleType.BLOCK
-            elif self.weight_scale_group_size > 0:
+            else:
                 self.weight_scale_type = WeightScaleType.GROUP
 
         if isinstance(self.weight_scale_2_type, str):
@@ -122,22 +117,85 @@ class LayerConfig(BaseHummingConfig):
                 value = dtypes.DataType.from_str(value)
             setattr(self, f"{name}_dtype", value)
 
-        if self.mma_type is None:
+        self.has_input_scale = self.a_dtype.num_bits != 16
+        self.bs_dtype = self.bs_dtype or self.c_dtype
+
+        if isinstance(self.b_dtype, dtypes.IntegerType):
+            if isinstance(self.a_dtype, dtypes.FloatingPointType):
+                self.b_dtype = dataclasses.replace(self.b_dtype, is_signed=False)
+            elif self.a_dtype.num_bits == self.b_dtype.num_bits:
+                self.b_dtype = dataclasses.replace(self.b_dtype, is_signed=True)
+            else:
+                self.b_dtype = dataclasses.replace(self.b_dtype, is_signed=False)
+
+        self._update_weight_scale_flags()
+
+        if isinstance(self.mma_type, str):
+            self.mma_type = MmaType(self.mma_type)
+        elif self.mma_type is None:
             sm_version = torch.cuda.get_device_capability()[0]
             if sm_version == 9:
                 self.mma_type = MmaType.WGMMA
-            elif self._should_use_mxmma(sm_version):
+            elif self.mxmma_supported:
                 self.mma_type = MmaType.MXMMA
             else:
                 self.mma_type = MmaType.MMA
-        if isinstance(self.mma_type, str):
-            self.mma_type = MmaType(self.mma_type)
 
-        self.has_input_scale = self.a_dtype.num_bits != 16
         if not self.has_input_scale:
             self.as_dtype = None
         elif self.as_dtype is None:
             self.as_dtype = self.bs_dtype if self.mma_type == MmaType.MXMMA else dtypes.float32
+
+        is_channel_scale_2 = self.weight_scale_2_type == WeightScale2Type.CHANNEL
+
+        if self.use_fused_e8m0_scale is None:
+            has_native_mxf8f6f4 = self.mma_type == MmaType.MXMMA and self.a_dtype == dtypes.float8e4m3
+            self.use_fused_e8m0_scale = (
+                not has_native_mxf8f6f4
+                and self.a_dtype in [dtypes.float8e4m3, dtypes.int8]
+                and self.b_dtype in [dtypes.float4e2m1]
+                and self.bs_dtype in [dtypes.float8e8m0]
+                and self.weight_scale_group_size > 0
+            )
+
+        if self.use_int_weight_scale is None:
+            self.use_int_weight_scale = (
+                not self.use_fused_e8m0_scale
+                and self.a_dtype in [dtypes.int8, dtypes.int4]
+                and not is_channel_scale_2
+                and self.input_scale_group_size == 0
+                and self.weight_scale_group_size > 0
+                and self.weight_scale_group_size_n == 1
+            )
+
+        if self.use_int_weight_scale:
+            assert not is_channel_scale_2, "use_int_weight_scale is incompatible with channel weight_scale_2"
+            self.bs_dtype = self.c_dtype
+
+        if self.use_int_weight_scale or self.use_fused_e8m0_scale:
+            self.weight_scale_type = WeightScaleType.GROUP
+            # the extracted min-exponent factor becomes the secondary scale:
+            # per-channel when channel2 is requested, per-tensor otherwise
+            if not is_channel_scale_2:
+                self.weight_scale_2_type = WeightScale2Type.TENSOR
+            self._update_weight_scale_flags()
+
+        if self.use_packed_k_layout is None:
+            self.use_packed_k_layout = (
+                self.mma_type == MmaType.WGMMA
+                and self.a_dtype.num_bits == 8
+                and not self.use_fused_e8m0_scale
+                and self.weight_scale_group_size == 128
+            )
+        elif self.use_packed_k_layout:
+            assert self.mma_type == MmaType.WGMMA, "use_packed_k_layout requires wgmma"
+            assert self.a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit activation"
+            assert not self.use_fused_e8m0_scale, "packed_k_layout is incompatible with fused-e8m0"
+
+        if type(self) is LayerConfig:
+            self._config_str = self.to_str()
+
+    def _update_weight_scale_flags(self):
         self.is_group_weight_scale = self.weight_scale_type == WeightScaleType.GROUP
         self.is_block_weight_scale = self.weight_scale_type == WeightScaleType.BLOCK
         self.is_channel_weight_scale = self.weight_scale_type == WeightScaleType.CHANNEL
@@ -147,14 +205,26 @@ class LayerConfig(BaseHummingConfig):
         self.has_channel_weight_scale = self.is_channel_weight_scale or self.is_channel_weight_scale_2  # noqa
         self.has_tensor_weight_scale = self.is_tensor_weight_scale or self.is_tensor_weight_scale_2
 
-        if self.use_packed_k_layout:
-            assert self.mma_type == MmaType.WGMMA, "use_packed_k_layout requires wgmma"
-            assert self.a_dtype.num_bits == 8, (
-                "use_packed_k_layout requires 8-bit (fp8/int8) activation"
-            )
-            assert not self.use_fused_e8m0_scale, (
-                "use_packed_k_layout is incompatible with fused-e8m0 scale"
-            )
+    def to_str(self) -> str:
+        if hasattr(self, "_config_str"):
+            return self._config_str
+        return super().to_str()
+
+    def __setattr__(self, name, value):
+        if hasattr(self, "_config_str"):
+            raise AttributeError(f"Instance is frozen, cannot set {name}")
+        super().__setattr__(name, value)
+
+    def estimate_bound_min_shape_m(self, use_f16_accum: bool = False):
+        from humming.utils.device import estimate_compute_bound_threshold
+
+        return estimate_compute_bound_threshold(
+            weight_nbytes=self.weight_nbytes // (self.num_experts or 1),
+            shape_n=self.shape_n,
+            shape_k=self.shape_k,
+            dtype=str(self.a_dtype),
+            use_f16_accum=use_f16_accum,
+        )
 
     @property
     def mma_type_id(self):
@@ -169,6 +239,42 @@ class LayerConfig(BaseHummingConfig):
         if self.a_dtype not in (dtypes.float8e4m3, dtypes.float8e5m2):
             return False
         return self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
+
+    @property
+    def weight_nbytes(self):
+        nbytes1 = self.shape_n * self.shape_k * self.b_dtype.num_bits // 8
+        num_groups = self.shape_k / (self.weight_scale_group_size or self.shape_k)
+        assert self.bs_dtype is not None
+        nbytes2 = self.shape_n * num_groups * self.bs_dtype.num_bits // 8
+        nbytes3 = self.shape_n * num_groups * (math.ceil(self.b_dtype.num_bits / 4) * 4) // 8
+        nbytes = nbytes1 + nbytes2
+        if self.has_zero_point and self.is_fp_zero_point:
+            nbytes = nbytes + nbytes2
+        elif self.has_zero_point:
+            nbytes = nbytes + nbytes3
+        return nbytes * (self.num_experts or 1)
+
+    @property
+    def param_dtype(self):
+        if self.c_dtype == dtypes.float16:
+            return torch.float16
+        elif self.c_dtype == dtypes.bfloat16:
+            return torch.bfloat16
+        else:
+            raise ValueError(f"unsupported c_dtype: {self.c_dtype}")
+
+    @property
+    def should_apply_bs_on_c(self):
+        if self.use_fused_e8m0_scale:
+            return False
+        elif self.mma_type == MmaType.MMA:
+            return self.weight_scale_group_size == 0 or self.a_dtype.num_bits != 16
+        elif self.mma_type == MmaType.WGMMA:
+            return self.weight_scale_group_size == 0
+        elif self.mma_type == MmaType.MXMMA:
+            return False
+        else:
+            raise ValueError(f"unsupported mma_type: {self.mma_type}")
 
 
 @dataclasses.dataclass(kw_only=True)

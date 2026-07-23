@@ -48,6 +48,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     uint32_t top_k,
     bool use_int64_expert_layout) {
 
+  uint64_t debug_start_clock = debug_kernel_timer_start();
   constexpr uint32_t kNumThreads = TuningConfig::kNumThreads;
   constexpr uint32_t kNumStages = TuningConfig::kNumStages;
 
@@ -91,6 +92,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   __syncthreads();
 
   while (scheduler.get_next_block()) {
+    debug_kernel_timeout_check(debug_start_clock);
     mma.zero_accum();
     __syncthreads();
 
@@ -111,8 +113,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     mma.transform_b(0);
 
     while (slice_iters) {
+      debug_kernel_timeout_check(debug_start_clock);
       PRAGMA_UNROLL
       for (uint32_t stage_id = 0; stage_id < kNumStages; stage_id++) {
+        debug_kernel_timeout_check(debug_start_clock);
         if (slice_iters == 1) producer.load_channel();
         PRAGMA_UNROLL
         for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {

@@ -3,13 +3,13 @@ import torch
 
 from humming import dtypes, ops
 from humming.kernel.humming import HummingKernel
+from humming.transform import transform_humming_weight, transform_humming_weight_scale
 from humming.utils.test import (
     generate_random_inputs,
     generate_random_moe_tensors,
     generate_random_weight,
     skip_if_unsupported,
 )
-from humming.utils.weight import prepare_humming_weight, prepare_humming_weight_scale
 
 
 @pytest.mark.parametrize("a_dtype", ["float8e4m3"])
@@ -27,9 +27,9 @@ def test_m_major_dense(a_dtype, b_dtype, c_dtype, shape_m, use_tma_as):
     _, weight_ref, weight, weight_scale, _, _ = generate_random_weight(
         n=1024, k=1024, group_size=group_size, dtype=b_dtype, scale_dtype=dtypes.float8e4m3
     )
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype, use_wgmma=False)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype, use_wgmma=False)
     to_apply_on_c = a_dtype.num_bits != 16
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=shape_m, k=1024, group_size=group_size, dtype=a_dtype
@@ -115,8 +115,8 @@ def test_m_major_grouped(a_dtype, b_dtype, c_dtype, expert_max_tokens, use_tma_a
         scale_dtype=dtypes.bfloat16,
         num_experts=num_experts,
     )
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=True)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=True)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=m_new, k=1024, group_size=group_size, dtype=a_dtype

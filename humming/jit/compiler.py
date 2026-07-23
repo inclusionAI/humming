@@ -5,15 +5,32 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+import torch
 from cuda.bindings import nvrtc
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
 from humming.utils.cuda import filter_cuda_paths
-from humming.utils.nvrtc import may_build_nvrtc_compile_binary
+from humming.utils.nvrtc import get_nvrtc_library_path, may_build_nvrtc_compile_binary
 
 
 class Compiler:
+    @staticmethod
+    def debug_kernel_flags():
+        enabled = os.environ.get("HUMMING_DEBUG_KERNEL", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        flags = [f"-DHUMMING_DEBUG_KERNEL={int(enabled)}"]
+        if enabled:
+            clock_rate_khz = torch.cuda.get_device_properties().clock_rate
+            timeout_clocks = int(clock_rate_khz) * 1000 * 10
+            flags.append(f"-DHUMMING_DEBUG_KERNEL_TIMEOUT_CLOCKS={timeout_clocks}")
+            flags.append("-lineinfo")
+        return flags
+
     @classmethod
     def signature(self):
         raise NotImplementedError
@@ -157,6 +174,7 @@ class NVRTCCompiler(Compiler):
         flags = [
             f"--gpu-architecture=sm_{sm_version}",
             "-std=c++17",
+            *cls.debug_kernel_flags(),
             "--use_fast_math",
             "--dopt=on",
             "-extra-device-vectorization",
@@ -192,6 +210,8 @@ class NVRTCCompiler(Compiler):
         target_path = (Path(cache_dirname) / "kernel_tmp.cubin").as_posix()
         cmd = [
             binary_path,
+            "--nvrtc-path",
+            get_nvrtc_library_path(),
             "--input",
             source_path,
             "--output",
@@ -234,6 +254,7 @@ class NVCCCompiler(Compiler):
 
         flags = [
             "-std=c++17",
+            *cls.debug_kernel_flags(),
             "--ptxas-options=--register-usage-level=10",
             "--use_fast_math",
             "--diag-suppress=39,161,174,177,940,1444",

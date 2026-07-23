@@ -49,6 +49,31 @@ def _load_lib(path):
     return lib
 
 
+def build_cubin_patcher(output_path, compiler="g++"):
+    src_path = Path(__file__).parents[1] / "csrc" / "patch_cubin.cpp"
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_suffix(".tmp")
+    cmd = [
+        compiler,
+        "-O2",
+        "-std=c++17",
+        "-fPIC",
+        "-shared",
+        str(src_path),
+        "-o",
+        str(tmp_path),
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to build libcubinpatch.so:\nCMD: {' '.join(cmd)}\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+    os.replace(tmp_path, output_path)
+    return output_path.as_posix()
+
+
 def may_build_cubin_patcher():
     global _cached_lib
     if _cached_lib is not None:
@@ -56,6 +81,11 @@ def may_build_cubin_patcher():
 
     src_path = os.path.join(os.path.dirname(__file__), "..", "csrc", "patch_cubin.cpp")
     src_path = os.path.abspath(src_path)
+    native_path = jit_utils.get_precompiled_artifact_path(src_path, "libcubinpatch.so")
+    if native_path is not None:
+        _cached_lib = _load_lib(native_path.as_posix())
+        return _cached_lib
+
     full_hash = jit_utils.hash_path_content(src_path, releative=True)
 
     build_dir = Path(jit_utils.get_humming_cache_dir()) / "cubin_patcher" / full_hash
@@ -69,25 +99,7 @@ def may_build_cubin_patcher():
     lock_filename = jit_utils.get_humming_lock_filename("cubin_patcher_" + full_hash)
     with FileLock(lock_filename):
         if not lib_path.exists():
-            tmp_lib = lib_path.with_suffix(".tmp")
-            cmd = [
-                "g++",
-                "-O2",
-                "-std=c++17",
-                "-fPIC",
-                "-shared",
-                src_path,
-                "-o",
-                tmp_lib.as_posix(),
-            ]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to build libcubinpatch.so:\nCMD: {' '.join(cmd)}\n"
-                    f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-                )
-            os.replace(tmp_lib, lib_path)
+            build_cubin_patcher(lib_path)
 
     _cached_lib = _load_lib(lib_path.as_posix())
     return _cached_lib

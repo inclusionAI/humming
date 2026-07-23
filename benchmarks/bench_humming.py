@@ -56,7 +56,7 @@ def bench_humming(
     for tensor in layer.parameters():
         random_fill_tensor(tensor)
     layer.transform()
-    meta = layer.humming_metas[""]
+    layer_config = layer.humming_config
 
     default_shape_m_list = [2**i for i in range(15)]
     benchmark_result: list[dict[str, int | float]] = []
@@ -74,8 +74,8 @@ def bench_humming(
         inputs = torch.randn((actual_shape_m, shape_k), dtype=torch_dtype, device="cuda:0")
         input_scale: torch.Tensor | None = None
         if a_dtype not in ["float16", "bfloat16"]:
-            is_mxmma = meta.mma_type == MmaType.MXMMA
-            m_major = use_m_major_input_scale and not meta.use_fused_e8m0_scale
+            is_mxmma = layer_config.mma_type == MmaType.MXMMA
+            m_major = use_m_major_input_scale and not layer_config.use_fused_e8m0_scale
             scale_dtype = bs_dtype if is_mxmma else "float32"
             inputs, input_scale = ops.quant_input(
                 inputs,
@@ -88,7 +88,7 @@ def bench_humming(
                 input_scale = input_scale.view(torch.int32).contiguous()
 
         tuning_config = get_heuristics_config(
-            meta=meta,
+            layer_config=layer_config,
             use_f16_accum=use_f16_accum,
             use_m_major_input_scale=use_m_major_input_scale,
             gemm_type=gemm_type,

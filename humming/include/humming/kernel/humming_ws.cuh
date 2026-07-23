@@ -48,6 +48,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     uint32_t top_k,
     bool use_int64_expert_layout) {
 
+  uint64_t debug_start_clock = debug_kernel_timer_start();
   constexpr uint32_t kNumThreads = TuningConfig::kNumThreads;
   constexpr uint32_t kNumStages = TuningConfig::kNumStages;
   constexpr bool kReduceOverlapLastStageOnly = TuningConfig::kReduceOverlapLastStageOnly;
@@ -93,6 +94,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     producer.init_mbarrier();
     mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
     while (scheduler.get_next_block()) {
+      debug_kernel_timeout_check(debug_start_clock);
       uint32_t &slice_iters = scheduler.slice_iters;
 
       producer.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
@@ -104,8 +106,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       };
 
       while (slice_iters) {
+        debug_kernel_timeout_check(debug_start_clock);
         PRAGMA_UNROLL
         for (uint32_t stage_id = 0; stage_id < kNumStages; stage_id++) {
+          debug_kernel_timeout_check(debug_start_clock);
           if (slice_iters == 1) producer.load_channel();
           producer.wait_stage(stage_id);
           if constexpr (kNumStages == 2) {
@@ -137,6 +141,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     consumer.arrive(kNumStages);
 
     while (scheduler.get_next_block()) {
+      debug_kernel_timeout_check(debug_start_clock);
       mma.zero_accum();
 
       uint32_t &slice_iters = scheduler.slice_iters;
@@ -148,8 +153,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       mma.transform_b(0);
 
       while (slice_iters) {
+        debug_kernel_timeout_check(debug_start_clock);
         PRAGMA_UNROLL
         for (uint32_t stage_id = 0; stage_id < kNumStages; stage_id++) {
+          debug_kernel_timeout_check(debug_start_clock);
           PRAGMA_UNROLL
           for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
             s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);

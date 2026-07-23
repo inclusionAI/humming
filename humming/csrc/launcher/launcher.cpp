@@ -1,10 +1,8 @@
 #define USE_CUDA 1
 
 #include <cuda.h>
-#include <cuda_runtime_api.h>
 #include <map>
 #include <vector>
-#include <pybind11/pybind11.h>
 
 #include "./elf.h"
 #include "./tensor.h"
@@ -41,11 +39,11 @@ inline KernelLaunchData find_kernel_launch_data(IntArrayRef &configs, int64_t sh
   return kernel_launch_data;
 };
 
-inline cudaStream_t get_current_cuda_stream(int64_t dev) {
+inline CUstream get_current_cuda_stream(int64_t dev) {
 #if USE_TORCH_STABLE_API
   void *stream_ptr = nullptr;
   aoti_torch_get_current_cuda_stream(dev, &stream_ptr);
-  return static_cast<cudaStream_t>(stream_ptr);
+  return static_cast<CUstream>(stream_ptr);
 #else
   return at::cuda::getCurrentCUDAStream(dev);
 #endif
@@ -53,8 +51,12 @@ inline cudaStream_t get_current_cuda_stream(int64_t dev) {
 
 inline int64_t get_num_sms(int64_t num_sms, int64_t dev) {
   if (num_sms > 0) return num_sms;
+  CUdevice device;
   int32_t dev_sms;
-  cudaDeviceGetAttribute(&dev_sms, cudaDevAttrMultiProcessorCount, dev);
+  check_curesult(cuDeviceGet(&device, dev), "cuDeviceGet");
+  check_curesult(
+      cuDeviceGetAttribute(&dev_sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device),
+      "cuDeviceGetAttribute");
   return static_cast<int64_t>(dev_sms);
 }
 
@@ -321,5 +323,3 @@ COMMON_TORCH_LIBRARY_IMPL(humming, CUDA, m) {
 COMMON_TORCH_LIBRARY_IMPL(humming, Undefined, m) {
   m.impl("register_kernel", COMMON_TORCH_BOX(&register_kernel));
 };
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m){};

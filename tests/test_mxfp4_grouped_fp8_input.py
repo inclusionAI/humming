@@ -8,19 +8,21 @@ test for the FP8 weight-scale tail decode path.
 
 import torch
 
-import humming.layer as layer_module
+import humming.forward as forward_module
 from humming import dtypes, ops
+from humming.config import LayerConfig
+from humming.forward import may_quant_input
 from humming.kernel.humming import HummingKernel
-from humming.layer import HummingLayerMeta, HummingLayerMethod
+from humming.transform import (
+    process_fused_e8m0_scale,
+    transform_humming_weight,
+    transform_humming_weight_scale,
+)
 from humming.utils.test import (
     generate_random_inputs,
     generate_random_moe_tensors,
     generate_random_weight,
     skip_if_unsupported,
-)
-from humming.utils.weight import (
-    prepare_humming_weight,
-    prepare_humming_weight_scale,
 )
 
 A_DTYPE = dtypes.float8e4m3
@@ -46,8 +48,8 @@ def _amplify_grouped_input_scale(inputs_ref: torch.Tensor, input_scale: torch.Te
     inputs_ref *= pattern.repeat_interleave(INPUT_GROUP)
 
 
-def _make_meta(input_scale_group_size: int = INPUT_GROUP) -> HummingLayerMeta:
-    return HummingLayerMeta(
+def _make_config(input_scale_group_size: int = INPUT_GROUP) -> LayerConfig:
+    return LayerConfig(
         shape_n=N,
         shape_k=K,
         a_dtype=A_DTYPE,
@@ -84,7 +86,7 @@ def _prepare_weight(*, use_fused_e8m0_scale: bool, num_experts: int | None = Non
     assert weight_scale is not None
 
     if use_fused_e8m0_scale:
-        meta = HummingLayerMeta(
+        config = LayerConfig(
             shape_n=N,
             shape_k=K,
             a_dtype=A_DTYPE,
@@ -98,13 +100,13 @@ def _prepare_weight(*, use_fused_e8m0_scale: bool, num_experts: int | None = Non
             mma_type="wgmma",
             use_fused_e8m0_scale=True,
         )
-        weight, weight_scale, global_scale = HummingLayerMethod.may_process_fused_e8m0_scale(
-            meta,
+        weight, weight_scale, global_scale = process_fused_e8m0_scale(
+            config,
             weight=weight,
             weight_scale=weight_scale,
             weight_scale_2=global_scale,
         )
-        weight = prepare_humming_weight(
+        weight = transform_humming_weight(
             weight,
             B_DTYPE,
             A_DTYPE,
@@ -112,10 +114,10 @@ def _prepare_weight(*, use_fused_e8m0_scale: bool, num_experts: int | None = Non
             use_fused_e8m0_scale=True,
             interleave_mode=2,
         )
-        weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=False)
+        weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=False)
     else:
-        weight = prepare_humming_weight(weight, B_DTYPE, A_DTYPE, use_wgmma=True)
-        weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=False)
+        weight = transform_humming_weight(weight, B_DTYPE, A_DTYPE, use_wgmma=True)
+        weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=False)
 
     return weight_ref, weight, weight_scale, global_scale
 
@@ -147,13 +149,13 @@ def _dense_kernel(*, use_fused_e8m0_scale: bool):
 
 def test_layer_auto_fuses_e8m0_with_grouped_input_scale():
     for input_scale_group_size in [0, INPUT_GROUP]:
-        meta = _make_meta(input_scale_group_size)
-        assert meta.use_fused_e8m0_scale is True
-        assert meta.is_group_weight_scale is True
-        assert meta.is_tensor_weight_scale_2 is True
+        config = _make_config(input_scale_group_size)
+        assert config.use_fused_e8m0_scale is True
+        assert config.is_group_weight_scale is True
+        assert config.is_tensor_weight_scale_2 is True
 
 
-def test_layer_quant_input_uses_meta_group_size(monkeypatch):
+def test_layer_quant_input_uses_config_group_size(monkeypatch):
     captured = {}
 
     def fake_quant_input(*, inputs, outputs, dtype, group_size):
@@ -163,13 +165,11 @@ def test_layer_quant_input_uses_meta_group_size(monkeypatch):
         captured["group_size"] = group_size
         return "quanted", "scale"
 
-    monkeypatch.setattr(layer_module.ops, "quant_input", fake_quant_input)
+    monkeypatch.setattr(forward_module.ops, "quant_input", fake_quant_input)
 
-    layer = torch.nn.Module()
-    layer.humming_metas = {"": _make_meta(INPUT_GROUP)}
     inputs = torch.empty((1, K), dtype=torch.bfloat16)
 
-    quanted_input, input_scale = HummingLayerMethod.may_quant_input(layer, inputs)
+    quanted_input, input_scale = may_quant_input(_make_config(INPUT_GROUP), inputs)
 
     assert quanted_input == "quanted"
     assert input_scale == "scale"
@@ -281,9 +281,7 @@ def test_grouped_masked_moe_fused_mxfp4_grouped_fp8_input_wgmma():
         end = start + num_tokens
         if end > start:
             active_mask[start:end] = True
-            outputs_ref[start:end] = (
-                inputs_ref[start:end].matmul(weight_ref[expert_id].T).to(torch.bfloat16)
-            )
+            outputs_ref[start:end] = inputs_ref[start:end].matmul(weight_ref[expert_id].T).to(torch.bfloat16)
 
     assert (outputs[~active_mask] == 0).all(), "padding rows must be exactly zero"
     torch.testing.assert_close(outputs[active_mask], outputs_ref[active_mask], rtol=RTOL, atol=ATOL)

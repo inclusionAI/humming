@@ -3,15 +3,15 @@ import torch
 
 from humming import dtypes, ops
 from humming.kernel.humming import HummingKernel
+from humming.transform import (
+    transform_humming_weight,
+    transform_humming_weight_scale,
+)
 from humming.utils.test import (
     generate_random_inputs,
     generate_random_moe_tensors,
     generate_random_weight,
     skip_if_unsupported,
-)
-from humming.utils.weight import (
-    prepare_humming_weight,
-    prepare_humming_weight_scale,
 )
 
 
@@ -43,8 +43,8 @@ def test_indexed_gemm(m, num_experts, top_k, block_shape_m):
     )
 
     _, weight_ref, weight, weight_scale, _, _ = random_weight_data
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=True)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=True)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=m,
@@ -138,8 +138,8 @@ def test_indexed_gemm_input_scale(input_scale_group_size):
     )
 
     _, weight_ref, weight, weight_scale, _, _ = random_weight_data
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=True)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=True)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=m,
@@ -234,8 +234,8 @@ def test_grouped_gemm(m, num_experts, top_k, block_shape_m, expert_max_tokens, u
     )
 
     _, weight_ref, weight, weight_scale, _, _ = random_weight_data
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=True)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=True)
 
     m_new = m * top_k
     if expert_max_tokens is not None:

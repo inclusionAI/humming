@@ -446,10 +446,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         layer_config_obj.pop("sublayer_name", None)
 
         if not tuning_config_obj:
-            from humming.layer import HummingLayerMeta
-
-            meta = HummingLayerMeta(**layer_config_obj)
-            tuning_config_obj = get_heuristics_config(meta, **compute_config_obj)
+            tuning_config_obj = get_heuristics_config(LayerConfig(**layer_config_obj), **compute_config_obj)
 
         if isinstance(tuning_config_obj, dict):
             config = layer_config_obj | compute_config_obj | tuning_config_obj

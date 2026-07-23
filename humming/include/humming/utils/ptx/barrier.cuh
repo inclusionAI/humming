@@ -17,11 +17,17 @@ CUDA_INLINE uint32_t sync_part_threads() {
 template <uint32_t kNumSyncThreads = 0, uint32_t kNumThreads = 0>
 CUDA_INLINE void barrier_acquire(int *lock, int count) {
   if (threadIdx.x == 0) {
+#if HUMMING_DEBUG_KERNEL
+    uint64_t start_clock = debug_kernel_timer_start();
+#endif
     int state = -1;
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
                    : "l"(lock));
+#if HUMMING_DEBUG_KERNEL
+      debug_kernel_timeout_check(start_clock, "Humming Stream-K barrier timeout");
+#endif
     } while (state != count);
   }
   sync_part_threads<kNumSyncThreads, kNumThreads>();
@@ -30,11 +36,17 @@ CUDA_INLINE void barrier_acquire(int *lock, int count) {
 template <uint32_t kNumSyncThreads = 0, uint32_t kNumThreads = 0>
 CUDA_INLINE void barrier_acquire2(int *lock, int count) {
   if (threadIdx.x == 0) {
+#if HUMMING_DEBUG_KERNEL
+    uint64_t start_clock = debug_kernel_timer_start();
+#endif
     int state = 1;
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
                    : "l"(lock));
+#if HUMMING_DEBUG_KERNEL
+      debug_kernel_timeout_check(start_clock, "Humming Stream-K barrier timeout");
+#endif
     } while (state > count);
   }
   sync_part_threads<kNumSyncThreads, kNumThreads>();
@@ -76,7 +88,36 @@ CUDA_INLINE void barrier_release2(int *lock, int32_t val) {
 CUDA_INLINE
 void mbarrier_wait(void *barrier, bool phase_parity) {
   uint32_t smem_int_mbar = cast_smem_ptr_to_uint(barrier);
+#if HUMMING_DEBUG_KERNEL
+  uint64_t start_clock = debug_kernel_timer_start();
+  uint32_t ready;
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  do {
+    asm volatile("{\n"
+                 "  .reg .pred p;\n"
+                 "  mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                 "  selp.u32 %0, 1, 0, p;\n"
+                 "}\n"
+                 : "=r"(ready)
+                 : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
+                 : "memory");
+    debug_kernel_timeout_check(start_clock, "Humming mbarrier timeout");
+  } while (!ready);
+#else
+  do {
+    asm volatile("{\n"
+                 "  .reg .pred p;\n"
+                 "  mbarrier.test_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                 "  selp.u32 %0, 1, 0, p;\n"
+                 "}\n"
+                 : "=r"(ready)
+                 : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
+                 : "memory");
+    debug_kernel_timeout_check(start_clock, "Humming mbarrier timeout");
+  } while (!ready);
+#endif
+#else
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   asm volatile("{\n"
                "  .reg .pred p;\n"
@@ -101,6 +142,7 @@ void mbarrier_wait(void *barrier, bool phase_parity) {
                :
                : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
                : "memory");
+#endif
 #endif
 };
 

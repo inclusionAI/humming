@@ -3,8 +3,8 @@ import torch
 
 from humming import dtypes, ops
 from humming.kernel.humming import HummingKernel
+from humming.transform import transform_humming_weight, transform_humming_weight_scale
 from humming.utils.test import _current_sm_version, generate_random_weight
-from humming.utils.weight import prepare_humming_weight, prepare_humming_weight_scale
 
 
 def _skip_if_no_mxmma():
@@ -58,8 +58,8 @@ def _run_mxmma(
         allow_negative_scale=False,
     )
     weight_ref = weight_ref.squeeze(0) if weight_ref.ndim == 3 else weight_ref
-    weight_k = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale_k = prepare_humming_weight_scale(weight_scale, is_mxmma=True, mxmma_scale_vec=scale_vec)
+    weight_k = transform_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale_k = transform_humming_weight_scale(weight_scale, is_mxmma=True, mxmma_scale_vec=scale_vec)
 
     x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda") * 0.5
     xq, xs = ops.quant_input(x, a_dtype.to_str(), group_size=group_size, scale_dtype=bs_dtype.to_str())

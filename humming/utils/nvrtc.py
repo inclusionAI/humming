@@ -40,6 +40,40 @@ def _find_nvrtc_lib_dir():
 _cached_binary_path = None
 
 
+def get_nvrtc_library_path():
+    _, lib_path, _ = _find_nvrtc_lib_dir()
+    if lib_path is None:
+        raise RuntimeError("Could not locate libnvrtc.so in CUDA path")
+    return lib_path
+
+
+def build_nvrtc_compile_binary(output_path, compiler="g++"):
+    _, _, cuda_env = _find_nvrtc_lib_dir()
+    include_paths = list(cuda_env["include_paths"])
+    src_path = Path(__file__).parents[1] / "csrc" / "nvrtc_compile.cpp"
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_suffix(".tmp")
+    cmd = [
+        compiler,
+        "-O2",
+        "-std=c++17",
+        str(src_path),
+        *[f"-I{path}" for path in include_paths],
+        "-ldl",
+        "-o",
+        str(tmp_path),
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to build nvrtc_compile:\nCMD: {' '.join(cmd)}\n"
+            f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+    os.replace(tmp_path, output_path)
+    return output_path.as_posix()
+
+
 def may_build_nvrtc_compile_binary():
     global _cached_binary_path
     if _cached_binary_path is not None:
@@ -47,11 +81,15 @@ def may_build_nvrtc_compile_binary():
 
     src_path = os.path.join(os.path.dirname(__file__), "..", "csrc", "nvrtc_compile.cpp")
     src_path = os.path.abspath(src_path)
-    src_hash = jit_utils.hash_path_content(src_path, releative=True)
-
     lib_dir, lib_path, cuda_env = _find_nvrtc_lib_dir()
     if lib_dir is None:
         raise RuntimeError("Could not locate libnvrtc.so in CUDA path")
+    native_path = jit_utils.get_precompiled_artifact_path(src_path, "nvrtc_compile")
+    if native_path is not None:
+        _cached_binary_path = native_path.as_posix()
+        return _cached_binary_path
+
+    src_hash = jit_utils.hash_path_content(src_path, releative=True)
     include_paths = list(cuda_env["include_paths"])
     env_signature = json.dumps(
         {
@@ -79,26 +117,7 @@ def may_build_nvrtc_compile_binary():
             _cached_binary_path = binary_path.as_posix()
             return _cached_binary_path
 
-        tmp_binary = binary_path.with_suffix(".tmp")
-        cmd = [
-            "g++",
-            "-O2",
-            "-std=c++17",
-            src_path,
-            *[f"-I{d}" for d in include_paths],
-            lib_path,
-            f"-Wl,-rpath,{lib_dir}",
-            "-o",
-            tmp_binary.as_posix(),
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to build nvrtc_compile:\nCMD: {' '.join(cmd)}\n"
-                f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-            )
-        os.replace(tmp_binary, binary_path)
-        _cached_binary_path = binary_path.as_posix()
+        _cached_binary_path = build_nvrtc_compile_binary(binary_path)
         return _cached_binary_path
 
 

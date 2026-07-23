@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 
 from humming import dtypes, ops
@@ -222,79 +224,26 @@ def prepare_humming_weight(
     interleave_mode: int = 3,
     use_packed_k_layout: bool = False,
 ) -> torch.Tensor:
-    is_moe = weight.ndim == 3
-    weight = weight.unsqueeze(0) if not is_moe else weight
-    if zero_point is not None:
-        zero_point = zero_point.unsqueeze(0) if zero_point.ndim == 2 else zero_point
-    shape_n = weight.size(-2)
-    if packed:
-        assert weight.size(-1) * 32 % b_dtype.num_bits == 0
-        shape_k = weight.size(-1) * 32 // b_dtype.num_bits
-    else:
-        shape_k = weight.size(-1)
-
-    padded_shape_n = shape_n if padded_shape_n is None else padded_shape_n
-    padded_shape_k = shape_k if padded_shape_k is None else padded_shape_k
-    packed_block_size_k = 256 // a_dtype.num_bits
-
-    assert padded_shape_n % 64 == 0
-    assert padded_shape_k % (2 * packed_block_size_k) == 0
-
-    should_preprocess_for_int2fp = False
-    has_zero_point = zero_point is not None and zero_point.nelement() > 0
-    if b_dtype.is_integer_type and a_dtype.is_floating_point_type:
-        if a_dtype.num_bits < 16:
-            should_preprocess_for_int2fp = True
-        elif a_dtype == dtypes.bfloat16 and has_zero_point:
-            should_preprocess_for_int2fp = b_dtype.num_bits > 6
-        elif a_dtype == dtypes.bfloat16 and not has_zero_point:
-            should_preprocess_for_int2fp = b_dtype.num_bits > 7
-
-    if a_dtype == dtypes.int8 and b_dtype in [dtypes.int8, dtypes.uint8]:
-        weight = (weight.view(torch.int8) - 128).view(torch.int32)
-
-    if a_dtype == dtypes.int4 and b_dtype in [dtypes.int4, dtypes.uint4]:
-        weight = weight.view(torch.uint8)
-        weight1 = (weight & 0xF) - 8
-        weight1 = weight1 & 0xF
-        weight2 = (weight & 0xF0) - 8 * 16
-        weight = (weight1 | weight2).view(torch.int32)
-
-    if not should_preprocess_for_int2fp and has_zero_point:
-        has_zero_point = False
-
-    should_preprocess_with_zp = has_zero_point
-    if zero_point is not None and zero_point.dtype.is_floating_point:
-        should_preprocess_with_zp = False
-        should_preprocess_for_int2fp = False
-
-    if not has_zero_point:
-        group_size_zp = 0
-    else:
-        assert zero_point is not None
-        group_size_zp = shape_k // zero_point.size(-1)
-
-    if use_packed_k_layout:
-        assert use_wgmma, "use_packed_k_layout requires wgmma"
-        assert a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit (fp8/int8) activation"
-        assert not use_fused_e8m0_scale, "use_packed_k_layout is incompatible with fused-e8m0 scale"
-
-    repacked_weight = ops.repack_weight(
-        inputs=weight,
-        zero_point=zero_point,
-        weight_bits=b_dtype.num_bits,
-        activation_bits=a_dtype.num_bits,
-        is_weight_packed=packed,
-        should_preprocess_for_int2fp=should_preprocess_for_int2fp,
-        should_preprocess_with_zp=should_preprocess_with_zp,
-        use_wgmma=use_wgmma,
-        interleave_mode=interleave_mode,
-        use_fused_e8m0_scale=use_fused_e8m0_scale,
-        group_size_zp=group_size_zp,
-        use_packed_k_layout=use_packed_k_layout,
+    warnings.warn(
+        "prepare_humming_weight is deprecated; use humming.transform.transform_humming_weight",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    from humming.transform import transform_humming_weight
 
-    return repacked_weight if is_moe else repacked_weight.squeeze(0)
+    return transform_humming_weight(
+        weight,
+        b_dtype,
+        a_dtype,
+        zero_point,
+        use_wgmma,
+        use_fused_e8m0_scale,
+        packed,
+        padded_shape_n,
+        padded_shape_k,
+        interleave_mode,
+        use_packed_k_layout,
+    )
 
 
 def prepare_humming_weight_scale(
@@ -304,40 +253,16 @@ def prepare_humming_weight_scale(
     is_mxmma: bool = False,
     mxmma_scale_vec: int = 4,
 ) -> torch.Tensor:
-    if is_blockwise:
-        return weight_scale.transpose(-1, -2).contiguous()
+    warnings.warn(
+        "prepare_humming_weight_scale is deprecated; use humming.transform.transform_humming_weight_scale",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from humming.transform import transform_humming_weight_scale
 
-    if is_mxmma:
-        if mxmma_scale_vec == 1:
-            ws = weight_scale.view(torch.uint8)
-            lead = ws.shape[:-2]
-            n, g = ws.shape[-2:]
-            ws = ws.reshape(*lead, n // 16, 2, 8, g // 2, 2)
-            ndim = len(lead)
-            perm = (*range(ndim), ndim + 3, ndim + 0, ndim + 2, ndim + 1, ndim + 4)
-            ws = ws.permute(*perm).contiguous()
-            ws = ws.reshape(*lead, g // 2, n // 2, 4)
-            return ws.view(torch.int32).squeeze(-1).contiguous()
-
-        return weight_scale.view(torch.int32).transpose(-1, -2).contiguous()
-
-    if to_apply_on_c:
-        perm = [0, 1, 8, 9, 16, 17, 24, 25]
-    else:
-        perm = [0, 8, 16, 24, 32, 40, 48, 56]
-
-    count = sum(x < 8 for x in perm)
-    perm_new = []
-    for i in range(8 // count):
-        perm_new += [x + count * i for x in perm]
-
-    perm_tensor = torch.tensor(perm_new, dtype=torch.int32, device=weight_scale.device)
-    weight_scale = weight_scale.transpose(-1, -2).contiguous()
-    orig_shape = weight_scale.shape
-    weight_scale = weight_scale.view(-1, len(perm_tensor))[:, perm_tensor]
-    weight_scale = weight_scale.contiguous().view(orig_shape)
-
-    return weight_scale
+    return transform_humming_weight_scale(
+        weight_scale, to_apply_on_c, is_blockwise, is_mxmma, mxmma_scale_vec
+    )
 
 
 def prepare_humming_zero_point(
@@ -345,32 +270,22 @@ def prepare_humming_zero_point(
     dtype: dtypes.DataType,
     packed: bool = False,
 ) -> torch.Tensor | None:
-    num_experts = None if zero_point.ndim == 2 else zero_point.size(0)
-    if zero_point.dtype.is_floating_point:
-        return prepare_humming_weight_scale(zero_point, False)
+    warnings.warn(
+        "prepare_humming_zero_point is deprecated; use humming.transform.transform_humming_zero_point",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from humming.transform import transform_humming_zero_point
 
-    if packed:
-        zero_point = zero_point.transpose(-1, -2).contiguous()
-        zero_point = zero_point.squeeze().view(*zero_point.shape)
-        zero_point = ops.unpack_weight(zero_point, dtype.num_bits)
-        zero_point = zero_point.transpose(-1, -2).contiguous()
-
-    assert zero_point is not None
-    num_zp_bits = 4 if dtype.num_bits <= 4 else 8
-    shape_n = zero_point.size(-2)
-    zero_point = prepare_humming_weight_scale(zero_point)
-    assert zero_point is not None
-    zero_point = zero_point.to(torch.uint8)
-    zero_point = zero_point.view(-1)
-    if num_zp_bits == 4:
-        zero_point = zero_point[..., 1::2] * 16 + zero_point[..., ::2]
-    zero_point = zero_point.view(torch.int32).view(-1, shape_n * num_zp_bits // 32)
-    if num_experts is not None:
-        zero_point = zero_point.view(num_experts, -1, zero_point.size(-1))
-    return zero_point
+    return transform_humming_zero_point(zero_point, dtype, packed)
 
 
 def prepare_humming_bias(bias: torch.Tensor) -> torch.Tensor:
-    bias = prepare_humming_weight_scale(bias.unsqueeze(-1), True)
-    assert bias is not None
-    return bias.squeeze(-2)
+    warnings.warn(
+        "prepare_humming_bias is deprecated; use humming.transform.transform_humming_bias",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from humming.transform import transform_humming_bias
+
+    return transform_humming_bias(bias)

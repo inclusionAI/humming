@@ -5,16 +5,16 @@ import torch
 
 from humming import dtypes, ops
 from humming.kernel.humming import HummingKernel
+from humming.transform import (
+    transform_humming_bias,
+    transform_humming_weight,
+    transform_humming_weight_scale,
+)
 from humming.utils.test import (
     generate_random_bias,
     generate_random_inputs,
     generate_random_weight,
     skip_if_unsupported,
-)
-from humming.utils.weight import (
-    prepare_humming_bias,
-    prepare_humming_weight,
-    prepare_humming_weight_scale,
 )
 
 
@@ -123,8 +123,8 @@ def test_scale(
     elif mma_type == "wgmma":
         to_apply_on_c = weight_scale_group_size == 0
 
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
         m=128,
@@ -250,9 +250,9 @@ def test_global_scale(
 
     to_apply_on_c = weight_scale_group_size == 0 or a_dtype.num_bits != 16
 
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype)
     if weight_scale is not None:
-        weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+        weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
         weight_scale_2 = global_scale
     else:
         # tensor-only: the lone scalar rides the weight_scale (bs) slot
@@ -383,9 +383,9 @@ def test_group_channel_scale(
     to_apply_on_c = a_dtype.num_bits != 16
 
     torch_dtype = dtypes.torch_dtype_map[c_dtype]
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
-    weight_scale_2 = prepare_humming_bias(weight_scale_2.to(torch_dtype))
+    weight = transform_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+    weight_scale_2 = transform_humming_bias(weight_scale_2.to(torch_dtype))
 
     bias = None
     if has_bias:
@@ -431,7 +431,7 @@ def test_group_channel_scale(
         input_scale=input_scale,
         weight_scale=weight_scale,
         weight_scale_2=weight_scale_2,
-        bias=None if bias is None else prepare_humming_bias(bias),
+        bias=None if bias is None else transform_humming_bias(bias),
     )
 
     if a_dtype.num_bits == 16 and weight_scale is not None and weight_scale.size(-2) > 1:
@@ -513,8 +513,8 @@ def test_int_weight_scale(
     weight_ref = weight_ref * scale_factor
     weight_scale = weight_scale.view(dtype)
 
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=to_apply_on_c)
     if has_global_scale:
         global_scale = global_scale * scale_factor
     else:
@@ -611,8 +611,8 @@ def test_fused_e8m0_weight_scale(
 
     scale_factor = 2 ** (scale_min_new.view(-1).float() - 127)
     scale_factor = scale_factor / 2
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype, interleave_mode=2)
-    weight_scale = prepare_humming_weight_scale(weight_scale, to_apply_on_c=False)
+    weight = transform_humming_weight(weight, b_dtype, a_dtype, interleave_mode=2)
+    weight_scale = transform_humming_weight_scale(weight_scale, to_apply_on_c=False)
     if has_global_scale:
         global_scale = global_scale * scale_factor
     else:
@@ -732,7 +732,7 @@ def test_block_scale(
     if a_dtype == b_dtype and a_dtype in (dtypes.int4, dtypes.int8):
         weight = (weight.view(torch.int8) + (1 << (a_dtype.num_bits - 1))).view(torch.int32)
 
-    weight = prepare_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
+    weight = transform_humming_weight(weight, b_dtype, a_dtype, use_wgmma=mma_type == "wgmma")
     weight_scale = weight_scale.transpose(-1, -2).contiguous()
 
     _, inputs_ref, inputs, input_scale = generate_random_inputs(
@@ -791,9 +791,7 @@ def test_block_scale(
         prev_fp16_accum = torch.backends.cuda.matmul.allow_fp16_accumulation
         torch.backends.cuda.matmul.allow_fp16_accumulation = True
         try:
-            outputs_ref = (
-                inputs_ref.to(torch_dtype).matmul(weight_ref.to(torch_dtype).T).to(torch_dtype)
-            )
+            outputs_ref = inputs_ref.to(torch_dtype).matmul(weight_ref.to(torch_dtype).T).to(torch_dtype)
         finally:
             torch.backends.cuda.matmul.allow_fp16_accumulation = prev_fp16_accum
         atol = 0.5
@@ -839,6 +837,7 @@ def test_fused_e8m0_layer(weight_scale_2_type):
     meta = layer.humming_metas[""]
     assert meta.use_fused_e8m0_scale is True
     assert meta.weight_scale_2_type.value == weight_scale_2_type
+    assert meta.weight_scale_2_name == "weight_scale_2"
 
     inputs = torch.randn((64, 1024), dtype=torch.bfloat16, device="cuda")
     outputs = layer(inputs)

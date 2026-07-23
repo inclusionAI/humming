@@ -45,7 +45,7 @@ include-package-data = true
 packages = {find = {include = ["humming", "humming.*"]}}
 
 [tool.setuptools.package-data]
-"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc"]
+"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc", "**/*.so", "_native/*/nvrtc_compile"]
 
 [tool.ruff]
 line-length = 110
