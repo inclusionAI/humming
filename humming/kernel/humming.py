@@ -374,6 +374,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     def check_config(self):
         if self.use_warp_spec or self.use_tma:
             assert self.use_mbarrier
+        if self.use_fp32_stream_k_reduce:
+            assert self.is_indexed_gemm
+            assert not self.use_f16_accum
+            assert not self.use_tma_c
+            assert self.use_fused_e8m0_scale or self.is_tensor_weight_scale
         is_channel_weight_scale = self.is_channel_weight_scale
         is_group_weight_scale = self.is_group_weight_scale
         if not (is_channel_weight_scale or is_group_weight_scale):

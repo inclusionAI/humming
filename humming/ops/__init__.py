@@ -19,6 +19,50 @@ from humming.ops.weight import (
     unpack_weight,
 )
 
+_streamk_workspaces: dict[tuple[int, int], torch.Tensor] = {}
+
+
+def _select_kernel(configs: torch.Tensor, shape_m: int) -> HummingKernel:
+    values = configs.tolist()
+    if len(values) <= 2:
+        kernel_id = values[0]
+    else:
+        kernel_id = None
+        for i in range(0, len(values), 4):
+            min_shape_m, max_shape_m, candidate, _ = values[i : i + 4]
+            max_shape_m = max_shape_m if max_shape_m > 0 else 1 << 30
+            if shape_m > min_shape_m and shape_m <= max_shape_m:
+                kernel_id = candidate
+                break
+        if kernel_id is None:
+            raise ValueError(f"no Humming kernel config found for shape_m={shape_m}")
+    return HummingKernel._id2kernel[kernel_id]
+
+
+def _get_streamk_workspace(
+    inputs: torch.Tensor,
+    locks: torch.Tensor,
+    kernel: HummingKernel,
+) -> torch.Tensor:
+    stream = torch.cuda.current_stream(inputs.device)
+    device_index = inputs.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    key = (device_index, stream.cuda_stream)
+    numel = _required_streamk_workspace_numel(locks, kernel)
+    workspace = _streamk_workspaces.get(key)
+    if workspace is None or workspace.numel() < numel:
+        workspace = torch.empty((numel,), dtype=torch.float32, device=inputs.device)
+        _streamk_workspaces[key] = workspace
+    return workspace
+
+
+def _required_streamk_workspace_numel(
+    locks: torch.Tensor,
+    kernel: HummingKernel,
+) -> int:
+    return locks.numel() * kernel.block_shape[0] * kernel.block_shape[1]
+
 
 def register_kernel(cubin_path: str) -> tuple[int, str]:
     init_humming_launcher()
@@ -41,6 +85,7 @@ def launch_kernel(
     num_tokens_padded: torch.Tensor | None = None,
     expert_layout: torch.Tensor | None = None,
     locks: torch.Tensor | None = None,
+    streamk_workspace: torch.Tensor | None = None,
     top_k: int = 1,
     valid_shape_m: int = 0,
 ) -> torch.Tensor:
@@ -62,6 +107,7 @@ def launch_kernel(
         num_tokens_padded,
         expert_layout,
         locks,
+        streamk_workspace,
         top_k,
         valid_shape_m,
     )
@@ -85,11 +131,27 @@ def humming_gemm(
     num_tokens_padded: torch.Tensor | None = None,
     expert_layout: torch.Tensor | None = None,
     locks: torch.Tensor | None = None,
+    streamk_workspace: torch.Tensor | None = None,
     top_k: int = 1,
     valid_shape_m: int = 0,
 ) -> torch.Tensor:
     assert weight_scale is not None, "weight_scale is required (a lone scale also rides this slot)"
     configs = HummingKernel.prepare_kernels(layer_config, compute_config, tuning_config)
+    base_kernel = _select_kernel(configs, 1)
+    output_shape_m = valid_shape_m
+    if output_shape_m <= 0:
+        output_shape_m = inputs.size(0) * (top_k if base_kernel.is_indexed_gemm else 1)
+    kernel = _select_kernel(configs, output_shape_m)
+    if kernel.use_fp32_stream_k_reduce and kernel.use_stream_k:
+        assert locks is not None, "locks are required for FP32 Stream-K reduction"
+        if streamk_workspace is None:
+            streamk_workspace = _get_streamk_workspace(inputs, locks, kernel)
+        else:
+            required_numel = _required_streamk_workspace_numel(locks, kernel)
+            assert streamk_workspace.numel() >= required_numel, (
+                f"streamk_workspace has {streamk_workspace.numel()} elements, "
+                f"but {required_numel} are required"
+            )
     return torch.ops.humming.launch_kernel(
         configs,
         inputs,
@@ -105,6 +167,7 @@ def humming_gemm(
         num_tokens_padded,
         expert_layout,
         locks,
+        streamk_workspace,
         top_k,
         valid_shape_m,
     )
@@ -128,6 +191,7 @@ def _humming_gemm_fake(
     num_tokens_padded: torch.Tensor | None = None,
     expert_layout: torch.Tensor | None = None,
     locks: torch.Tensor | None = None,
+    streamk_workspace: torch.Tensor | None = None,
     top_k: int = 1,
     valid_shape_m: int = 0,
 ) -> torch.Tensor:

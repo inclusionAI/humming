@@ -208,4 +208,103 @@ public:
       }
     }
   }
+
+  CUDA_INLINE
+  void write_float(uint32_t *regs_ptr, uint32_t split_idx) {
+    static_assert(!Ctx::kUseF16Accum);
+    if (threadIdx.x >= kNumMathThreads / K_WARPS) return;
+
+    auto &regs = *reinterpret_cast<CRegistersArrayType *>(regs_ptr);
+    float2 *smem_float2_ptr = reinterpret_cast<float2 *>(ctx.smem.reduce);
+    uint32_t smem = offsetof(SharedStorage, reduce) / 128 % 8;
+    using PackTypeC = std::conditional_t<
+        sizeof(ValTypeC) == 2, scalar_t2,
+        std::conditional_t<kIsIntAccum, int2, float2>>;
+
+    uint32_t laneid = ctx.lane_id();
+    uint32_t warpid = ctx.warp_id();
+    uint32_t warp_delta_row = ctx.m_warp_offset();
+    uint32_t n_warp_id = ctx.n_warp_id();
+    auto write_to_smem = [&](PackTypeC val, uint32_t row_8x8block, uint32_t col_8x8block) {
+      static_assert(kNumWriteSplits == 1 || kNumWriteSplits == 2);
+      if constexpr (kNumWriteSplits == 2) {
+        static_assert(M_WARPS == 1);
+        uint32_t m_8x8block = kUseWgmma ? col_8x8block : row_8x8block;
+        if (split_idx == 0 && m_8x8block >= BlockShape::M / 8 / 2) return;
+        if (split_idx == 1 && m_8x8block < BlockShape::M / 8 / 2) return;
+      }
+
+      if constexpr (kUseWgmma) shlf_trans_mma_c(val);
+
+      float2 val_float2;
+      if constexpr (sizeof(ValTypeC) != 4) {
+        val_float2 = this->num22float2(val);
+      } else if constexpr (kIsIntAccum) {
+        val_float2 = {__int2float_rn(val.x), __int2float_rn(val.y)};
+        if constexpr (kUseWgmma) {
+          arith.may_apply_f32_on_smem_write(val_float2, col_8x8block, row_8x8block);
+        } else {
+          arith.may_apply_f32_on_smem_write(val_float2, row_8x8block, col_8x8block);
+        }
+      } else {
+        val_float2 = val;
+        if constexpr (kUseWgmma) {
+          arith.may_apply_f32_on_smem_write(val_float2, col_8x8block, row_8x8block);
+        } else {
+          arith.may_apply_f32_on_smem_write(val_float2, row_8x8block, col_8x8block);
+        }
+      }
+
+      if constexpr (kUseWgmma) {
+        arith.may_apply_on_smem_write_float(val_float2, col_8x8block, row_8x8block);
+        col_8x8block -= BlockShape::M / 8 / 2 * split_idx;
+      } else {
+        arith.may_apply_on_smem_write_float(val_float2, row_8x8block, col_8x8block);
+        row_8x8block -= BlockShape::M / 8 / 2 * split_idx;
+      }
+
+      if constexpr (!kUseWgmma) {
+        uint32_t sub_row = laneid / 4;
+        uint32_t row = warp_delta_row + 8 * row_8x8block + sub_row;
+        uint32_t col = col_8x8block * 4 + WarpShape::N / 2 * n_warp_id;
+
+        row += (BlockShape::M / kNumWriteSplits) * (col / 32);
+        col = ((col % 32 / 4) ^ ((sub_row + smem) % 8)) * 4 + laneid % 4;
+
+        uint32_t idx = row * 32 + col;
+        smem_float2_ptr[idx] = val_float2;
+      } else {
+        uint32_t sub_row = (laneid % 4) * 2 + (laneid % 8) / 4;
+        uint32_t row = warp_delta_row + 8 * col_8x8block + sub_row;
+
+        uint32_t count = 64 / WarpShape::N;
+        uint32_t col1 =
+            ((n_warp_id % count * (8 / count) + row_8x8block) ^ ((sub_row + smem) % 8)) * 4 +
+            laneid / 8;
+        uint32_t col2 = (n_warp_id / count) * (BlockShape::M / kNumWriteSplits * 64 / 2);
+        uint32_t idx = row * 32 + col1 + col2;
+        smem_float2_ptr[idx] = val_float2;
+      }
+    };
+
+    PRAGMA_UNROLL
+    for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+      PRAGMA_UNROLL
+      for (uint32_t j = 0; j < sizeof(regs[0]) / sizeof(regs[0][0]); j++) {
+        auto part_regs = reinterpret_cast<PackTypeC *>(&regs[i][j]);
+        constexpr uint32_t inner_m = (kUseWgmma ? (MmaShape::N / 4) : MmaShape::M) / 8;
+        constexpr uint32_t inner_n = sizeof(regs[0][0]) / sizeof(PackTypeC) / inner_m;
+
+        PRAGMA_UNROLL
+        for (uint32_t m = 0; m < inner_m; m++) {
+          PRAGMA_UNROLL
+          for (uint32_t n = 0; n < inner_n; n++) {
+            uint32_t row_index = i * inner_m + m;
+            uint32_t col_index = j * inner_n + n;
+            write_to_smem(part_regs[n * inner_m + m], row_index, col_index);
+          }
+        }
+      }
+    }
+  }
 };

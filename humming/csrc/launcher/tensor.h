@@ -215,6 +215,11 @@ inline void check_tensor_locks(std::optional<Tensor> &tensor, KernelData &kernel
   check_tensor_common(tensor.value(), "locks", dev, ScalarType::Int);
 };
 
+inline void check_tensor_streamk_workspace(std::optional<Tensor> &tensor, int64_t dev) {
+  if (!tensor.has_value()) return;
+  check_tensor_common(tensor.value(), "streamk_workspace", dev, ScalarType::Float);
+};
+
 inline void check_tensor_moe(
     std::optional<Tensor> &sorted_ids,
     std::optional<Tensor> &expert_ids,

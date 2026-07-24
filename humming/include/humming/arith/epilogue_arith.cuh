@@ -84,6 +84,24 @@ public:
   };
 
   CUDA_INLINE
+  void may_apply_on_smem_write_float(float2 &regs, uint32_t row, uint32_t col) {
+    static_assert(!kIsF16Accum);
+
+    if constexpr (kExpOffset.x && !kHasTensorWeightScale) {
+      const float scale_factor = prepare_exp_scale_factor<float, kExpOffset.x>();
+      regs.x *= scale_factor;
+      regs.y *= scale_factor;
+    }
+
+    if constexpr (kHasBias) {
+      scalar_t2 *bias_half2 = reinterpret_cast<scalar_t2 *>(bias);
+      float2 bias_float2 = this->num22float2(bias_half2[col]);
+      regs.x += bias_float2.x;
+      regs.y += bias_float2.y;
+    }
+  };
+
+  CUDA_INLINE
   void may_process_on_smem_write(uint32_t row, uint32_t col) {
     if (kHasTensorWeightScale && kIsF16Accum && row == 0 && col == 0) {
       scalar_t2 &gs_scalar2 = *reinterpret_cast<scalar_t2 *>(&gs);

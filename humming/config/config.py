@@ -313,6 +313,7 @@ class TuningConfig(BaseHummingConfig):
     warp_shape: tuple[int, int, int]
 
     use_stream_k: bool = True
+    use_fp32_stream_k_reduce: bool = False
 
     num_stages: int = 2
     num_ctas_per_sm: int = 1

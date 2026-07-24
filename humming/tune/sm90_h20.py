@@ -208,6 +208,12 @@ class Sm90H20Heuristics(DeviceHeuristics):
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
             "use_stream_k": layer_config.shape_k > 1024,
+            "use_fp32_stream_k_reduce": (
+                layer_config.use_fused_e8m0_scale
+                and gemm_type == GemmType.INDEXED
+                and layer_config.shape_k > 1024
+                and not use_f16_accum
+            ),
             "use_f16_accum": use_f16_accum,
             "num_sms": num_sms,
             "num_stages": num_stages,
