@@ -93,6 +93,13 @@ public:
       regs.y *= scale_factor;
     }
 
+    if constexpr (kIsChannelWeightScale2) {
+      scalar_t2 *channel_scale_half2 = reinterpret_cast<scalar_t2 *>(bs2);
+      float2 channel_scale = this->num22float2(channel_scale_half2[col]);
+      regs.x *= channel_scale.x;
+      regs.y *= channel_scale.y;
+    }
+
     if constexpr (kHasBias) {
       scalar_t2 *bias_half2 = reinterpret_cast<scalar_t2 *>(bias);
       float2 bias_float2 = this->num22float2(bias_half2[col]);

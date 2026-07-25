@@ -8,11 +8,15 @@ import torch.nn.functional as F
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig
 from humming.transform import (
+    process_fused_e8m0_scale,
+    transform_humming_bias,
     transform_humming_weight,
+    transform_humming_weight_scale,
 )
 from humming.tune.sm90_h20 import Sm90H20Heuristics
 from humming.utils.test import (
     generate_random_inputs,
+    generate_random_weight,
     skip_if_unsupported,
 )
 
@@ -95,13 +99,14 @@ def _make_indexed_metadata(
 
 
 def test_indexed_streamk_fp32_reduce_is_batch_invariant():
-    """Keep split-K partials in FP32 until the final BF16 output conversion."""
-    skip_if_unsupported(a_dtype=dtypes.bfloat16, mma_type="mma")
+    """Preserve FP32 partials and apply channel scale and bias exactly once."""
+    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="mma")
 
     small_m = 32
     large_m = 128
     shape_n = 1024
     shape_k = 2048
+    weight_scale_group_size = 32
     num_experts = 16
     top_k = 8
     block_m = 32
@@ -109,24 +114,61 @@ def test_indexed_streamk_fp32_reduce_is_batch_invariant():
 
     torch.manual_seed(7)
     torch.cuda.manual_seed(7)
-    weight = torch.randint(
-        0,
-        16,
-        (num_experts, shape_n, shape_k),
-        dtype=torch.int32,
-        device="cuda",
+    _, _, weight, weight_scale, _, weight_scale_2 = generate_random_weight(
+        n=shape_n,
+        k=shape_k,
+        group_size=weight_scale_group_size,
+        dtype=dtypes.float4e2m1,
+        scale_dtype=dtypes.float8e8m0,
+        num_experts=num_experts,
+        weight_scale_2_type="channel",
     )
-    weight = transform_humming_weight(weight, dtypes.uint4, dtypes.bfloat16)
-    weight_scale = torch.ones(
-        (num_experts,),
-        dtype=torch.float32,
-        device=weight.device,
+    layer_config = LayerConfig(
+        shape_n=shape_n,
+        shape_k=shape_k,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        c_dtype=dtypes.bfloat16,
+        bs_dtype=dtypes.float8e8m0,
+        input_scale_group_size=0,
+        weight_scale_group_size=weight_scale_group_size,
+        num_experts=num_experts,
+        has_bias=True,
+        mma_type="mma",
+        weight_scale_type="group",
+        weight_scale_2_type="channel",
+        use_fused_e8m0_scale=True,
     )
-    _, _, inputs, _ = generate_random_inputs(
+    weight, weight_scale, weight_scale_2 = process_fused_e8m0_scale(
+        layer_config,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_scale_2=weight_scale_2,
+    )
+    weight = transform_humming_weight(
+        weight,
+        dtypes.float4e2m1,
+        dtypes.float8e4m3,
+        use_fused_e8m0_scale=True,
+        interleave_mode=2,
+    )
+    weight_scale = transform_humming_weight_scale(
+        weight_scale,
+        to_apply_on_c=False,
+    )
+    weight_scale_2 = transform_humming_bias(weight_scale_2.to(torch.bfloat16))
+    bias = transform_humming_bias(
+        torch.randn(
+            (num_experts, shape_n),
+            dtype=torch.bfloat16,
+            device=weight.device,
+        )
+    )
+    _, _, inputs, input_scale = generate_random_inputs(
         m=large_m,
         k=shape_k,
         group_size=0,
-        dtype=dtypes.bfloat16,
+        dtype=dtypes.float8e4m3,
     )
     generator = torch.Generator(device=inputs.device).manual_seed(19)
     scores = torch.randn(
@@ -136,18 +178,6 @@ def test_indexed_streamk_fp32_reduce_is_batch_invariant():
     )
     topk_ids = torch.topk(scores, top_k, dim=1).indices.to(torch.int32)
 
-    layer_config = LayerConfig(
-        shape_n=shape_n,
-        shape_k=shape_k,
-        a_dtype=dtypes.bfloat16,
-        b_dtype=dtypes.uint4,
-        c_dtype=dtypes.bfloat16,
-        bs_dtype=dtypes.bfloat16,
-        num_experts=num_experts,
-        has_bias=False,
-        mma_type="mma",
-        weight_scale_type="tensor",
-    )
     compute_config = ComputeConfig(
         use_f16_accum=False,
         gemm_type="indexed",
@@ -188,8 +218,11 @@ def test_indexed_streamk_fp32_reduce_is_batch_invariant():
             compute_config=compute_config.to_str(),
             tuning_config=selected_tuning_config,
             inputs=inputs[:shape_m],
+            input_scale=input_scale[:shape_m],
             weight=weight,
             weight_scale=weight_scale,
+            weight_scale_2=weight_scale_2,
+            bias=bias,
             outputs=output,
             sorted_ids=sorted_ids,
             expert_ids=expert_ids,
