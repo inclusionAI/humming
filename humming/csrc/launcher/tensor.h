@@ -174,13 +174,18 @@ inline void check_tensor_bzp(std::optional<Tensor> &tensor, KernelData &kernel_d
 
   std::vector<int64_t> expected_shape = {};
   if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
-  expected_shape.push_back(num_groups);
   ScalarType expected_dtype;
   if (kernel_data.is_fp_zero_point) {
+    expected_shape.push_back(num_groups);
     expected_shape.push_back(kernel_data.problem_shape_n);
     expected_dtype = dtype_id_to_tensor_dtype(kernel_data.c_dtype_id);
   } else {
-    expected_shape.push_back(kernel_data.problem_shape_n * num_bits / 32);
+    uint32_t scale_vec = 1;
+    if (kernel_data.mma_type_id == 3 && get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
+      scale_vec = 256 / 4 / group_size;
+    }
+    expected_shape.push_back(num_groups / scale_vec);
+    expected_shape.push_back(kernel_data.problem_shape_n * num_bits * scale_vec / 32);
     expected_dtype = ScalarType::Int;
   }
   check_tensor_common(tensor.value(), "bzp", dev, expected_dtype, expected_shape);
@@ -352,6 +357,11 @@ inline CUtensorMap make_tma_desc_bzp(std::optional<Tensor> &tensor_, KernelData 
   }
 
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id) <= 4 ? 4 : 8;
+  if (kernel_data.mma_type_id == 3 &&
+      get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
+    uint32_t scale_vec = 256 / 4 / group_size;
+    if (scale_vec > 1) return make_tma_desc(tensor, {block_shape_n * num_bits * scale_vec / 32, num_groups / scale_vec}, 0, "bzp");
+  }
   return make_tma_desc(tensor, {block_shape_n * num_bits / 32, num_groups}, 0, "bzp");
 }
 

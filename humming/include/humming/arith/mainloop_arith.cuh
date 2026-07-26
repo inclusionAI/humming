@@ -24,6 +24,7 @@ private:
   using MmaShape = typename MmaOpClass::MmaShape;
 
   static constexpr bool kUseWgmma = Ctx::kUseWgmma;
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr bool kIsF16Accum = MmaOpClass::kCTypeBits == 16;
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
 
@@ -41,6 +42,7 @@ private:
 
   static constexpr uint32_t kInputScaleGroupSize = kIsGroupInputScale ? Ctx::kInputScaleGroupSize : 1;
   static constexpr uint32_t kWeightScaleGroupSize = kIsGroupOrBlockWeightScale ? Ctx::kWeightScaleGroupSize : 1;
+  static constexpr uint32_t kNumZPGroupsPerMma = kUseMxmma && ElementA::kBits == 4 && kIsGroupWeightScale ? kPartMmaShapeK / kWeightScaleGroupSize : 1;
 
   static constexpr bool kUsePackedKLayout = Ctx::kUsePackedKLayout;
   static constexpr uint32_t kPackedKFactor = Ctx::kPackedKFactor;
@@ -64,7 +66,7 @@ public:
   uint32_t q_as[kNumASPerGroup];
   uint32_t bs[2][MAX(kNumBSPerGroup, 8) * ElementBS::kBits / 32];
   uint32_t dq_bs[MAX(kNumBSPerGroup, 8) * kDequantBSBits / 32];
-  uint32_t zp[2][kIsFpZeroPoint ? 4 : CEIL_DIV(ElementB::kBits, 4)];
+  uint32_t zp[2][(kIsFpZeroPoint ? 4 : CEIL_DIV(ElementB::kBits, 4)) * kNumZPGroupsPerMma];
 
   uint32_t _dummy;
 
@@ -81,11 +83,21 @@ public:
       for (uint32_t i = 0; i < 2; i++) {
         PRAGMA_UNROLL
         for (uint32_t j = 0; j < 2; j++) {
-          uint32_t n_id = 0;
-          if (WarpShape::N == 64 && ElementB::kBits > 4 && index >= 2) n_id = 1;
-
-          uint32_t dzp_val = zp[buffer_id][n_id];
-          dzp_val = dzp_val >> ((index * 2 + j) % kNumZPsPerInt * kNumZPBits);
+          uint32_t dzp_val;
+          if constexpr (kNumZPGroupsPerMma > 1) {
+            constexpr uint32_t kValuesPerLane = 32 / ElementA::kBits;
+            constexpr uint32_t kZPBytesPerGroup = CEIL_DIV(kNumZPBits, 8);
+            uint32_t k_offset = i * (kPartMmaShapeK / 2) + threadIdx.x % 4 * kValuesPerLane;
+            uint32_t zp_group = k_offset / kWeightScaleGroupSize;
+            uint32_t byte_id = index * kNumZPGroupsPerMma * kZPBytesPerGroup + zp_group * kZPBytesPerGroup;
+            dzp_val = zp[buffer_id][byte_id / 4] >> (byte_id % 4 * 8);
+            dzp_val = dzp_val >> (j * kNumZPBits);
+          } else {
+            uint32_t n_id = 0;
+            if (WarpShape::N == 64 && ElementB::kBits > 4 && index >= 2) n_id = 1;
+            dzp_val = zp[buffer_id][n_id];
+            dzp_val = dzp_val >> ((index * 2 + j) % kNumZPsPerInt * kNumZPBits);
+          }
           uint32_t zp_idx = kUseWgmma ? (i * 2 + j) : (j * 2 + i);
           zp_vals[zp_idx] = dequant_single_zero_point<ElementB, ElementA>(dzp_val);
         }
