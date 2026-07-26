@@ -34,7 +34,7 @@ CUDA_INLINE void debug_kernel_timeout_check(
     uint64_t start_clock,
     const char *message = "Humming kernel execution timeout") {
 #if HUMMING_DEBUG_KERNEL
-  if (clock64() - start_clock >= kDebugKernelTimeoutClocks) {
+  if ((threadIdx.x % 32) == 0 && clock64() - start_clock >= kDebugKernelTimeoutClocks) {
     __assertfail(message, __FILE__, __LINE__, __func__, 1);
   }
 #endif

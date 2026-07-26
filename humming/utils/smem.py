@@ -1,6 +1,12 @@
 import math
 
-from humming.config import GemmType, LayerConfig, MmaType
+from humming.config import (
+    ComputeConfig,
+    GemmType,
+    LayerConfig,
+    MmaType,
+    TuningConfig,
+)
 
 _INT4 = 16
 
@@ -89,16 +95,18 @@ def estimate_smem_size_layer(
     channel_zp = layer_config.has_zero_point and layer_config.is_channel_weight_scale
     channel_zp_bytes = (block_n * zp_bits // 8) if channel_zp else 0
     channel_bs_bytes = (block_n * bs_bits // 8) if layer_config.is_channel_weight_scale else 0
+    channel_bs2_bytes = (block_n * 16 // 8) if layer_config.is_channel_weight_scale_2 else 0
     bias_bytes = (block_n * 2) if layer_config.has_bias else 0
     channel_as_bytes = (block_m * 4) if (a_bits != 16 and layer_config.input_scale_group_size == 0) else 0
 
     struct_a = _struct_size(
         [
             (channel_zp_bytes, 128),
-            (stage_bytes * num_stages, 1024),
             (channel_bs_bytes, 128),
+            (channel_bs2_bytes, 128),
             (bias_bytes, 128),
             (channel_as_bytes, 128),
+            (stage_bytes * num_stages, 1024),
         ],
         1024,
     )
@@ -114,6 +122,10 @@ def estimate_smem_size_layer(
     struct_b_fields: list[tuple[int, int]] = []
     if reduce_overlap_last_stage_only:
         struct_b_fields.append((channel_zp_bytes, 128))
+        struct_b_fields.append((channel_bs_bytes, 128))
+        struct_b_fields.append((channel_bs2_bytes, 128))
+        struct_b_fields.append((bias_bytes, 128))
+        struct_b_fields.append((channel_as_bytes, 128))
         struct_b_fields.append((stage_bytes * (num_stages - 1), 1024))
     struct_b_fields.append((reduce_bytes, 128))
     struct_b = _struct_size(struct_b_fields, 1024)
@@ -144,3 +156,28 @@ def estimate_smem_size_layer(
         add((num_stages + 1) * 8, 8)  # math_mbar
 
     return _align_up(offset, 1024)
+
+
+def estimate_smem_size_config(
+    layer_config: LayerConfig,
+    compute_config: ComputeConfig,
+    tuning_config: TuningConfig,
+) -> int:
+    gemm_type = compute_config.gemm_type
+    if gemm_type is None:
+        if layer_config.num_experts:
+            raise ValueError("gemm_type must be specified for MoE GEMM")
+        gemm_type = GemmType.DENSE
+
+    return estimate_smem_size_layer(
+        layer_config,
+        tuning_config.block_shape,
+        gemm_type,
+        tuning_config.num_stages,
+        warp_shape=tuning_config.warp_shape,
+        reduce_overlap_last_stage_only=tuning_config.reduce_overlap_last_stage_only,
+        use_mbarrier=bool(tuning_config.use_mbarrier),
+        use_warp_spec=bool(tuning_config.use_warp_spec),
+        num_write_splits=tuning_config.num_write_splits,
+        mma_accum_bits=16 if compute_config.use_f16_accum else 32,
+    )

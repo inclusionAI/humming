@@ -96,6 +96,9 @@ template <
     class LayerConfig, class ComputeConfig, class TuningConfig>
 struct SharedStorage {
 private:
+  static_assert(!TuningConfig::kReduceOverlapLastStageOnly || TuningConfig::kNumStages > 2);
+  static_assert(!TuningConfig::kReduceOverlapLastStageOnly || ComputeConfig::kGemmType != GemmType::INDEXED);
+
   static constexpr bool kUseMxmma = MmaOpClass::kMmaType == MmaType::MXMMA;
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
   static constexpr bool kIsChannelInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize == 0;
@@ -154,6 +157,7 @@ public:
   static constexpr uint32_t kChannelBytesAS = kChannelSizeAS * sizeof(int4);
   static constexpr uint32_t kChannelBytesBS = kChannelSizeBS * sizeof(int4);
   static constexpr uint32_t kChannelBytesBS2 = kChannelSizeBS2 * sizeof(int4);
+  static constexpr uint32_t kChannelBytesBZP = kChannelSizeBZP * sizeof(int4);
   static constexpr uint32_t kBiasBytes = kBiasSize * sizeof(int4);
 
   static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
@@ -172,14 +176,18 @@ public:
   union alignas(1024) {
     struct {
       IF_HAS_CHANNEL_ZERO_POINT(alignas(128) int4 bzp_c[kChannelSizeBZP];)
-      StageStorage stages[kNumStages];
       IF_HAS_CHANNEL_WEIGHT_SCALE(alignas(128) int4 bs_c[kChannelSizeBS];)
       IF_HAS_CHANNEL_WEIGHT_SCALE_2(alignas(128) int4 bs2_c[kChannelSizeBS2];)
       IF_HAS_BIAS(alignas(128) int4 bias[kBiasSize];)
       IF_HAS_CHANNEL_INPUT_SCALE(alignas(128) int4 as_c[kChannelSizeAS];)
+      StageStorage stages[kNumStages];
     };
     struct {
       IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_ZERO_POINT(alignas(128) int4 reduce_skip_bzp_c[kChannelSizeBZP];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_WEIGHT_SCALE(alignas(128) int4 reduce_skip_bs_c[kChannelSizeBS];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_WEIGHT_SCALE_2(alignas(128) int4 reduce_skip_bs2_c[kChannelSizeBS2];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_BIAS(alignas(128) int4 reduce_skip_bias[kBiasSize];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_INPUT_SCALE(alignas(128) int4 reduce_skip_as_c[kChannelSizeAS];))
       IF_REDUCE_LAST_STAGE_ONLY(StageStorage reduce_skip[kNumStages - 1];)
       alignas(128) int4 reduce[MAX(kWarpReduceSize, kBlockOutputSize)];
     };

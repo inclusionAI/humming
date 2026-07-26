@@ -86,7 +86,7 @@ CUDA_INLINE void barrier_release2(int *lock, int32_t val) {
 }
 
 CUDA_INLINE
-void mbarrier_wait(void *barrier, bool phase_parity) {
+void mbarrier_wait(void *barrier, bool phase_parity, const char *timeout_message = "Humming mbarrier timeout") {
   uint32_t smem_int_mbar = cast_smem_ptr_to_uint(barrier);
 #if HUMMING_DEBUG_KERNEL
   uint64_t start_clock = debug_kernel_timer_start();
@@ -102,7 +102,7 @@ void mbarrier_wait(void *barrier, bool phase_parity) {
                  : "=r"(ready)
                  : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
                  : "memory");
-    debug_kernel_timeout_check(start_clock, "Humming mbarrier timeout");
+    debug_kernel_timeout_check(start_clock, timeout_message);
   } while (!ready);
 #else
   do {
@@ -114,7 +114,7 @@ void mbarrier_wait(void *barrier, bool phase_parity) {
                  : "=r"(ready)
                  : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
                  : "memory");
-    debug_kernel_timeout_check(start_clock, "Humming mbarrier timeout");
+    debug_kernel_timeout_check(start_clock, timeout_message);
   } while (!ready);
 #endif
 #else

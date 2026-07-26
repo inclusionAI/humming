@@ -93,9 +93,16 @@ class Sm120Heuristics(Sm89Heuristics):
             config["use_warp_spec"] = False
 
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
-        if cls._is_mxmma(layer_config.a_dtype, group_size, layer_config.use_fused_e8m0_scale):
-            config["reduce_overlap_last_stage_only"] = True
-            config["num_stages"] = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=True)
+        is_mxmma = cls._is_mxmma(layer_config.a_dtype, group_size, layer_config.use_fused_e8m0_scale)
+        if gemm_type != GemmType.INDEXED and is_mxmma:
+            num_stages = cls._fit_num_stages(
+                layer_config,
+                config,
+                gemm_type,
+                reduce_overlap=True,
+            )
+            config["num_stages"] = num_stages
+            config["reduce_overlap_last_stage_only"] = num_stages > 2
 
         return config
 

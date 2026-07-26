@@ -309,7 +309,7 @@ public:
     const int4 *gmem_ptr_load = reinterpret_cast<const int4 *>(gmem_ptr);
     int4 *smem_ptr_load = reinterpret_cast<int4 *>(ctx.smem.wr_row_index);
 
-    legacy_load_1d<kUseCpAsync, BlockShape::M / 4, kNumLoadThreads>(gmem_ptr_load, smem_ptr_load);
+    legacy_load_1d<kUseCpAsync, BlockShape::M / 4, kNumLoadThreads, kLoadThreadOffset>(gmem_ptr_load, smem_ptr_load);
     if constexpr (kUseCpAsync) cp_async_commit_group();
     if constexpr (kUseCpAsync) cp_async_wait_group<0>();
 

@@ -49,9 +49,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     bool use_int64_expert_layout) {
 
   uint64_t debug_start_clock = debug_kernel_timer_start();
-  constexpr uint32_t kNumThreads = TuningConfig::kNumThreads;
   constexpr uint32_t kNumStages = TuningConfig::kNumStages;
   constexpr bool kReduceOverlapLastStageOnly = TuningConfig::kReduceOverlapLastStageOnly;
+  constexpr uint32_t kLoadThreadRegisters = TuningConfig::kNumMathThreads > 256 || (TuningConfig::kNumCtasPerSm == 1 && ElementA::kBits != 16) ? 40 : 24;
 
   using SharedStorage = SharedStorage<
       MmaOpClass, BlockShape, WarpShape, ElementA, ElementB, ElementBS,
@@ -81,24 +81,21 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   auto ctx = Ctx(smem, params);
 
   auto scheduler = Scheduler(ctx);
+  if (ctx.is_load_thread()) ProducerPipeline::init_mbarrier(ctx);
+
+  mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
+
   if (ctx.is_load_thread()) {
-    if constexpr (TuningConfig::kNumMathThreads > 256) {
-      asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(40));
-    } else if constexpr (TuningConfig::kNumCtasPerSm == 1 && ElementA::kBits != 16) {
-      asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(40));
-    } else {
-      asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(24));
-    }
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(kLoadThreadRegisters));
 
     auto producer = ProducerPipeline(ctx);
-    producer.init_mbarrier();
-    mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
+    if constexpr (Ctx::kIsIndexedGemm) producer.wait_math_epilogue();
     while (scheduler.get_next_block()) {
       debug_kernel_timeout_check(debug_start_clock);
       uint32_t &slice_iters = scheduler.slice_iters;
 
       producer.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
-      producer.wait_math_epilogue();
+      if constexpr (!Ctx::kIsIndexedGemm) producer.wait_math_epilogue();
       producer.load_stage<true, true>(0);
       PRAGMA_UNROLL
       for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
@@ -121,13 +118,15 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           if (!slice_iters) break;
         }
       }
+      if constexpr (Ctx::kIsIndexedGemm) producer.wait_math_epilogue();
     }
   } else {
-    if constexpr (TuningConfig::kNumMathThreads > 256) {
-      asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(96));
-    } else {
-      asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(232));
-    }
+    constexpr uint32_t kPreferredMathThreadRegisters = TuningConfig::kNumMathThreads > 256 ? 96 : 232;
+    constexpr uint32_t kRegisterBudgetPerCta = (60 * 1024) / TuningConfig::kNumCtasPerSm;
+    constexpr uint32_t kLoadThreadRegisterUsage = TuningConfig::kNumLoadThreads * kLoadThreadRegisters;
+    constexpr uint32_t kRegistersAvailableForMath = kRegisterBudgetPerCta > kLoadThreadRegisterUsage ? kRegisterBudgetPerCta - kLoadThreadRegisterUsage : 0;
+    constexpr uint32_t kMathThreadRegisters = MIN(kPreferredMathThreadRegisters, MAX(24, kRegistersAvailableForMath / TuningConfig::kNumMathThreads / 8 * 8));
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(kMathThreadRegisters));
 
     auto mainloop_arith = MainloopArithmetic();
     auto epilogue_arith = EpilogueArithmetic();
@@ -136,8 +135,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     auto consumer = ConsumerPipeline(ctx);
     auto s2r_pipe = S2RMemoryPipeline(ctx, mma, epilogue);
 
-    consumer.init_mbarrier();
-    mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
     consumer.arrive(kNumStages);
 
     while (scheduler.get_next_block()) {
@@ -187,7 +184,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   }
 
   __syncthreads();
-  if constexpr (TuningConfig::kMultiCastSizeA > 0 || TuningConfig::kMultiCastSizeB > 0) {
+  if constexpr (TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB > 1) {
     asm volatile("barrier.cluster.arrive;\n");
     asm volatile("barrier.cluster.wait;\n");
   }

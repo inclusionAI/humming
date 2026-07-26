@@ -1,5 +1,52 @@
+import functools
+
 import pynvml
 import torch
+
+from humming.config import ComputeConfig, LayerConfig, TuningConfig
+from humming.utils.smem import estimate_smem_size_config
+
+
+def _device_index(device: int | torch.device | None = None) -> int:
+    if device is None:
+        return torch.cuda.current_device()
+    if isinstance(device, int):
+        return device
+    device = torch.device(device)
+    if device.index is None:
+        return torch.cuda.current_device()
+    return device.index
+
+
+@functools.lru_cache
+def _get_device_smem_limits(device_index: int) -> tuple[int, int]:
+    properties = torch.cuda.get_device_properties(device_index)
+    per_block = getattr(
+        properties,
+        "shared_memory_per_block_optin",
+        properties.shared_memory_per_block,
+    )
+    per_sm = properties.shared_memory_per_multiprocessor
+    return per_block, per_sm
+
+
+def get_device_smem_limits(device: int | torch.device | None = None) -> tuple[int, int]:
+    return _get_device_smem_limits(_device_index(device))
+
+
+def fits_device_smem(
+    layer_config: LayerConfig,
+    compute_config: ComputeConfig,
+    tuning_config: TuningConfig,
+    device: int | torch.device | None = None,
+) -> bool:
+    estimated = estimate_smem_size_config(
+        layer_config,
+        compute_config,
+        tuning_config,
+    )
+    per_block, per_sm = get_device_smem_limits(device)
+    return estimated <= per_block and estimated * tuning_config.num_ctas_per_sm <= per_sm
 
 
 def get_device_name(gpu_index=0):

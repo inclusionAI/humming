@@ -32,7 +32,8 @@ inline CUtensorMapSwizzle get_swizzle_enum(uint32_t swizzle_bytes) {
 inline CUtensorMap make_tma_desc(
     std::optional<Tensor> tensor_,
     std::vector<uint32_t> smem_dims,
-    uint32_t swizzle_bytes = 0) {
+    uint32_t swizzle_bytes = 0,
+    const char *name = "tensor") {
 
   CUtensorMap tmap = {};
   if (!tensor_.has_value() || smem_dims.size() == 0) return tmap;
@@ -70,7 +71,7 @@ inline CUtensorMap make_tma_desc(
   if (res != CUDA_SUCCESS) {
     const char *errStr;
     cuGetErrorString(res, &errStr);
-    ASSERT_CHECK(false, "TMA Encode Failed: ", errStr);
+    ASSERT_CHECK(false, "TMA Encode Failed for ", name, ": ", errStr);
   }
 
   return tmap;

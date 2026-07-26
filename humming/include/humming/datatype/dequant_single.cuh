@@ -86,14 +86,16 @@ template <class SourceType, class TargetType>
 CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   static_assert(SourceType::kIsFloatingPointType);
   static_assert(TargetType::kIsFloatingPointType);
-  static_assert(SourceType::kExponentBits <= TargetType::kExponentBits);
-  static_assert(SourceType::kMantissaBits <= TargetType::kMantissaBits);
   static_assert(SourceType::kBits < TargetType::kBits);
   static_assert(!SourceType::kIsSigned || TargetType::kIsSigned);
   static_assert(TargetType::kBits == 16 || TargetType::kBits == 8 || TargetType::kBits == 4);
+  static_assert(SourceType::kExponentBits <= TargetType::kExponentBits);
+  static_assert(SourceType::kMantissaBits <= TargetType::kMantissaBits);
+  static_assert(SourceType::kIsSigned || (std::is_same<SourceType, Float8E8M0>::value && std::is_same<TargetType, BFloat16>::value));
 
   constexpr uint32_t repeated_one = TargetType::kBits == 16 ? 0x00010001 : (TargetType::kBits == 8 ? 0x01010101 : 0x11111111);
-  constexpr uint32_t signbit_mask = TargetType::kBits == 16 ? 0x80008000 : (TargetType::kBits == 8 ? 0x80808080 : 0x88888888);
+  constexpr uint32_t target_signbit_mask = TargetType::kBits == 16 ? 0x80008000 : (TargetType::kBits == 8 ? 0x80808080 : 0x88888888);
+  constexpr uint32_t signbit_mask = SourceType::kIsSigned ? target_signbit_mask : 0;
   constexpr uint32_t nonsign_bits = SourceType::kExponentBits + SourceType::kMantissaBits;
   constexpr uint32_t shifted_mask = (repeated_one << nonsign_bits) - repeated_one;
   constexpr uint32_t mask = shifted_mask << (TargetType::kBits - SourceType::kBits);
@@ -101,13 +103,9 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   constexpr uint32_t diff_exp_bits =
       SourceType::kExponentBits == 0
           ? (TargetType::kMantissaBits - SourceType::kMantissaBits)
-          : (TargetType::kExponentBits - SourceType::kExponentBits);
+          : (TargetType::kExponentBits - SourceType::kExponentBits + TargetType::kIsSigned - SourceType::kIsSigned);
 
-  if constexpr (std::is_same<SourceType, Float8E8M0>::value && std::is_same<TargetType, BFloat16>::value) {
-    return lop3_and_or(val, 0, (val & 0xFF00FF00) >> 1);
-  } else {
-    return lop3_and_or(val, signbit_mask, (val & mask) >> diff_exp_bits);
-  }
+  return lop3_and_or(val, signbit_mask, (val & mask) >> diff_exp_bits);
 };
 
 

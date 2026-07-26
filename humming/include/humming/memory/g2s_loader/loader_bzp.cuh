@@ -78,7 +78,7 @@ public:
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t n_block_id, uint32_t k_block_id) {
     row_offset = kProblemNumGroups * expert_id;
-    col_offset = n_block_id * (BlockShape::N * kNumZPBits / 32);
+    col_offset = n_block_id * (kIsFpZeroPoint ? BlockShape::N : (BlockShape::N * kNumZPBits / 32));
 
     if constexpr (kIsGroup) {
       if constexpr (BlockShape::K >= kGroupSize) {

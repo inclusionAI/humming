@@ -56,6 +56,7 @@ public:
     } else {
       static_assert(ElementA::kBits == 16);
       uint32_t zp_sh_rd = lane_id / 4 + (ctx.n_warp_id() / (64 / WarpShape::N)) * 8;
+      if (WarpShape::N == 32) zp_sh_rd = zp_sh_rd * 2 + warp_id % 2;
       if constexpr (kGroupSize < BlockShape::K) {
         uint32_t k_index = ctx.k_warp_offset() + iter_id * kPartMmaShapeK;
         uint32_t group_index = k_index / kGroupSize;
@@ -63,7 +64,6 @@ public:
       };
       LoadType *reg_ptr_load = reinterpret_cast<LoadType *>(regs_ptr);
       const LoadType *smem_ptr_load = reinterpret_cast<const LoadType *>(smem_ptr);
-      if (WarpShape::N == 32) zp_sh_rd = zp_sh_rd * 2 + warp_id % 2;
       reg_ptr_load[0] = smem_ptr_load[zp_sh_rd];
     }
   }

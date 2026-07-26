@@ -354,6 +354,9 @@ class TuningConfig(BaseHummingConfig):
     }
 
     def __post_init__(self):
+        if self.reduce_overlap_last_stage_only:
+            assert self.num_stages > 2
+
         if self.use_warp_spec is None:
             self.use_warp_spec = False
 
