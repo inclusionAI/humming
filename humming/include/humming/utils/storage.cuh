@@ -97,6 +97,8 @@ template <
 struct SharedStorage {
 private:
   static_assert(!TuningConfig::kReduceOverlapLastStageOnly || ComputeConfig::kGemmType != GemmType::INDEXED);
+  static_assert(!ComputeConfig::kUseBatchInvariant || !TuningConfig::kUseStreamK);
+  static_assert(!ComputeConfig::kUseBatchInvariant || BlockShape::K == WarpShape::K);
 
   static constexpr bool kUseMxmma = MmaOpClass::kMmaType == MmaType::MXMMA;
   static constexpr bool kHasInputScale = ElementA::kBits != 16;

@@ -393,6 +393,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def check_config(self):
         assert self.num_threads <= 1024
+        if self.use_batch_invariant:
+            assert not self.use_stream_k, "batch-invariant kernels require use_stream_k=False"
+            assert self.warp_shape[2] == self.block_shape[2], (
+                "batch-invariant kernels require warp_shape_k == block_shape_k"
+            )
         if self.use_warp_spec or self.use_tma:
             assert self.use_mbarrier
         if self.use_warp_spec:
