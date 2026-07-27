@@ -180,7 +180,7 @@ public:
       uint32_t factor = (kMultiCastSize > 1 && cluster_rank == 0 && thread_id < kNumStages) ? kMultiCastSize : 1;
       if constexpr (Ctx::kUseWarpSpec) {
         if (thread_id < SharedStorage::kNumMathMbarriers) {
-          __mbarrier_init(&smem.math_mbar[thread_id], Ctx::kNumMathThreads * factor / 32);
+          __mbarrier_init(&smem.math_mbar[thread_id], kNumMathThreads * factor);
         }
       }
     }
@@ -197,10 +197,11 @@ public:
 
     uint32_t mbar_index = kIsFirst ? kNumStages : stage_id;
     constexpr uint2 load_bytes = get_stage_load_bytes<kIsFirst>();
+    constexpr bool kHasTmaMBarrier = kIsFirst ? kHasFirstStageTmaMBarrier : kHasStageTmaMBarrier;
 
+    uint64_t *mbar_ptr = nullptr;
+    if constexpr (kUseMBarrier) mbar_ptr = &smem.load_mbar[mbar_index];
     if (pred) {
-      uint64_t *mbar_ptr = nullptr;
-      if constexpr (kUseMBarrier) mbar_ptr = &smem.load_mbar[mbar_index];
       loader_a.template load<kShouldAdvance>(smem.stages[stage_id].a, mbar_ptr, stage_id);
       loader_b.template load<kShouldAdvance>(smem.stages[stage_id].b, mbar_ptr);
       if constexpr (kIsGroupInputScale) {
@@ -218,10 +219,11 @@ public:
     }
 
     if constexpr (kIsFirst) {
-      commit_load<kHasFirstStageCpAsyncMBarrier, kHasFirstStageTmaMBarrier>(mbar_index, load_bytes, pred);
+      commit_cp_async_load<kHasFirstStageCpAsyncMBarrier>(mbar_index, pred);
     } else {
-      commit_load<kHasStageCpAsyncMBarrier, kHasStageTmaMBarrier>(mbar_index, load_bytes, pred);
+      commit_cp_async_load<kHasStageCpAsyncMBarrier>(mbar_index, pred);
     }
+    if (pred) expect_tma_load<kHasTmaMBarrier>(mbar_ptr, load_bytes.x);
   }
 
   CUDA_INLINE void load_channel() {
@@ -235,25 +237,28 @@ public:
     if constexpr (kHasBias) loader_bias.load(smem.bias, channel_mbar_ptr);
 
     if constexpr (load_bytes.x > 0 || load_bytes.y > 0) {
-      commit_load<kHasChannelCpAsyncMBarrier, kHasChannelTmaMBarrier>(
-          kNumStages + 1, load_bytes);
+      commit_cp_async_load<kHasChannelCpAsyncMBarrier>(kNumStages + 1);
+    }
+    expect_tma_load<kHasChannelTmaMBarrier>(channel_mbar_ptr, load_bytes.x);
+  }
+
+  template <bool kHasTmaMBarrier>
+  CUDA_INLINE void expect_tma_load(uint64_t *mbar_ptr, uint32_t bytes) {
+    if constexpr (kUseMBarrier && kHasTmaMBarrier) {
+      if (ctx.load_thread_id() == 0) {
+        tma_expect_tx(mbar_ptr, bytes);
+      }
     }
   }
 
-  template <bool kHasCpAsyncMBarrier, bool kHasTmaMBarrier>
-  CUDA_INLINE void commit_load(
-      uint32_t stage_id, uint2 load_bytes, bool pred = true) {
+  template <bool kHasCpAsyncMBarrier>
+  CUDA_INLINE void commit_cp_async_load(uint32_t stage_id, bool pred = true) {
     auto &smem = ctx.smem;
     if constexpr (kUseMBarrier) {
       if (!pred) return;
       if constexpr (kHasCpAsyncMBarrier) {
         if constexpr (kUseCpAsync) cp_async_commit_mbarrier(&smem.load_mbar[stage_id]);
         else mbarrier_arrive(&smem.load_mbar[stage_id]);
-      }
-      if constexpr (kHasTmaMBarrier) {
-        if (ctx.load_thread_id() == 0) {
-          tma_commit_mbarrier(&smem.load_mbar[stage_id], load_bytes.x);
-        }
       }
     } else if constexpr (kUseCpAsync) {
       cp_async_commit_group();
@@ -263,6 +268,9 @@ public:
   CUDA_INLINE void wait_stage(uint32_t stage_id) {
     mbarrier_wait(&ctx.smem.math_mbar[stage_id], phases[stage_id], "Humming producer waiting for math stage");
     if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
+    if constexpr (get_stage_load_bytes().x > 0) {
+      tma_fence_async_shared();
+    }
     phases[stage_id] ^= 1;
   }
 
@@ -277,6 +285,9 @@ public:
   CUDA_INLINE void wait_math_epilogue() {
     mbarrier_wait(&ctx.smem.math_mbar[kNumStages], phases[kNumStages], "Humming producer waiting for epilogue");
     if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
+    if constexpr (get_stage_load_bytes<true>().x > 0 || get_channel_load_bytes().x > 0) {
+      tma_fence_async_shared();
+    }
     phases[kNumStages] ^= 1;
   }
 
@@ -365,15 +376,12 @@ public:
 
   CUDA_INLINE void arrive(uint32_t stage_id) {
     auto &smem = ctx.smem;
-    if (ctx.lane_id() == 0) {
-      mbarrier_arrive(&smem.math_mbar[stage_id]);
-      if constexpr (kMultiCastSize > 1) {
-        if (ctx.cluster_rank() >= 1 && stage_id < kNumStages) {
-          void *aa = __cluster_map_shared_rank(&smem.math_mbar[stage_id], 0);
-          mbarrier_arrive<true>(aa);
-        }
+    mbarrier_arrive(&smem.math_mbar[stage_id]);
+    if constexpr (kMultiCastSize > 1) {
+      if (ctx.cluster_rank() >= 1 && stage_id < kNumStages) {
+        void *aa = __cluster_map_shared_rank(&smem.math_mbar[stage_id], 0);
+        mbarrier_arrive<true>(aa);
       }
     }
-    __syncwarp();
   }
 };

@@ -94,8 +94,6 @@ public:
   uint32_t get_thread_id_b(uint32_t stage_id, uint32_t iter_id, uint32_t n_id) {
     if constexpr (kScaleVec == 1) {
       return n_id / 2;
-    } else if constexpr (WarpShape::N == 16) {
-      return ctx.n_warp_id() % 2 * 2 + n_id;
     } else {
       return n_id;
     }

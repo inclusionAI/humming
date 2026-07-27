@@ -47,8 +47,9 @@ public:
       uint32_t s_sh_rd = (lane_id % 2) * 8 + lane_id / 4;
       regs_ptr[0] = smem_ptr_load[group_base * (BlockShape::N / 2) + (warp_id % N_WARPS) * (WarpShape::N / 2) + s_sh_rd];
     } else if constexpr (WarpShape::N == 16) {
-      uint32_t s_sh_rd = lane_id % 4 * 8 + lane_id / 4;
-      uint32_t n_warp_group_base = (warp_id % N_WARPS) / 2 * 32;
+      uint32_t n_warp_id = warp_id % N_WARPS;
+      uint32_t s_sh_rd = ((lane_id % 4) ^ ((n_warp_id % 2) * 2)) * 8 + lane_id / 4;
+      uint32_t n_warp_group_base = n_warp_id / 2 * 32;
       regs_ptr[0] = smem_ptr_load[group_base * BlockShape::N + n_warp_group_base + s_sh_rd];
     } else {
       uint32_t s_sh_rd = lane_id % 4 * 8 + lane_id / 4;

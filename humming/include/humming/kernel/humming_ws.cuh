@@ -69,6 +69,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   using Epilogue = EpiloguePipeline<Ctx, MMA, EpilogueArithmetic>;
   using S2RMemoryPipeline = S2RMemoryPipeline<Ctx, MMA, Epilogue>;
   constexpr bool kUseTwoStageReduceBarrier = SharedStorage::kUseTwoStageReduceBarrier;
+  static_assert(Ctx::kWarpIters >= 2, "warp-specialized mainloop requires at least two warp iterations");
+  static_assert(!Ctx::kUseWgmma || kNumStages >= 3, "WGMMA requires an empty pipeline stage");
 
   extern __shared__ int4 shared_memory[];
   auto &smem = *reinterpret_cast<SharedStorage *>(shared_memory);
@@ -124,7 +126,12 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     }
   } else {
     constexpr uint32_t kPreferredMathThreadRegisters = TuningConfig::kNumMathThreads > 256 ? 96 : 232;
-    constexpr uint32_t kRegisterBudgetPerCta = (64 * 1024) / TuningConfig::kNumCtasPerSm;
+    constexpr uint32_t kNumWarps = TuningConfig::kNumThreads / 32;
+    constexpr uint32_t kRegisterAllocationGranularityPerWarp = 256;
+    constexpr uint32_t kRegisterBudgetPerWarp =
+        (64 * 1024) / (kNumWarps * TuningConfig::kNumCtasPerSm) /
+        kRegisterAllocationGranularityPerWarp * kRegisterAllocationGranularityPerWarp;
+    constexpr uint32_t kRegisterBudgetPerCta = kRegisterBudgetPerWarp * kNumWarps;
     constexpr uint32_t kLoadThreadRegisterUsage = TuningConfig::kNumLoadThreads * kLoadThreadRegisters;
     constexpr uint32_t kRegistersAvailableForMath = kRegisterBudgetPerCta > kLoadThreadRegisterUsage ? kRegisterBudgetPerCta - kLoadThreadRegisterUsage : 0;
     constexpr uint32_t kMathThreadRegisters = MIN(kPreferredMathThreadRegisters, MAX(24, kRegistersAvailableForMath / TuningConfig::kNumMathThreads / 8 * 8));
@@ -159,20 +166,15 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           debug_kernel_timeout_check(debug_start_clock);
           PRAGMA_UNROLL
           for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-            if (warp_iter_id + 1 < Ctx::kWarpIters) {
-              s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-            }
+            s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
             mma.run(stage_id, warp_iter_id);
-            if (warp_iter_id + 1 < Ctx::kWarpIters) {
-              mma.transform_b((warp_iter_id + 1) % 2);
+            if (warp_iter_id == Ctx::kWarpIters - 2) {
+              consumer.arrive(stage_id);
+              if (slice_iters > 1) {
+                consumer.wait_stage((stage_id + 1) % kNumStages);
+              }
             }
-          }
-
-          consumer.arrive(stage_id);
-          if (slice_iters > 1) {
-            consumer.wait_stage((stage_id + 1) % kNumStages);
-            s2r_pipe.load_stage_iter((stage_id + 1) % kNumStages, 0);
-            mma.transform_b(0);
+            mma.transform_b((warp_iter_id + 1) % 2);
           }
 
           slice_iters--;

@@ -10,7 +10,10 @@ CUDA_INLINE uint32_t sync_part_threads() {
   } else {
     static_assert(kNumThreads >= kNumSyncThreads);
     static_assert(kNumSyncThreads > 0);
-    asm volatile("bar.sync %0, %1;" ::"r"(kBarrierId), "r"(kNumSyncThreads));
+    asm volatile("bar.sync %0, %1;"
+                 :
+                 : "r"(kBarrierId), "r"(kNumSyncThreads)
+                 : "memory");
   }
 }
 
@@ -24,7 +27,8 @@ CUDA_INLINE void barrier_acquire(int *lock, int count) {
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
-                   : "l"(lock));
+                   : "l"(lock)
+                   : "memory");
 #if HUMMING_DEBUG_KERNEL
       debug_kernel_timeout_check(start_clock, "Humming Stream-K barrier timeout");
 #endif
@@ -43,7 +47,8 @@ CUDA_INLINE void barrier_acquire2(int *lock, int count) {
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
-                   : "l"(lock));
+                   : "l"(lock)
+                   : "memory");
 #if HUMMING_DEBUG_KERNEL
       debug_kernel_timeout_check(start_clock, "Humming Stream-K barrier timeout");
 #endif
@@ -60,10 +65,11 @@ CUDA_INLINE void barrier_release(int *lock, bool reset = false) {
       __stcg(&lock[0], 0);
     } else {
       int32_t val = 1;
-      asm volatile("fence.acq_rel.gpu;\n");
+      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
       asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
                    :
-                   : "l"(lock), "r"(val));
+                   : "l"(lock), "r"(val)
+                   : "memory");
     }
   }
 }
@@ -73,14 +79,15 @@ CUDA_INLINE void barrier_release2(int *lock, int32_t val) {
   sync_part_threads<kNumSyncThreads, kNumThreads>();
   if (threadIdx.x == 0) {
     if (val < 0) {
-      asm volatile("fence.acq_rel.gpu;\n");
+      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
       __stcg(&lock[0], val);
     } else {
       int32_t val2 = 1;
-      asm volatile("fence.acq_rel.gpu;\n");
+      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
       asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
                    :
-                   : "l"(lock), "r"(val2));
+                   : "l"(lock), "r"(val2)
+                   : "memory");
     }
   }
 }
