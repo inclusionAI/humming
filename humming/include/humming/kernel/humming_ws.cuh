@@ -68,6 +68,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   using MMA = Mma<Ctx, MainloopArithmetic>;
   using Epilogue = EpiloguePipeline<Ctx, MMA, EpilogueArithmetic>;
   using S2RMemoryPipeline = S2RMemoryPipeline<Ctx, MMA, Epilogue>;
+  constexpr bool kUseTwoStageReduceBarrier = SharedStorage::kUseTwoStageReduceBarrier;
 
   extern __shared__ int4 shared_memory[];
   auto &smem = *reinterpret_cast<SharedStorage *>(shared_memory);
@@ -97,6 +98,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       producer.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
       if constexpr (!Ctx::kIsIndexedGemm) producer.wait_math_epilogue();
       producer.load_stage<true, true>(0);
+      if constexpr (kUseTwoStageReduceBarrier) producer.wait_reduce_epilogue();
       PRAGMA_UNROLL
       for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
         producer.load_stage(stage_id, stage_id < slice_iters);
@@ -122,7 +124,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     }
   } else {
     constexpr uint32_t kPreferredMathThreadRegisters = TuningConfig::kNumMathThreads > 256 ? 96 : 232;
-    constexpr uint32_t kRegisterBudgetPerCta = (60 * 1024) / TuningConfig::kNumCtasPerSm;
+    constexpr uint32_t kRegisterBudgetPerCta = (64 * 1024) / TuningConfig::kNumCtasPerSm;
     constexpr uint32_t kLoadThreadRegisterUsage = TuningConfig::kNumLoadThreads * kLoadThreadRegisters;
     constexpr uint32_t kRegistersAvailableForMath = kRegisterBudgetPerCta > kLoadThreadRegisterUsage ? kRegisterBudgetPerCta - kLoadThreadRegisterUsage : 0;
     constexpr uint32_t kMathThreadRegisters = MIN(kPreferredMathThreadRegisters, MAX(24, kRegistersAvailableForMath / TuningConfig::kNumMathThreads / 8 * 8));
@@ -136,6 +138,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     auto s2r_pipe = S2RMemoryPipeline(ctx, mma, epilogue);
 
     consumer.arrive(kNumStages);
+    if constexpr (kUseTwoStageReduceBarrier) consumer.arrive(kNumStages + 1);
 
     while (scheduler.get_next_block()) {
       debug_kernel_timeout_check(debug_start_clock);
@@ -156,16 +159,20 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           debug_kernel_timeout_check(debug_start_clock);
           PRAGMA_UNROLL
           for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-            s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-            mma.run(stage_id, warp_iter_id);
-            if (warp_iter_id == Ctx::kWarpIters - 2) {
-              consumer.arrive(stage_id);
-              if (slice_iters > 1) {
-                consumer.wait_stage((stage_id + 1) % kNumStages);
-              }
+            if (warp_iter_id + 1 < Ctx::kWarpIters) {
+              s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
             }
+            mma.run(stage_id, warp_iter_id);
+            if (warp_iter_id + 1 < Ctx::kWarpIters) {
+              mma.transform_b((warp_iter_id + 1) % 2);
+            }
+          }
 
-            mma.transform_b((warp_iter_id + 1) % 2);
+          consumer.arrive(stage_id);
+          if (slice_iters > 1) {
+            consumer.wait_stage((stage_id + 1) % kNumStages);
+            s2r_pipe.load_stage_iter((stage_id + 1) % kNumStages, 0);
+            mma.transform_b(0);
           }
 
           slice_iters--;
@@ -179,6 +186,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       if constexpr (kReduceOverlapLastStageOnly) consumer.arrive(kNumStages);
       epilogue.call(mma.final_regs_c_as_ptr());
       if constexpr (TuningConfig::kUseTmaC) tma_wait_store_group<0, true>();
+      if constexpr (kUseTwoStageReduceBarrier) consumer.arrive(kNumStages + 1);
       if constexpr (!kReduceOverlapLastStageOnly) consumer.arrive(kNumStages);
     }
   }

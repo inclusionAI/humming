@@ -170,6 +170,7 @@ class LayerConfig(BaseHummingConfig):
 
         if self.use_int_weight_scale:
             assert not is_channel_scale_2, "use_int_weight_scale is incompatible with channel weight_scale_2"
+            assert self.input_scale_group_size == 0, "use_int_weight_scale requires input_scale_group_size=0"
             self.bs_dtype = self.c_dtype
 
         if self.use_int_weight_scale or self.use_fused_e8m0_scale:
@@ -354,9 +355,6 @@ class TuningConfig(BaseHummingConfig):
     }
 
     def __post_init__(self):
-        if self.reduce_overlap_last_stage_only:
-            assert self.num_stages > 2
-
         if self.use_warp_spec is None:
             self.use_warp_spec = False
 

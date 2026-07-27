@@ -96,7 +96,6 @@ template <
     class LayerConfig, class ComputeConfig, class TuningConfig>
 struct SharedStorage {
 private:
-  static_assert(!TuningConfig::kReduceOverlapLastStageOnly || TuningConfig::kNumStages > 2);
   static_assert(!TuningConfig::kReduceOverlapLastStageOnly || ComputeConfig::kGemmType != GemmType::INDEXED);
 
   static constexpr bool kUseMxmma = MmaOpClass::kMmaType == MmaType::MXMMA;
@@ -114,6 +113,8 @@ private:
 public:
   static constexpr uint32_t kNumExperts = LayerConfig::kNumExperts;
   static constexpr uint32_t kNumStages = TuningConfig::kNumStages;
+  static constexpr bool kUseTwoStageReduceBarrier = TuningConfig::kUseWarpSpec && TuningConfig::kReduceOverlapLastStageOnly && kNumStages == 2;
+  static constexpr uint32_t kNumMathMbarriers = kNumStages + 1 + kUseTwoStageReduceBarrier;
   static constexpr uint32_t kNumWriteSplits = TuningConfig::kNumWriteSplits;
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpsDimK = BlockShape::K / WarpShape::K;
@@ -202,5 +203,5 @@ public:
   IF_IS_GROUPED_CONTIGUOUS_GEMM(uint32_t expert_offset[kNumExperts + 1];)
 
   IF_USE_MBARRIER(alignas(128) uint64_t load_mbar[kNumStages + 2];)
-  IF_USE_WARP_SPEC(uint64_t math_mbar[kNumStages + 1];)
+  IF_USE_WARP_SPEC(uint64_t math_mbar[kNumMathMbarriers];)
 };

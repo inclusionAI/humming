@@ -45,6 +45,7 @@ private:
   static constexpr bool kHasChannelData = kIsChannelInputScale || kIsChannelWeightScale || kIsChannelWeightScale2 || kHasBias;
 
   static constexpr uint32_t kNumStages = Ctx::kNumStages;
+  static constexpr bool kUseTwoStageReduceBarrier = SharedStorage::kUseTwoStageReduceBarrier;
 
   template <bool kIsFirst = false>
   static constexpr uint2 get_stage_load_bytes() {
@@ -130,7 +131,7 @@ public:
   LoaderBS2 loader_bs2;
   LoaderBZP loader_bzp;
   LoaderBias loader_bias;
-  uint32_t phases[Ctx::kNumStages + 1] = {0};
+  uint32_t phases[SharedStorage::kNumMathMbarriers] = {0};
 
   CUDA_INLINE
   ProducerPipeline(Ctx &ctx)
@@ -178,7 +179,9 @@ public:
       if (thread_id < kNumStages + 2) __mbarrier_init(&smem.load_mbar[thread_id], count);
       uint32_t factor = (kMultiCastSize > 1 && cluster_rank == 0 && thread_id < kNumStages) ? kMultiCastSize : 1;
       if constexpr (Ctx::kUseWarpSpec) {
-        if (thread_id < kNumStages + 1) __mbarrier_init(&smem.math_mbar[thread_id], Ctx::kNumMathThreads * factor / 32);
+        if (thread_id < SharedStorage::kNumMathMbarriers) {
+          __mbarrier_init(&smem.math_mbar[thread_id], Ctx::kNumMathThreads * factor / 32);
+        }
       }
     }
   }
@@ -275,6 +278,15 @@ public:
     mbarrier_wait(&ctx.smem.math_mbar[kNumStages], phases[kNumStages], "Humming producer waiting for epilogue");
     if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
     phases[kNumStages] ^= 1;
+  }
+
+  CUDA_INLINE void wait_reduce_epilogue() {
+    if constexpr (kUseTwoStageReduceBarrier) {
+      constexpr uint32_t kBarrierId = kNumStages + 1;
+      mbarrier_wait(&ctx.smem.math_mbar[kBarrierId], phases[kBarrierId], "Humming producer waiting to reuse reduce storage");
+      if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
+      phases[kBarrierId] ^= 1;
+    }
   }
 
   CUDA_INLINE void seek(

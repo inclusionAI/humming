@@ -153,7 +153,10 @@ def estimate_smem_size_layer(
     if use_mbarrier:
         add((num_stages + 2) * 8, 128)  # load_mbar
     if use_warp_spec:
-        add((num_stages + 1) * 8, 8)  # math_mbar
+        num_math_mbarriers = num_stages + 1
+        if reduce_overlap_last_stage_only and num_stages == 2:
+            num_math_mbarriers += 1
+        add(num_math_mbarriers * 8, 8)  # math_mbar
 
     return _align_up(offset, 1024)
 
