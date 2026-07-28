@@ -223,9 +223,24 @@ inline void check_tensor_locks(std::optional<Tensor> &tensor, KernelData &kernel
   check_tensor_common(tensor.value(), "locks", dev, ScalarType::Int);
 };
 
-inline void check_tensor_streamk_workspace(std::optional<Tensor> &tensor, int64_t dev) {
+inline void check_tensor_streamk_workspace(
+    std::optional<Tensor> &tensor,
+    std::optional<Tensor> &locks,
+    KernelData &kernel_data,
+    int64_t dev) {
   if (!tensor.has_value()) return;
   check_tensor_common(tensor.value(), "streamk_workspace", dev, ScalarType::Float);
+  if (!kernel_data.use_stream_k) return;
+
+  ASSERT_CHECK(locks.has_value(), "locks must not be none when streamk_workspace is provided");
+  int64_t required_numel =
+      locks->numel() *
+      static_cast<int64_t>(kernel_data.block_shape_m) *
+      static_cast<int64_t>(kernel_data.block_shape_n);
+  ASSERT_CHECK(
+      tensor->numel() >= required_numel,
+      "streamk_workspace.numel() is too small: ",
+      tensor->numel(), " < ", required_numel);
 };
 
 inline void check_tensor_moe(

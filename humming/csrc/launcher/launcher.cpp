@@ -106,7 +106,7 @@ Tensor launch_kernel_impl(
     check_tensor_bias(bias_, kernel_data, dev);
     check_tensor_bs2(bs2_, kernel_data, dev);
     check_tensor_locks(locks_, kernel_data, dev);
-    check_tensor_streamk_workspace(streamk_workspace_, dev);
+    check_tensor_streamk_workspace(streamk_workspace_, locks_, kernel_data, dev);
     check_tensor_moe(sorted_ids_, expert_ids_, num_tokens_padded_, expert_layout_, kernel_data, dev);
   }
 

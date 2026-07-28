@@ -2,11 +2,13 @@ import json
 import math
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.kernel.humming import HummingKernel
 from humming.transform import (
     process_fused_e8m0_scale,
     transform_humming_bias,
@@ -232,6 +234,45 @@ def test_indexed_streamk_fp32_reduce_is_batch_invariant():
         )
         torch.cuda.synchronize(inputs.device)
         return output
+
+    configs = HummingKernel.prepare_kernels(
+        layer_config.to_str(),
+        compute_config.to_str(),
+        tuning_config,
+    )
+    kernel = ops._select_kernel(configs, small_m * top_k)
+    kernel.assert_smem_size_matches_estimate()
+    sorted_ids, expert_ids, num_tokens_padded = _make_indexed_metadata(
+        topk_ids[:small_m],
+        num_experts,
+        block_m,
+    )
+    required_workspace_numel = locks.numel() * block_m * block_n
+    with pytest.raises(RuntimeError, match=r"streamk_workspace\.numel\(\) is too small"):
+        ops.launch_kernel(
+            configs=configs,
+            inputs=inputs[:small_m],
+            input_scale=input_scale[:small_m],
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_scale_2=weight_scale_2,
+            bias=bias,
+            outputs=torch.empty(
+                (small_m * top_k, shape_n),
+                dtype=torch.bfloat16,
+                device=inputs.device,
+            ),
+            sorted_ids=sorted_ids,
+            expert_ids=expert_ids,
+            num_tokens_padded=num_tokens_padded,
+            locks=locks,
+            streamk_workspace=torch.empty(
+                (required_workspace_numel - 1,),
+                dtype=torch.float32,
+                device=inputs.device,
+            ),
+            top_k=top_k,
+        )
 
     small_output = run(small_m)
     large_output = run(large_m)[: small_m * top_k]
