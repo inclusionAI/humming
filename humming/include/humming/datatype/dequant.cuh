@@ -88,7 +88,7 @@ CUDA_INLINE void dequant_b3567(const uint32_t *qb, uint32_t *res, uint32_t j, ui
         qb_val = get_quanted_value_group<SourceType::kNumBits, !kIsFpToFp>(qb + qb_offset, idx2);
       }
     } else {
-      index = (j + 2) * 4 + i;
+      index = (j + TargetType::kBits / 8) * 4 + i;
       if (index * kPaddedNumBits % TargetType::kBits == 0) {
         const uint32_t idx1 = index / TargetType::kBits;
         const uint32_t idx2 = index * kPaddedNumBits / TargetType::kBits % kPaddedNumBits;

@@ -170,6 +170,7 @@ class LayerConfig(BaseHummingConfig):
 
         if self.use_int_weight_scale:
             assert not is_channel_scale_2, "use_int_weight_scale is incompatible with channel weight_scale_2"
+            assert self.input_scale_group_size == 0, "use_int_weight_scale requires input_scale_group_size=0"
             self.bs_dtype = self.c_dtype
 
         if self.use_int_weight_scale or self.use_fused_e8m0_scale:

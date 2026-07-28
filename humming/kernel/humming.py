@@ -20,6 +20,11 @@ from humming.config import (
 )
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
+from humming.utils.device import (
+    fits_device_smem,
+    get_device_smem_limits,
+)
+from humming.utils.smem import estimate_smem_size_config
 
 CODE_TEMPLATE = jinja2.Template("""
 
@@ -103,7 +108,7 @@ extern "C" __constant__ uint32_t BS_DTYPE_ID = {{bs_dtype}}::kId;
 @dataclasses.dataclass(kw_only=True)
 class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     name: ClassVar[str] = "humming"
-    _str2kernel_cache: ClassVar[dict[tuple[str, str, str], int | list[int]]] = {}
+    _str2kernel_cache: ClassVar[dict[tuple[str, str, str, int], int | list[int]]] = {}
     _id2kernel: ClassVar[dict[int, "HummingKernel"]] = {}
 
     def __post_init__(self):
@@ -169,6 +174,21 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         self._id2kernel[self.kernel_id] = self
         self.kernel_dirname = os.path.dirname(kernel_filename)
         self.cubin_loaded = True
+
+    @property
+    def estimated_smem_size(self) -> int:
+        return estimate_smem_size_config(self, self, self)
+
+    def assert_smem_size_matches_estimate(self) -> None:
+        from humming import ops
+
+        actual = ops.get_kernel_smem_size(self.kernel_id)
+        estimated = self.estimated_smem_size
+        assert actual == estimated, (
+            f"shared-memory estimate mismatch for {self.kernel_name}: "
+            f"estimated={estimated}, actual={actual}, "
+            f"config={self.to_str()}"
+        )
 
     @functools.cached_property
     def get_kernel_id(self):
@@ -372,8 +392,16 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert self.a_dtype == dtypes.float16
 
     def check_config(self):
+        assert self.num_threads <= 1024
+        if self.use_batch_invariant:
+            assert not self.use_stream_k, "batch-invariant kernels require use_stream_k=False"
+            assert self.warp_shape[2] == self.block_shape[2], (
+                "batch-invariant kernels require warp_shape_k == block_shape_k"
+            )
         if self.use_warp_spec or self.use_tma:
             assert self.use_mbarrier
+        if self.use_warp_spec:
+            assert self.num_math_threads % 128 == 0
         if self.use_fp32_stream_k_reduce:
             assert self.is_indexed_gemm
             assert not self.use_f16_accum
@@ -392,6 +420,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.gemm_type is None and self.num_experts == 0:
             self.gemm_type = GemmType.DENSE
         assert self.gemm_type is not None, "gemm_type must be specify for MoE GEMM"
+        if self.reduce_overlap_last_stage_only:
+            assert not self.is_indexed_gemm, "reduce_overlap_last_stage_only does not support indexed GEMM"
 
         if self.has_input_scale and self.input_scale_group_size == 0:
             self.use_m_major_input_scale = True
@@ -399,6 +429,14 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.use_tma_as and self.is_indexed_gemm:
             self.use_tma_as = False
             self.use_m_major_input_scale = True
+
+        if self.is_indexed_gemm:
+            assert not self.use_tma_a, "indexed GEMM does not support TMA input loads"
+            assert not self.use_tma_c, "indexed GEMM does not support TMA output stores"
+            assert not self.use_tma_as, "indexed GEMM does not support TMA input scale loads"
+
+        if self.multi_cast_size_a * self.multi_cast_size_b > 1:
+            assert self.sm_version in (90, 100, 103)
 
         if self.use_tma_as:
             assert self.use_m_major_input_scale, "use_tma_as requires use_m_major_input_scale=True"

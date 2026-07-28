@@ -8,6 +8,7 @@ class G2SMemoryLoaderBZP {
 private:
   using ProblemShape = typename Ctx::ProblemShape;
   using BlockShape = typename Ctx::BlockShape;
+  using ElementA = typename Ctx::ElementA;
   using ElementB = typename Ctx::ElementB;
 
   static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
@@ -19,15 +20,18 @@ private:
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
   static constexpr bool kIsChannel = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsGroup = Ctx::kIsGroupWeightScale;
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr uint32_t kGroupSize = kIsGroup ? Ctx::kWeightScaleGroupSize : ProblemShape::K;
 
+  static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
+  static constexpr uint32_t kNumGroupsPerMma = kUseMxmma && ElementA::kBits == 4 && kIsGroup ? kPartMmaShapeK / kGroupSize : 1;
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
-  static constexpr uint32_t kSmemStride = BlockShape::N * kNumZPBits / 32 / 4;
-  static constexpr uint32_t kGmemStride = ProblemShape::N * kNumZPBits / 32 / 4;
-  static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K, kGroupSize);
-  static constexpr uint32_t kGmemExpertStride = kGmemStride * kProblemNumGroups;
-  static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kGroupSize);
-  static constexpr uint32_t kNumInt4s = kSmemStride * kNumGroups;
+  static constexpr uint32_t kSmemStride = BlockShape::N * kNumZPBits / 32 / 4 * kNumGroupsPerMma;
+  static constexpr uint32_t kGmemStride = ProblemShape::N * kNumZPBits / 32 / 4 * kNumGroupsPerMma;
+  static constexpr uint32_t kProblemNumRows = CEIL_DIV(ProblemShape::K, kGroupSize) / kNumGroupsPerMma;
+  static constexpr uint32_t kGmemExpertStride = kGmemStride * kProblemNumRows;
+  static constexpr uint32_t kNumRows = CEIL_DIV(BlockShape::K, kGroupSize) / kNumGroupsPerMma;
+  static constexpr uint32_t kNumInt4s = kSmemStride * kNumRows;
   static constexpr uint32_t kLoadsPerGroup = kIsChannel ? 1 : CEIL_DIV(kGroupSize, BlockShape::K);
 
 public:
@@ -70,21 +74,21 @@ public:
   CUDA_INLINE
   void advance() {
     if (kIsGroup && (kLoadsPerGroup == 1 || counter == 0)) {
-      row_offset += kNumGroups;
-      gmem_ptr += kGmemStride * kNumGroups;
+      row_offset += kNumRows;
+      gmem_ptr += kGmemStride * kNumRows;
     }
   };
 
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t n_block_id, uint32_t k_block_id) {
-    row_offset = kProblemNumGroups * expert_id;
-    col_offset = n_block_id * (BlockShape::N * kNumZPBits / 32);
+    row_offset = kProblemNumRows * expert_id;
+    col_offset = n_block_id * (kIsFpZeroPoint ? BlockShape::N : (BlockShape::N * kNumZPBits / 32 * kNumGroupsPerMma));
 
     if constexpr (kIsGroup) {
       if constexpr (BlockShape::K >= kGroupSize) {
-        row_offset += k_block_id * kNumGroups;
+        row_offset += k_block_id * kNumRows;
       } else {
-        row_offset += (k_block_id * BlockShape::K) / kGroupSize;
+        row_offset += (k_block_id * BlockShape::K) / kGroupSize / kNumGroupsPerMma;
       }
     }
 

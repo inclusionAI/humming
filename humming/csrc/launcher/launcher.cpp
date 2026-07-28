@@ -284,6 +284,12 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
   return result;
 }
 
+int64_t get_kernel_smem_size(int64_t kernel_id) {
+  auto it = g_kernel_data.find(kernel_id);
+  ASSERT_CHECK(it != g_kernel_data.end(), "kernel not existed.");
+  return static_cast<int64_t>(it->second.smem_size);
+}
+
 Tensor launch_kernel(
     Tensor configs_t,
     Tensor a,
@@ -321,6 +327,7 @@ COMMON_TORCH_LIBRARY(humming, m) {
       "Tensor? locks, Tensor? streamk_workspace, SymInt top_k, SymInt valid_shape_m, "
       "bool should_check_tensor = True) -> Tensor");
   m.def("register_kernel(str cubin_path) -> (int, str)");
+  m.def("get_kernel_smem_size(int kernel_id) -> int");
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, CUDA, m) {
@@ -329,4 +336,5 @@ COMMON_TORCH_LIBRARY_IMPL(humming, CUDA, m) {
 
 COMMON_TORCH_LIBRARY_IMPL(humming, Undefined, m) {
   m.impl("register_kernel", COMMON_TORCH_BOX(&register_kernel));
+  m.impl("get_kernel_smem_size", COMMON_TORCH_BOX(&get_kernel_smem_size));
 };

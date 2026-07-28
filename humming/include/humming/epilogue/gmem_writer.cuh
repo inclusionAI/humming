@@ -227,14 +227,14 @@ public:
     } else {
       row_offset = m_block_id * BlockShape::M;
     }
-    block_output_shape_m = MIN(output_shape_m - row_offset, BlockShape::M);
+    block_output_shape_m = row_offset < output_shape_m ? MIN(output_shape_m - row_offset, BlockShape::M) : 0;
     col_offset = n_block_id * BlockShape::N;
 
     uint32_t offset;
     offset = n_block_id * (BlockShape::N * 2 / 16);
     if constexpr (!kIsIndexedGemm) {
       constexpr uint32_t kShapeN = ProblemShape::N - PadShape::N;
-      offset += row_offset * (kShapeN / 8);
+      offset += MIN(row_offset, output_shape_m) * (kShapeN / 8);
     }
     gmem_ptr = gmem_ptr_raw + offset;
   };

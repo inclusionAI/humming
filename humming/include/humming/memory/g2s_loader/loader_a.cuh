@@ -90,13 +90,13 @@ public:
     uint32_t thread_id = ctx.load_thread_id();
     uint32_t smem_uint = offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
     uint32_t smem_base = smem_uint / 128 % 8;
-    uint32_t smem_swizzled_col = (thread_id % 8) ^ (((thread_id % 64) / 8 + smem_base)) % 8;
 
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kLoadIters; i++) {
       uint32_t smem_offset = i * kNumLoadThreads + thread_id;
       uint32_t smem_row = smem_offset / 8;
       uint32_t smem_col = smem_offset % 8;
+      uint32_t smem_swizzled_col = smem_col ^ ((smem_row + smem_base) % 8);
       uint32_t smem_swizzled_offset = smem_row * 8 + smem_swizzled_col;
 
       uint32_t gmem_col = smem_row / BlockShape::M * 8 + smem_col;
@@ -121,13 +121,13 @@ public:
     uint32_t thread_id = ctx.load_thread_id();
     uint32_t smem_uint = offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
     uint32_t smem_base = smem_uint / 128 % 4;
-    uint32_t smem_swizzled_col = (thread_id % 8) ^ (((thread_id % 32) / 8 + smem_base) % 4);
 
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kLoadIters; i++) {
       uint32_t smem_offset = i * kNumLoadThreads + thread_id;
       uint32_t smem_row = smem_offset / 8;
       uint32_t smem_col = smem_offset % 8;
+      uint32_t smem_swizzled_col = smem_col ^ ((smem_row + smem_base) % 4);
       uint32_t smem_swizzled_offset = smem_row * 8 + smem_swizzled_col;
 
       uint32_t gmem_row = smem_row % (BlockShape::M / 2) * 2 + smem_col / 4;
@@ -161,10 +161,10 @@ public:
       row_offset = m_block_id * BlockShape::M;
     }
     col_offset = k_block_id * (BlockShape::K * ElementA::kBits / MAX(ElementA::kBits, 8));
-    block_shape_m = MIN(shape_m - row_offset, BlockShape::M);
+    block_shape_m = row_offset < shape_m ? MIN(shape_m - row_offset, BlockShape::M) : 0;
 
     uint32_t gmem_offset = k_block_id * kSmemStride;
-    gmem_offset += kIsIndexedGemm ? 0 : (row_offset * kGmemStride);
+    gmem_offset += kIsIndexedGemm ? 0 : (MIN(row_offset, shape_m) * kGmemStride);
     gmem_ptr = gmem_ptr_raw + gmem_offset;
 
     if constexpr (kIsIndexedGemm) {

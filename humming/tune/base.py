@@ -187,8 +187,16 @@ class DeviceHeuristics:
 
         while layer_config.shape_k % block_shape_k != 0:
             block_shape_k = block_shape_k // 2
-            warp_shape_k = 512 // layer_config.a_dtype.num_bits
-            assert block_shape_k >= warp_shape_k
+            if use_batch_invariant:
+                warp_shape_k = block_shape_k
+            else:
+                warp_shape_k = 512 // layer_config.a_dtype.num_bits
+                assert block_shape_k >= warp_shape_k
+
+        use_stream_k = layer_config.shape_k > 1024 and use_stream_k
+        if use_batch_invariant:
+            assert not use_stream_k
+            assert block_shape_k == warp_shape_k
 
         if num_ctas_per_sm == 1:
             factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
@@ -197,7 +205,7 @@ class DeviceHeuristics:
         return {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
-            "use_stream_k": layer_config.shape_k > 1024 and use_stream_k,
+            "use_stream_k": use_stream_k,
             "use_f16_accum": use_f16_accum,
             "num_sms": num_sms,
             "num_stages": num_stages,

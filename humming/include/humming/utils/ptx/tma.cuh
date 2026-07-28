@@ -99,11 +99,12 @@ CUDA_INLINE void tma_reduce_add_2d(void *smem_ptr, const void *desc_ptr, uint32_
                : "memory");
 };
 
-CUDA_INLINE void tma_commit_mbarrier(void *mbar_ptr, uint32_t bytes) {
+CUDA_INLINE void tma_expect_tx(void *mbar_ptr, uint32_t bytes) {
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(mbar_ptr);
   asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
                :
-               : "r"(smem_int_ptr), "r"(bytes));
+               : "r"(smem_int_ptr), "r"(bytes)
+               : "memory");
 };
 
 CUDA_INLINE void tma_commit_store_group() {

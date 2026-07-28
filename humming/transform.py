@@ -326,8 +326,8 @@ def transform_humming_zero_point(
     zero_point: torch.Tensor,
     dtype: dtypes.DataType,
     packed: bool = False,
+    num_groups_per_mma: int = 1,
 ) -> torch.Tensor | None:
-    num_experts = None if zero_point.ndim == 2 else zero_point.size(0)
     if zero_point.dtype.is_floating_point:
         return transform_humming_weight_scale(zero_point, False)
 
@@ -339,13 +339,28 @@ def transform_humming_zero_point(
 
     num_zp_bits = 4 if dtype.num_bits <= 4 else 8
     shape_n = zero_point.size(-2)
-    zero_point = transform_humming_weight_scale(zero_point).to(torch.uint8).view(-1)
+    zero_point = transform_humming_weight_scale(zero_point).to(torch.uint8)
+    leading_shape = zero_point.shape[:-2]
+    num_groups = zero_point.size(-2)
     if num_zp_bits == 4:
         zero_point = zero_point[..., 1::2] * 16 + zero_point[..., ::2]
-    zero_point = zero_point.view(torch.int32).view(-1, shape_n * num_zp_bits // 32)
-    if num_experts is not None:
-        zero_point = zero_point.view(num_experts, -1, zero_point.size(-1))
-    return zero_point
+
+    if num_groups_per_mma > 1:
+        assert num_zp_bits == 4
+        assert num_groups % num_groups_per_mma == 0
+        num_k_tiles = num_groups // num_groups_per_mma
+        zero_point = zero_point.view(
+            *leading_shape,
+            num_k_tiles,
+            num_groups_per_mma,
+            zero_point.size(-1),
+        )
+        zero_point = zero_point.transpose(-1, -2).contiguous()
+        zero_point = zero_point.view(*leading_shape, num_k_tiles, -1).view(torch.int32)
+        return zero_point
+
+    zero_point = zero_point.contiguous().view(*leading_shape, -1).view(torch.int32)
+    return zero_point.view(*leading_shape, num_groups, shape_n * num_zp_bits // 32)
 
 
 def transform_humming_bias(bias: torch.Tensor) -> torch.Tensor:
@@ -415,7 +430,22 @@ def transform_humming_tensors(
         )
 
     if zero_point is not None:
-        zero_point = transform_humming_zero_point(zero_point, config.b_dtype, packed=True)
+        use_mxmma_zp_layout = (
+            config.mma_type == MmaType.MXMMA
+            and config.a_dtype.num_bits == 4
+            and config.weight_scale_group_size > 0
+        )
+        num_groups_per_mma = (
+            256 // config.a_dtype.num_bits // config.weight_scale_group_size
+            if use_mxmma_zp_layout
+            else 1
+        )
+        zero_point = transform_humming_zero_point(
+            zero_point,
+            config.b_dtype,
+            packed=True,
+            num_groups_per_mma=num_groups_per_mma,
+        )
 
     if bias is not None:
         bias = transform_humming_bias(bias)

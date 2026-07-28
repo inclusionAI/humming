@@ -185,6 +185,8 @@ class HummingWeightSchema(BaseWeightSchema):
         tensor: torch.Tensor,
         schema: "HummingWeightSchema",
         param_dtype: torch.dtype,
+        *,
+        allow_negative_scale: bool = True,
     ) -> dict[str, torch.Tensor]:
         f16_dtype = dtypes.DataType.from_torch_dtype(param_dtype)
         shape_n = tensor.size(-2)
@@ -212,6 +214,7 @@ class HummingWeightSchema(BaseWeightSchema):
             weight_scale_2_type=scale_2_type,
             is_fp_zero_point=schema.is_fp_zero_point,
             pack=True,
+            allow_negative_scale=allow_negative_scale,
         )
 
         tensors = {"weight": weight}

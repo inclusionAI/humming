@@ -90,7 +90,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   auto s2r_pipe = S2RMemoryPipeline(ctx, mma, epilogue);
 
   producer.init_mbarrier();
-  __syncthreads();
+  mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
 
   while (scheduler.get_next_block()) {
     debug_kernel_timeout_check(debug_start_clock);
@@ -102,7 +102,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     epilogue.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.current_shape_m, scheduler.m_offset);
     epilogue.set_streamk_state(scheduler.slice_count, scheduler.slice_id, scheduler.locks_offset);
 
-    if constexpr (TuningConfig::kUseTmaC) tma_wait_store_group<0, true>();
+    if constexpr (TuningConfig::kUseTmaC) {
+      tma_wait_store_group<0, true>();
+      __syncthreads();
+    }
     producer.template load_stage<true, true>(0);
     PRAGMA_UNROLL
     for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
@@ -127,7 +130,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             if constexpr (kNumStages == 2) {
               __syncthreads();
               if (slice_iters > 1) consumer.wait_stage((stage_id + 1) % kNumStages);
-              producer.load_stage(stage_id, slice_iters > kNumStages);
             } else {
               __syncthreads();
               producer.load_stage(stage_id + kNumStages - 1, slice_iters >= kNumStages);
@@ -138,6 +140,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           mma.transform_b((warp_iter_id + 1) % 2);
         }
 
+        if constexpr (kNumStages == 2) producer.load_stage(stage_id, slice_iters > kNumStages);
         slice_iters--;
         if (!slice_iters) break;
       };
@@ -147,5 +150,11 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     s2r_pipe.load_channel(scheduler.slice_id);
     __syncthreads();
     epilogue.call(mma.final_regs_c_as_ptr());
+  }
+
+  __syncthreads();
+  if constexpr (TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB > 1) {
+    asm volatile("barrier.cluster.arrive;\n");
+    asm volatile("barrier.cluster.wait;\n");
   }
 };

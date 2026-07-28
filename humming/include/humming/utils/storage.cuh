@@ -96,6 +96,10 @@ template <
     class LayerConfig, class ComputeConfig, class TuningConfig>
 struct SharedStorage {
 private:
+  static_assert(!TuningConfig::kReduceOverlapLastStageOnly || ComputeConfig::kGemmType != GemmType::INDEXED);
+  static_assert(!ComputeConfig::kUseBatchInvariant || !TuningConfig::kUseStreamK);
+  static_assert(!ComputeConfig::kUseBatchInvariant || BlockShape::K == WarpShape::K);
+
   static constexpr bool kUseMxmma = MmaOpClass::kMmaType == MmaType::MXMMA;
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
   static constexpr bool kIsChannelInputScale = kHasInputScale && LayerConfig::kInputScaleGroupSize == 0;
@@ -111,6 +115,8 @@ private:
 public:
   static constexpr uint32_t kNumExperts = LayerConfig::kNumExperts;
   static constexpr uint32_t kNumStages = TuningConfig::kNumStages;
+  static constexpr bool kUseTwoStageReduceBarrier = TuningConfig::kUseWarpSpec && TuningConfig::kReduceOverlapLastStageOnly && kNumStages == 2;
+  static constexpr uint32_t kNumMathMbarriers = kNumStages + 1 + kUseTwoStageReduceBarrier;
   static constexpr uint32_t kNumWriteSplits = TuningConfig::kNumWriteSplits;
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpsDimK = BlockShape::K / WarpShape::K;
@@ -160,6 +166,7 @@ public:
   static constexpr uint32_t kChannelBytesAS = kChannelSizeAS * sizeof(int4);
   static constexpr uint32_t kChannelBytesBS = kChannelSizeBS * sizeof(int4);
   static constexpr uint32_t kChannelBytesBS2 = kChannelSizeBS2 * sizeof(int4);
+  static constexpr uint32_t kChannelBytesBZP = kChannelSizeBZP * sizeof(int4);
   static constexpr uint32_t kBiasBytes = kBiasSize * sizeof(int4);
 
   static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
@@ -178,14 +185,18 @@ public:
   union alignas(1024) {
     struct {
       IF_HAS_CHANNEL_ZERO_POINT(alignas(128) int4 bzp_c[kChannelSizeBZP];)
-      StageStorage stages[kNumStages];
       IF_HAS_CHANNEL_WEIGHT_SCALE(alignas(128) int4 bs_c[kChannelSizeBS];)
       IF_HAS_CHANNEL_WEIGHT_SCALE_2(alignas(128) int4 bs2_c[kChannelSizeBS2];)
       IF_HAS_BIAS(alignas(128) int4 bias[kBiasSize];)
       IF_HAS_CHANNEL_INPUT_SCALE(alignas(128) int4 as_c[kChannelSizeAS];)
+      StageStorage stages[kNumStages];
     };
     struct {
       IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_ZERO_POINT(alignas(128) int4 reduce_skip_bzp_c[kChannelSizeBZP];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_WEIGHT_SCALE(alignas(128) int4 reduce_skip_bs_c[kChannelSizeBS];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_WEIGHT_SCALE_2(alignas(128) int4 reduce_skip_bs2_c[kChannelSizeBS2];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_BIAS(alignas(128) int4 reduce_skip_bias[kBiasSize];))
+      IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_INPUT_SCALE(alignas(128) int4 reduce_skip_as_c[kChannelSizeAS];))
       IF_REDUCE_LAST_STAGE_ONLY(StageStorage reduce_skip[kNumStages - 1];)
       alignas(128) int4 reduce[MAX(MAX(kWarpReduceSize, kBlockOutputSize), kBlockOutputFp32Size)];
     };
@@ -200,5 +211,5 @@ public:
   IF_IS_GROUPED_CONTIGUOUS_GEMM(uint32_t expert_offset[kNumExperts + 1];)
 
   IF_USE_MBARRIER(alignas(128) uint64_t load_mbar[kNumStages + 2];)
-  IF_USE_WARP_SPEC(uint64_t math_mbar[kNumStages + 1];)
+  IF_USE_WARP_SPEC(uint64_t math_mbar[kNumMathMbarriers];)
 };
