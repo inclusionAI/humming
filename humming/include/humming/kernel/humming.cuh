@@ -129,7 +129,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             if constexpr (kNumStages == 2) {
               __syncthreads();
               if (slice_iters > 1) consumer.wait_stage((stage_id + 1) % kNumStages);
-              producer.load_stage(stage_id, slice_iters > kNumStages);
             } else {
               __syncthreads();
               producer.load_stage(stage_id + kNumStages - 1, slice_iters >= kNumStages);
@@ -140,6 +139,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           mma.transform_b((warp_iter_id + 1) % 2);
         }
 
+        if constexpr (kNumStages == 2) producer.load_stage(stage_id, slice_iters > kNumStages);
         slice_iters--;
         if (!slice_iters) break;
       };
