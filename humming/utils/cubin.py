@@ -1,5 +1,6 @@
 import ctypes
 import os
+import struct
 import subprocess
 from pathlib import Path
 
@@ -26,6 +27,41 @@ _RC_MESSAGE = {
 }
 
 _cached_lib = None
+
+
+def get_cubin_kernel_names(path: str | os.PathLike) -> list[str]:
+    data = Path(path).read_bytes()
+    if data[:4] != b"\x7fELF" or data[4] != 2:
+        raise ValueError(f"not a 64-bit ELF file: {path}")
+
+    byte_order = "<" if data[5] == 1 else ">"
+    section_offset = struct.unpack_from(f"{byte_order}Q", data, 40)[0]
+    section_size = struct.unpack_from(f"{byte_order}H", data, 58)[0]
+    num_sections = struct.unpack_from(f"{byte_order}H", data, 60)[0]
+    section_format = f"{byte_order}IIQQQQIIQQ"
+    symbol_format = f"{byte_order}IBBHQQ"
+
+    sections = [
+        struct.unpack_from(section_format, data, section_offset + index * section_size)
+        for index in range(num_sections)
+    ]
+    names = []
+    for section in sections:
+        section_type = section[1]
+        if section_type != 2:
+            continue
+        symbol_offset, symbol_size = section[4], section[5]
+        string_section = sections[section[6]]
+        string_offset, string_size = string_section[4], string_section[5]
+        symbol_entry_size = section[9]
+        for offset in range(symbol_offset, symbol_offset + symbol_size, symbol_entry_size):
+            name_offset, info, other, *_ = struct.unpack_from(symbol_format, data, offset)
+            if info & 0xF != 2 or not other & 0x10 or name_offset >= string_size:
+                continue
+            name_start = string_offset + name_offset
+            name_end = data.index(b"\0", name_start, string_offset + string_size)
+            names.append(data[name_start:name_end].decode())
+    return names
 
 
 def _load_lib(path):

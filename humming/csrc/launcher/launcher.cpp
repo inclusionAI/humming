@@ -195,39 +195,26 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
   auto it = g_path_ids.find(cubin_path);
   if (it != g_path_ids.end()) return it->second;
 
-  CUlibrary library;
-  check_curesult(
-      cuLibraryLoadFromFile(&library, cubin_path.c_str(), nullptr, nullptr, 0, nullptr, nullptr, 0),
-      "cuLibraryLoadFromFile");
-
-  unsigned int num_kernels = 0;
-  check_curesult(cuLibraryGetKernelCount(&num_kernels, library), "cuLibraryGetKernelCount");
-  std::vector<CUkernel> kernels(num_kernels);
-  check_curesult(cuLibraryEnumerateKernels(kernels.data(), num_kernels, library), "cuLibraryEnumerateKernels");
-
-  CUkernel kernel = nullptr;
+  auto reader = CubinReader(cubin_path);
   std::string kernel_name;
-  for (CUkernel candidate : kernels) {
-    const char *name = nullptr;
-    check_curesult(cuKernelGetName(&name, candidate), "cuKernelGetName");
-    if (std::string(name).find("humming") == std::string::npos) continue;
-    ASSERT_CHECK(kernel == nullptr, "multiple humming kernels found in ", cubin_path);
-    kernel = candidate;
+  for (const auto &name : reader.getKernelNames()) {
+    if (name.find("humming") == std::string::npos) continue;
+    ASSERT_CHECK(kernel_name.empty(), "multiple humming kernels found in ", cubin_path);
     kernel_name = name;
   }
-  ASSERT_CHECK(kernel != nullptr, "no humming kernel found in ", cubin_path);
+  ASSERT_CHECK(!kernel_name.empty(), "no humming kernel found in ", cubin_path);
 
+  CUmodule module;
+  check_curesult(cuModuleLoad(&module, cubin_path.c_str()), "cuModuleLoad");
   CUfunction func;
-  check_curesult(cuKernelGetFunction(&func, kernel), "cuKernelGetFunction");
+  check_curesult(cuModuleGetFunction(&func, module, kernel_name.c_str()), "cuModuleGetFunction");
 
   int64_t hash_id = manual_crc32(cubin_path);
   hash_id = (hash_id << 30) + manual_crc32(kernel_name);
 
   if (g_kernel_data.find(hash_id) == g_kernel_data.end()) {
-    auto reader = CubinReader(cubin_path);
-
     g_kernel_data[hash_id] = {
-        library,
+        module,
         func,
 
         reader.getUint32("SMEM_SIZE"),

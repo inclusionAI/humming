@@ -8,6 +8,7 @@ import torch
 
 from humming import dtypes
 from humming.jit.compiler import NVCCCompiler, NVRTCCompiler
+from humming.utils.cubin import get_cubin_kernel_names
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -98,25 +99,16 @@ class KernelRuntime:
         if self.cubin_loaded:
             return None
         kernel_filename = self.kernel_filename
-        result, lib = cbd.cuLibraryLoadFromFile(kernel_filename.encode(), [], [], 0, [], [], 0)
+        result, module = cbd.cuModuleLoad(kernel_filename.encode())
         assert result == 0, repr(result)
-        result, num_kernels = cbd.cuLibraryGetKernelCount(lib)
+        matched = [name for name in get_cubin_kernel_names(kernel_filename) if self.name in name]
+        assert len(matched) == 1, (kernel_filename, self.name, matched)
+        self.kernel_name = matched[0]
+        result, func = cbd.cuModuleGetFunction(module, self.kernel_name.encode())
         assert result == 0, repr(result)
-        result, kernels = cbd.cuLibraryEnumerateKernels(num_kernels, lib)
-        assert result == 0, repr(result)
-        keyword = self.name.encode()
-        matched = []
-        for kernel in kernels:
-            result, name = cbd.cuKernelGetName(kernel)
-            assert result == 0, repr(result)
-            if keyword in name:
-                matched.append((kernel, name))
-        assert len(matched) == 1, (kernel_filename, self.name, [x[1] for x in matched])
-        self.kernel, kernel_name = matched[0]
-        self.kernel_name = kernel_name.decode()
-        result, func = cbd.cuKernelGetFunction(self.kernel)
-        assert result == 0, repr(result)
+        self.module = module
         self.func = func
+        self.kernel = func
         self.cubin_loaded = True
 
     def check_context(self):
