@@ -520,31 +520,43 @@ public:
         }
       } else {
         int2 &part_int_regs_c0 = reinterpret_cast<int2 *>(regs_c[0][m][0])[index];
+        int2 &part_int_regs_c1 = reinterpret_cast<int2 *>(regs_c[1][delta_m + m][0])[index];
         float2 &part_regs_c0 = reinterpret_cast<float2 *>(regs_c[0][m][0])[index];
         float2 &part_regs_c1 = reinterpret_cast<float2 *>(regs_c[1][delta_m + m][0])[index];
 
-        if constexpr (std::is_same<ValTypeC, int32_t>::value) {
-          part_regs_c0.x = __int2float_rn(part_int_regs_c0.x);
-          part_regs_c0.y = __int2float_rn(part_int_regs_c0.y);
+        if constexpr (kUseIntWeightScale) {
+          static_assert(std::is_same<ValTypeC, int32_t>::value);
+          static_assert(!kIsGroupInputScale);
+          static_assert(kIsGroupWeightScale);
+
+          int32_t bs_val = reinterpret_cast<int32_t *>(dq_bs)[(delta_m + m) * 2 + inner_m];
+          part_int_regs_c1.x += bs_val * part_int_regs_c0.x;
+          part_int_regs_c1.y += bs_val * part_int_regs_c0.y;
+        } else {
+          if constexpr (std::is_same<ValTypeC, int32_t>::value) {
+            part_regs_c0.x = __int2float_rn(part_int_regs_c0.x);
+            part_regs_c0.y = __int2float_rn(part_int_regs_c0.y);
+          }
+
+          float2 &as_vals = *reinterpret_cast<float2 *>(&as[buffer_id][inner_n * 2]);
+          float &bs_val = reinterpret_cast<float *>(dq_bs)[(delta_m + m) * 2 + inner_m];
+          float &block_bs_float = reinterpret_cast<float *>(&bs[buffer_id])[0];
+
+          if constexpr (kApplyGroupInputScaleOnC && kApplyGroupWeightScaleOnC) {
+            part_regs_c1.x += as_vals.x * bs_val * part_regs_c0.x;
+            part_regs_c1.y += as_vals.y * bs_val * part_regs_c0.y;
+          } else if constexpr (!kApplyGroupInputScaleOnC && kApplyGroupWeightScaleOnC) {
+            part_regs_c1.x += bs_val * part_regs_c0.x;
+            part_regs_c1.y += bs_val * part_regs_c0.y;
+          } else if constexpr (!kApplyGroupInputScaleOnC && kApplyBlockWeightScaleOnC) {
+            part_regs_c1.x += block_bs_float * part_regs_c0.x;
+            part_regs_c1.y += block_bs_float * part_regs_c0.y;
+          } else if constexpr (kApplyGroupInputScaleOnC && !kApplyGroupWeightScaleOnC) {
+            part_regs_c1.x += as_vals.x * part_regs_c0.x;
+            part_regs_c1.y += as_vals.y * part_regs_c0.y;
+          }
         }
 
-        float2 &as_vals = *reinterpret_cast<float2 *>(&as[buffer_id][inner_n * 2]);
-        float &bs_val = reinterpret_cast<float *>(dq_bs)[(delta_m + m) * 2 + inner_m];
-        float &block_bs_float = reinterpret_cast<float *>(&bs[buffer_id])[0];
-
-        if constexpr (kApplyGroupInputScaleOnC && kApplyGroupWeightScaleOnC) {
-          part_regs_c1.x += as_vals.x * bs_val * part_regs_c0.x;
-          part_regs_c1.y += as_vals.y * bs_val * part_regs_c0.y;
-        } else if constexpr (!kApplyGroupInputScaleOnC && kApplyGroupWeightScaleOnC) {
-          part_regs_c1.x += bs_val * part_regs_c0.x;
-          part_regs_c1.y += bs_val * part_regs_c0.y;
-        } else if constexpr (!kApplyGroupInputScaleOnC && kApplyBlockWeightScaleOnC) {
-          part_regs_c1.x += block_bs_float * part_regs_c0.x;
-          part_regs_c1.y += block_bs_float * part_regs_c0.y;
-        } else if constexpr (kApplyGroupInputScaleOnC && !kApplyGroupWeightScaleOnC) {
-          part_regs_c1.x += as_vals.x * part_regs_c0.x;
-          part_regs_c1.y += as_vals.y * part_regs_c0.y;
-        }
       }
     }
   }

@@ -20,10 +20,6 @@ from humming.config import (
 )
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
-from humming.utils.device import (
-    fits_device_smem,
-    get_device_smem_limits,
-)
 from humming.utils.smem import estimate_smem_size_config
 
 CODE_TEMPLATE = jinja2.Template("""
@@ -253,8 +249,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         mma_shape_m = self.warp_shape[0] if self.mma_type == MmaType.WGMMA else 16
         mma_shape_n = 64 if self.mma_type == MmaType.WGMMA else 8
         mma_shape_k = 256 // self.a_dtype.num_bits
-        if self.sm_version == 75 and self.a_dtype == dtypes.int8:
-            mma_shape_m = 8
+        if self.sm_version == 75:
+            if self.a_dtype == dtypes.float16:
+                mma_shape_k = 8
+            elif self.a_dtype == dtypes.int8:
+                mma_shape_m = 8
 
         if self.mma_type == MmaType.MMA and self.warp_shape[0] % 16 == 8:
             mma_shape_m = 8
@@ -305,6 +304,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         assert jit_utils.is_power_of_two(self.block_shape[0] // self.warp_shape[0])
         assert jit_utils.is_power_of_two(self.block_shape[1] // self.warp_shape[1])
         assert jit_utils.is_power_of_two(self.block_shape[2] // self.warp_shape[2])
+        if self.mma_type == MmaType.WGMMA:
+            n_warps = self.block_shape[1] // self.warp_shape[1]
+            assert (n_warps) % 4 == 0, "WGMMA requires complete four-warp groups along N"
         assert self.problem_shape[1] > self.pad_shape[1]
         assert self.problem_shape[2] > self.pad_shape[2]
         assert self.pad_shape[1] % 8 == 0
@@ -393,6 +395,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def check_config(self):
         assert self.num_threads <= 1024
+        if self.mma_type == MmaType.WGMMA:
+            assert self.num_stages >= 3, "WGMMA requires at least three pipeline stages"
         if self.use_batch_invariant:
             assert not self.use_stream_k, "batch-invariant kernels require use_stream_k=False"
             assert self.warp_shape[2] == self.block_shape[2], (

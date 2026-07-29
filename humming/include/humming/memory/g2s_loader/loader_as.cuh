@@ -35,6 +35,7 @@ private:
   static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kGroupSize);
   static constexpr uint32_t kMxScaleVec = kPartMmaShapeK / kGroupSize;
   static constexpr uint32_t kLoadsPerGroup = kUseMxmma ? MAX(1u, 4 / kNumGroups) : CEIL_DIV(kGroupSize, BlockShape::K);
+  static constexpr uint32_t kRowLoadIters = CEIL_DIV(BlockShape::M, kNumLoadThreads);
   static constexpr uint32_t kScaleMAlignment = 4;
 
   using LoadType = typename LoadTypeChooser<kNumGroups * 4>::Type;
@@ -49,7 +50,7 @@ public:
   uint32_t total_shape_m;
   uint32_t block_shape_m;
   uint32_t row_offset;
-  uint32_t load_row_index;
+  uint32_t load_row_index[kRowLoadIters];
   uint32_t col_offset = 0;
   uint32_t counter = 0;
 
@@ -185,7 +186,7 @@ public:
           uint32_t smem_row = smem_offset / kSmemStride;
           uint32_t smem_col = smem_offset % kSmemStride;
 
-          uint32_t gmem_row = kIsIndexedGemm ? load_row_index : smem_row;
+          uint32_t gmem_row = kIsIndexedGemm ? load_row_index[i] : smem_row;
           uint32_t gmem_offset = gmem_row * kGmemStride + smem_col;
 
           const LoadType *gmem_ptr_load = reinterpret_cast<const LoadType *>(gmem_ptr);
@@ -252,13 +253,10 @@ public:
     } else {
       gmem_ptr = gmem_ptr_raw + col_offset;
 
-      constexpr uint32_t kSmemStride = kNumGroups / (sizeof(LoadType) / 4);
-      uint32_t smem_row = ctx.load_thread_id() / kSmemStride;
-
-      if (smem_row < BlockShape::M) {
-        load_row_index = ctx.smem.rd_row_index[smem_row];
-      } else {
-        load_row_index = shape_m;
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < kRowLoadIters; i++) {
+        uint32_t smem_row = i * kNumLoadThreads + ctx.load_thread_id();
+        load_row_index[i] = smem_row < BlockShape::M ? ctx.smem.rd_row_index[smem_row] : shape_m;
       }
     }
   }

@@ -202,6 +202,9 @@ class DeviceHeuristics:
             factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
             num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
 
+        if num_write_splits > 1 and (block_shape_m != warp_shape_m or block_shape_m % 32):
+            num_write_splits = 1
+
         return {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
