@@ -77,7 +77,7 @@ public:
   };
 
   CUDA_INLINE
-  void transform_b(uint32_t buffer_id) {
+  void transform_b(uint32_t buffer_id, uint32_t iter_id) {
     if constexpr (std::is_same<ElementA, ElementB>::value) return;
 
     if constexpr (kUseFusedE8m0Scale) {
@@ -97,7 +97,8 @@ public:
         } else {
           regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id][i / kPackedKFactor][i % kPackedKFactor]);
         }
-        uint4 zp_vals = arith.prepare_zp_for_dequant(buffer_id, i);
+        uint32_t zp_index = kUsePackedKLayout ? iter_id : i;
+        uint4 zp_vals = arith.prepare_zp_for_dequant(buffer_id, zp_index);
         uint32_t *zp_vals_ptr = reinterpret_cast<uint32_t *>(&zp_vals);
         dequant<ElementB, ElementA, kHasZeroPoint, kIsFpZeroPoint, kNumWarpShapeNSplits>(regs_qb[buffer_id], regs_b_ptr, i, zp_vals_ptr);
         arith.may_apply_bs_and_zp_on_b(regs_b_ptr, i, buffer_id);

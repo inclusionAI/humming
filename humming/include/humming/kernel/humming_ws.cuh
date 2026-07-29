@@ -156,7 +156,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
       consumer.wait_stage<true>(kNumStages);
       s2r_pipe.load_stage_iter<true>(0, 0);
-      mma.transform_b(0);
+      mma.transform_b(0, 0);
 
       while (slice_iters) {
         debug_kernel_timeout_check(debug_start_clock);
@@ -173,7 +173,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                 consumer.wait_stage((stage_id + 1) % kNumStages);
               }
             }
-            mma.transform_b((warp_iter_id + 1) % 2);
+            mma.transform_b(
+                (warp_iter_id + 1) % 2,
+                (warp_iter_id + 1) % Ctx::kWarpIters);
           }
 
           slice_iters--;

@@ -64,7 +64,7 @@ public:
   };
 
   CUDA_INLINE
-  void transform_b(uint32_t buffer_id) {
+  void transform_b(uint32_t buffer_id, uint32_t iter_id) {
     if constexpr (std::is_same<ElementA, ElementB>::value) return;
 
     if constexpr (kNativeMixed) {
