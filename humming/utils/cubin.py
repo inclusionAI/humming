@@ -122,7 +122,9 @@ def may_build_cubin_patcher():
         _cached_lib = _load_lib(native_path.as_posix())
         return _cached_lib
 
+    compiler = os.environ.get("CXX") or "g++"
     full_hash = jit_utils.hash_path_content(src_path, releative=True)
+    full_hash = jit_utils.hash_to_hex(full_hash + jit_utils.get_native_platform_signature())
 
     build_dir = Path(jit_utils.get_humming_cache_dir()) / "cubin_patcher" / full_hash
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -135,7 +137,7 @@ def may_build_cubin_patcher():
     lock_filename = jit_utils.get_humming_lock_filename("cubin_patcher_" + full_hash)
     with FileLock(lock_filename):
         if not lib_path.exists():
-            build_cubin_patcher(lib_path)
+            build_cubin_patcher(lib_path, compiler=compiler)
 
     _cached_lib = _load_lib(lib_path.as_posix())
     return _cached_lib

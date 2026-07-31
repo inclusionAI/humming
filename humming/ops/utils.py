@@ -62,6 +62,7 @@ def get_humming_launcher_build_dir(use_torch_stable_api: bool):
     cache_dir = jit_utils.get_humming_cache_dir()
     torch_major, torch_minor = torch.__version__.split(".")[:2]
     version = "torch211_stable" if use_torch_stable_api else f"torch{torch_major}{torch_minor}_nostable"
+    version += "_" + jit_utils.hash_to_hex(jit_utils.get_native_platform_signature())
 
     launcher_build_dir = os.path.join(cache_dir, f"launcher/{version}/{launcher_code_hash}")
     Path(launcher_build_dir).mkdir(exist_ok=True, parents=True)

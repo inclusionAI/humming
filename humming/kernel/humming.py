@@ -104,7 +104,7 @@ extern "C" __constant__ uint32_t BS_DTYPE_ID = {{bs_dtype}}::kId;
 @dataclasses.dataclass(kw_only=True)
 class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     name: ClassVar[str] = "humming"
-    _str2kernel_cache: ClassVar[dict[tuple[str, str, str, int], int | list[int]]] = {}
+    _str2kernel_cache: ClassVar[dict[tuple, torch.Tensor]] = {}
     _id2kernel: ClassVar[dict[int, "HummingKernel"]] = {}
 
     def __post_init__(self):
@@ -491,7 +491,12 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         layer_config_str = prepare_config_str(layer_config)
         compute_config_str = prepare_config_str(compute_config)
         tuning_config_str = prepare_config_str(tuning_config)
-        cache_key = (layer_config_str, compute_config_str, tuning_config_str)
+        cache_key = (
+            layer_config_str,
+            compute_config_str,
+            tuning_config_str,
+            cls.current_context(),
+        )
         if cache_key in cls._str2kernel_cache:
             return cls._str2kernel_cache[cache_key]
 

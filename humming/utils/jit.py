@@ -2,6 +2,7 @@ import functools
 import glob
 import hashlib
 import importlib
+import json
 import os
 import platform
 import re
@@ -30,15 +31,27 @@ def get_precompiled_artifact_path(source_path, artifact_name) -> Path | None:
         return None
 
     source_path = Path(source_path)
-    artifact_path = Path(__file__).parents[1] / "_native" / arch / artifact_name
-    if not artifact_path.is_file():
+    native_dir = Path(__file__).parents[1] / "_native" / arch
+    artifact_path = native_dir / artifact_name
+    manifest_path = native_dir / "manifest.json"
+    if not artifact_path.is_file() or not manifest_path.is_file():
         return None
 
-    if source_path.is_dir():
-        source_mtime = max(path.stat().st_mtime_ns for path in source_path.rglob("*") if path.is_file())
-    else:
-        source_mtime = source_path.stat().st_mtime_ns
-    return artifact_path if source_mtime < artifact_path.stat().st_mtime_ns else None
+    manifest = json.loads(manifest_path.read_text())
+    source_hash = hash_path_content(str(source_path), releative=True, text_only=False)
+    return artifact_path if manifest.get(artifact_name) == source_hash else None
+
+
+def write_precompiled_artifact_manifest(native_dir, artifact_sources) -> None:
+    manifest = {
+        artifact_name: hash_path_content(str(source), releative=True, text_only=False)
+        for artifact_name, source in artifact_sources.items()
+    }
+    (Path(native_dir) / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+
+def get_native_platform_signature() -> str:
+    return repr((platform.system(), get_native_arch()))
 
 
 def popen_and_reap(cmd, **kwargs):

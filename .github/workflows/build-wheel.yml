@@ -65,6 +65,7 @@ jobs:
           expected = {
               "humming/_native/${{ matrix.arch }}/libhumming_launcher.so",
               "humming/_native/${{ matrix.arch }}/libcubinpatch.so",
+              "humming/_native/${{ matrix.arch }}/manifest.json",
               "humming/_native/${{ matrix.arch }}/nvrtc_compile",
           }
           with zipfile.ZipFile(wheels[0]) as wheel:

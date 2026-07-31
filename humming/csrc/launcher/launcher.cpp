@@ -2,6 +2,7 @@
 
 #include <cuda.h>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #include "./elf.h"
@@ -9,7 +10,13 @@
 #include "./torch_api.h"
 #include "./utils.h"
 
-static std::unordered_map<int64_t, KernelData> g_kernel_data;
+static std::unordered_map<CUcontext, std::unordered_map<int64_t, KernelData>> g_kernel_data;
+
+inline CUcontext get_current_context() {
+  CUcontext context;
+  check_curesult(cuCtxGetCurrent(&context), "cuCtxGetCurrent");
+  return context;
+}
 
 inline int64_t find_kernel_configs_target_index(IntArrayRef &configs, int64_t shape_m) {
   size_t n = configs.size();
@@ -28,13 +35,15 @@ inline int64_t find_kernel_configs_target_index(IntArrayRef &configs, int64_t sh
   ASSERT_CHECK(false, "configs length must be 1-2 or a non-zero multiple of 4.");
 };
 
-inline KernelLaunchData find_kernel_launch_data(IntArrayRef &configs, int64_t shape_m) {
+inline KernelLaunchData find_kernel_launch_data(
+    IntArrayRef &configs, int64_t shape_m, CUcontext context) {
   auto n = configs.size();
   int64_t index = find_kernel_configs_target_index(configs, shape_m);
   int64_t kernel_id = configs[index];
   int64_t num_sms = n < 2 ? 0 : configs[index + 1];
-  ASSERT_CHECK(g_kernel_data.find(kernel_id) != g_kernel_data.end(), "kernel not existed.");
-  KernelData &kernel_data = g_kernel_data[kernel_id];
+  auto &context_data = g_kernel_data[context];
+  ASSERT_CHECK(context_data.find(kernel_id) != context_data.end(), "kernel not existed.");
+  KernelData &kernel_data = context_data[kernel_id];
   KernelLaunchData kernel_launch_data = {kernel_data, num_sms};
   return kernel_launch_data;
 };
@@ -79,7 +88,8 @@ Tensor launch_kernel_impl(
     int64_t valid_shape_m,
     bool should_check_tensor = true) {
 
-  KernelLaunchData base_kernel_launch_data = find_kernel_launch_data(configs, 1);
+  CUcontext context = get_current_context();
+  KernelLaunchData base_kernel_launch_data = find_kernel_launch_data(configs, 1, context);
   KernelData &base_kernel_data = base_kernel_launch_data.kernel_data;
 
   int64_t dev = a.get_device();
@@ -87,7 +97,7 @@ Tensor launch_kernel_impl(
   if (valid_shape_m <= 0) {
     valid_shape_m = shape_m * (base_kernel_data.gemm_type_id == 1 ? top_k : 1);
   }
-  KernelLaunchData kernel_launch_data = find_kernel_launch_data(configs, valid_shape_m);
+  KernelLaunchData kernel_launch_data = find_kernel_launch_data(configs, valid_shape_m, context);
   KernelData &kernel_data = kernel_launch_data.kernel_data;
   int64_t &num_sms = kernel_launch_data.num_sms;
   Tensor c = may_make_tensor_c(c_, a, kernel_data, top_k);
@@ -191,9 +201,11 @@ Tensor launch_kernel_impl(
 };
 
 std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) {
-  static std::unordered_map<std::string, std::tuple<int64_t, std::string>> g_path_ids;
-  auto it = g_path_ids.find(cubin_path);
-  if (it != g_path_ids.end()) return it->second;
+  static std::unordered_map<CUcontext, std::unordered_map<std::string, std::tuple<int64_t, std::string>>> g_path_ids;
+  CUcontext context = get_current_context();
+  auto &context_path_ids = g_path_ids[context];
+  auto it = context_path_ids.find(cubin_path);
+  if (it != context_path_ids.end()) return it->second;
 
   auto reader = CubinReader(cubin_path);
   std::string kernel_name;
@@ -212,8 +224,9 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
   int64_t hash_id = manual_crc32(cubin_path);
   hash_id = (hash_id << 30) + manual_crc32(kernel_name);
 
-  if (g_kernel_data.find(hash_id) == g_kernel_data.end()) {
-    g_kernel_data[hash_id] = {
+  auto &context_data = g_kernel_data[context];
+  if (context_data.find(hash_id) == context_data.end()) {
+    context_data[hash_id] = {
         module,
         func,
 
@@ -263,13 +276,14 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
   };
 
   auto result = std::make_tuple(hash_id, kernel_name);
-  g_path_ids[cubin_path] = result;
+  context_path_ids[cubin_path] = result;
   return result;
 }
 
 int64_t get_kernel_smem_size(int64_t kernel_id) {
-  auto it = g_kernel_data.find(kernel_id);
-  ASSERT_CHECK(it != g_kernel_data.end(), "kernel not existed.");
+  auto &context_data = g_kernel_data[get_current_context()];
+  auto it = context_data.find(kernel_id);
+  ASSERT_CHECK(it != context_data.end(), "kernel not existed.");
   return static_cast<int64_t>(it->second.smem_size);
 }
 

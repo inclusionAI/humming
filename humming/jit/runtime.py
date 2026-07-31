@@ -14,7 +14,7 @@ from humming.utils.cubin import get_cubin_kernel_names
 @dataclasses.dataclass(kw_only=True)
 class KernelRuntime:
     disable_fast_math: ClassVar[bool] = False
-    _instances: ClassVar[dict[tuple[str, tuple[Any, ...]], "KernelRuntime"]] = {}
+    _instances: ClassVar[dict[tuple[Any, ...], "KernelRuntime"]] = {}
 
     def __new__(cls, *args, **kwargs):
         def get_value(value):
@@ -26,7 +26,7 @@ class KernelRuntime:
 
         args_items = tuple(get_value(x) for x in args)
         kwargs_items = tuple((key, get_value(kwargs[key])) for key in sorted(kwargs.keys()))
-        signature = (cls.__name__, args_items + kwargs_items)
+        signature = (cls.__name__, cls.current_context(), args_items + kwargs_items)
 
         if signature not in cls._instances or not cls._instances[signature].inited:
             instance = super().__new__(cls)
@@ -76,6 +76,12 @@ class KernelRuntime:
     @staticmethod
     def _ensure_cuda_context():
         torch.cuda.set_device(torch.cuda.current_device())
+
+    @staticmethod
+    def current_context():
+        result, context = cbd.cuCtxGetCurrent()
+        assert result == 0, repr(result)
+        return context
 
     def prepare(self):
         self._ensure_cuda_context()

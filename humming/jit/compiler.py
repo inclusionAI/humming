@@ -95,13 +95,13 @@ class Compiler:
             with open(cache_dirname / "stderr.log", "w") as f:
                 f.write(stderr)
 
-        if returncode != 0:
-            print(stderr, flush=True)
-            (cache_dirname / "kernel_tmp.cubin").unlink(missing_ok=True)
-            raise RuntimeError(f"{cls} run failed")
+            if returncode != 0:
+                print(stderr, flush=True)
+                (cache_dirname / "kernel_tmp.cubin").unlink(missing_ok=True)
+                raise RuntimeError(f"{cls} run failed")
 
-        os.replace(cache_dirname / "kernel_tmp.cubin", cache_dirname / "kernel.cubin")
-        return cache_filename.as_posix()
+            os.replace(cache_dirname / "kernel_tmp.cubin", cache_filename)
+            return cache_filename.as_posix()
 
     @classmethod
     def get_flags(cls, sm_version, disable_fast_math=False):

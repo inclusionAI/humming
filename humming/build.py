@@ -13,7 +13,7 @@ import torch
 from torch.utils.cpp_extension import include_paths
 
 from humming.utils.cubin import build_cubin_patcher
-from humming.utils.jit import get_native_arch
+from humming.utils.jit import get_native_arch, write_precompiled_artifact_manifest
 from humming.utils.nvrtc import build_nvrtc_compile_binary
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,4 +106,12 @@ def build_native(output_dir: str | Path | None = None) -> Path:
     build_launcher(native_dir / "libhumming_launcher.so", compiler)
     build_cubin_patcher(native_dir / "libcubinpatch.so", compiler=compiler)
     build_nvrtc_compile_binary(native_dir / "nvrtc_compile", compiler=compiler)
+    write_precompiled_artifact_manifest(
+        native_dir,
+        {
+            "libhumming_launcher.so": ROOT / "humming/csrc/launcher",
+            "libcubinpatch.so": ROOT / "humming/csrc/patch_cubin.cpp",
+            "nvrtc_compile": ROOT / "humming/csrc/nvrtc_compile.cpp",
+        },
+    )
     return native_dir
