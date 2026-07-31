@@ -271,6 +271,8 @@ class HummingWeightSchema(BaseWeightSchema):
         schema = dataclasses.replace(self)
         is_tensor_only = self.weight_scale_type == WeightScaleType.TENSOR
         if self.has_tensor_weight_scale:
+            if is_tensor_only and "weight_scale" not in tensors and "global_scale" in tensors:
+                tensors["weight_scale"] = tensors.pop("global_scale")
             scale_key = "weight_scale" if is_tensor_only else "weight_scale_2"
             tensor_scale = tensors[scale_key].view(num_experts or 1, -1)
             tensor_scale = self._may_process_global_scale(
