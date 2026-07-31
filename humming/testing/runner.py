@@ -84,7 +84,9 @@ class KernelTestCase:
     @property
     def uses_m_major_input_scale(self) -> bool:
         return self.compute_config.use_m_major_input_scale or (
-            self.layer_config.has_input_scale and self.layer_config.input_scale_group_size == 0
+            self.layer_config.has_input_scale
+            and self.layer_config.input_scale_group_size == 0
+            and self.layer_config.mma_type != MmaType.MXMMA
         )
 
 
@@ -225,7 +227,7 @@ class KernelTestRunner:
                 m_major_scale=True,
             )
             _, input_scale = m_major_input_tensors
-        elif config.mma_type == MmaType.MXMMA:
+        elif config.mma_type == MmaType.MXMMA and config.input_scale_group_size > 0:
             input_scale = scale_ref.view(torch.int32).contiguous()
         else:
             input_scale = scale_ref

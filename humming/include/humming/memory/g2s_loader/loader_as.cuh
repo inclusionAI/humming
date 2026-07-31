@@ -23,6 +23,7 @@ private:
   static constexpr bool kHasInputScale = ElementA::kBits != 16;
   static constexpr bool kIsChannelScale = kHasInputScale && Ctx::kInputScaleGroupSize == 0;
   static constexpr bool kIsGroupScale = kHasInputScale && Ctx::kInputScaleGroupSize > 0;
+  static constexpr bool kUseMxScale = kUseMxmma && kIsGroupScale;
   static constexpr bool kMMajorInputScale = Ctx::kUseMMajorInputScale && kIsGroupScale;
   static_assert(!kMMajorInputScale || !kIsIndexedGemm);
   static constexpr bool kUseTma = Ctx::kUseTmaAS && kHasInputScale && !kIsIndexedGemm;
@@ -34,7 +35,8 @@ private:
   static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K - PadShape::K, kGroupSize);
   static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kGroupSize);
   static constexpr uint32_t kMxScaleVec = kPartMmaShapeK / kGroupSize;
-  static constexpr uint32_t kLoadsPerGroup = kUseMxmma ? MAX(1u, 4 / kNumGroups) : CEIL_DIV(kGroupSize, BlockShape::K);
+  static constexpr uint32_t kLoadsPerGroup =
+      kUseMxScale ? MAX(1u, 4 / kNumGroups) : CEIL_DIV(kGroupSize, BlockShape::K);
   static constexpr uint32_t kRowLoadIters = CEIL_DIV(BlockShape::M, kNumLoadThreads);
   static constexpr uint32_t kScaleMAlignment = 4;
 
@@ -70,7 +72,7 @@ public:
   template <bool kShouldAdvance = true>
   CUDA_INLINE void load(void *smem_ptr, void *mbar_ptr) {
     counter = kLoadsPerGroup != 1 ? (counter + 1) % kLoadsPerGroup : 0;
-    if constexpr (kUseMxmma) {
+    if constexpr (kUseMxScale) {
       if constexpr (kUseTma) load_mx_tma(smem_ptr, mbar_ptr);
       else if constexpr (kMMajorInputScale) load_mx_legacy_m_major(smem_ptr);
       else load_mx_legacy(smem_ptr);
@@ -201,9 +203,9 @@ public:
   CUDA_INLINE
   void advance() {
     if (kIsGroupScale && (kLoadsPerGroup == 1 || counter == 0)) {
-      col_offset += kUseMxmma ? CEIL_DIV(kNumGroups, 4) * 4 : kNumGroups;
+      col_offset += kUseMxScale ? CEIL_DIV(kNumGroups, 4) * 4 : kNumGroups;
       if constexpr (!kUseTma) {
-        if constexpr (kUseMxmma) {
+        if constexpr (kUseMxScale) {
           if constexpr (kMMajorInputScale) gmem_ptr += CEIL_DIV(kNumGroups, 4) * total_shape_m;
           else gmem_ptr += CEIL_DIV(kNumGroups, 4);
         } else if constexpr (kMMajorInputScale) {
@@ -236,7 +238,7 @@ public:
     block_shape_m = row_offset < shape_m ? MIN(shape_m - row_offset, BlockShape::M) : 0;
 
     if constexpr (!kIsIndexedGemm) {
-      if constexpr (kUseMxmma) {
+      if constexpr (kUseMxScale) {
         if constexpr (!kUseTma) {
           if constexpr (kMMajorInputScale)
             gmem_ptr = gmem_ptr_raw + ((col_offset / 4) * total_shape_m + MIN(row_offset, total_shape_m));

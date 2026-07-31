@@ -222,11 +222,22 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.warp_shape[0] % mma_shape_m == 0
             assert self.warp_shape[1] % mma_shape_n == 0
             assert self.warp_shape[2] % mma_shape_k == 0
-            group = self.weight_scale_group_size or mma_shape_k
+            group = (
+                self.weight_scale_group_size
+                or self.input_scale_group_size
+                or (32 if self.a_dtype.num_bits == 4 else mma_shape_k)
+            )
             assert mma_shape_k % group == 0
             scale_vec = mma_shape_k // group
 
             self.mma_b_dtype = self.b_dtype if self.mxmma_native_mixed else self.a_dtype
+            sf_dtype = (
+                self.bs_dtype
+                if self.is_group_weight_scale or self.is_block_weight_scale
+                else self.as_dtype
+                if self.input_scale_group_size > 0
+                else dtypes.float8e8m0
+            )
             return MmaOpClass.from_config(
                 self.mma_type,
                 mma_shape_m,
@@ -235,7 +246,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 self.mma_a_dtype,
                 self.mma_b_dtype,
                 dtypes.float32,
-                sf_dtype=self.bs_dtype,
+                sf_dtype=sf_dtype,
                 scale_vec=scale_vec,
             )
 
@@ -385,7 +396,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_integer_type:
             assert self.use_fused_e8m0_scale
-            raise NotImplementedError
 
         if self.use_f16_accum:
             if self.a_dtype == dtypes.float8e4m3:
@@ -422,8 +432,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.reduce_overlap_last_stage_only:
             assert not self.is_indexed_gemm, "reduce_overlap_last_stage_only does not support indexed GEMM"
 
-        if self.has_input_scale and self.input_scale_group_size == 0:
+        if (
+            self.has_input_scale
+            and self.input_scale_group_size == 0
+            and self.mma_type != MmaType.MXMMA
+        ):
             self.use_m_major_input_scale = True
+        if self.mma_type == MmaType.MXMMA and self.input_scale_group_size == 0:
+            self.use_tma_as = False
+            self.use_m_major_input_scale = False
 
         if self.use_tma_as and self.is_indexed_gemm:
             self.use_tma_as = False

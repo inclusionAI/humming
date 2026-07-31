@@ -62,19 +62,36 @@ class LayerConfig(BaseHummingConfig):
     def mxmma_supported(self):
         if torch.cuda.get_device_capability()[0] != 12:
             return False
-        if not self.is_group_weight_scale:
+        if not (self.is_group_weight_scale or self.is_channel_weight_scale):
+            return False
+        if (
+            self.is_group_weight_scale
+            and self.input_scale_group_size > 0
+            and self.input_scale_group_size != self.weight_scale_group_size
+        ):
             return False
         if self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4):
-            return self.weight_scale_group_size == 32 and self.bs_dtype == dtypes.float8e8m0
+            return (
+                self.input_scale_group_size in (0, 32)
+                and (
+                    self.is_channel_weight_scale
+                    or self.weight_scale_group_size == 32
+                    and self.bs_dtype == dtypes.float8e8m0
+                )
+            )
         if self.a_dtype in (dtypes.float4e2m1, dtypes.float4e0m3):
             if self.a_dtype == dtypes.float4e0m3 and self.weight_scale_group_size == 32:
                 return False
 
             return (
-                self.weight_scale_group_size == 16
-                and self.bs_dtype in (dtypes.float8e8m0, dtypes.float8e4m3)
-                or self.weight_scale_group_size == 32
-                and self.bs_dtype == dtypes.float8e8m0
+                self.input_scale_group_size in (0, 16, 32)
+                and (
+                    self.is_channel_weight_scale
+                    or self.weight_scale_group_size == 16
+                    and self.bs_dtype in (dtypes.float8e8m0, dtypes.float8e4m3)
+                    or self.weight_scale_group_size == 32
+                    and self.bs_dtype == dtypes.float8e8m0
+                )
             )
 
         return False
@@ -140,11 +157,25 @@ class LayerConfig(BaseHummingConfig):
                 self.mma_type = MmaType.MXMMA
             else:
                 self.mma_type = MmaType.MMA
+        if (
+            self.mma_type == MmaType.MXMMA
+            and self.is_group_weight_scale
+            and self.input_scale_group_size > 0
+        ):
+            assert self.input_scale_group_size == self.weight_scale_group_size
 
         if not self.has_input_scale:
             self.as_dtype = None
         elif self.as_dtype is None:
-            self.as_dtype = self.bs_dtype if self.mma_type == MmaType.MXMMA else dtypes.float32
+            if self.mma_type == MmaType.MXMMA and self.input_scale_group_size > 0:
+                if self.is_group_weight_scale:
+                    self.as_dtype = self.bs_dtype
+                elif self.input_scale_group_size == 16:
+                    self.as_dtype = dtypes.float8e4m3
+                else:
+                    self.as_dtype = dtypes.float8e8m0
+            else:
+                self.as_dtype = dtypes.float32
 
         is_channel_scale_2 = self.weight_scale_2_type == WeightScale2Type.CHANNEL
 
@@ -273,7 +304,7 @@ class LayerConfig(BaseHummingConfig):
         elif self.mma_type == MmaType.WGMMA:
             return self.weight_scale_group_size == 0
         elif self.mma_type == MmaType.MXMMA:
-            return False
+            return self.is_channel_weight_scale
         else:
             raise ValueError(f"unsupported mma_type: {self.mma_type}")
 

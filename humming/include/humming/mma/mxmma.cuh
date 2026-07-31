@@ -30,6 +30,10 @@ public:
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
+  static constexpr bool kIsGroupInputScale = Ctx::kInputScaleGroupSize > 0;
+  static constexpr bool kIsGroupOrBlockWeightScale = Ctx::kIsGroupWeightScale || Ctx::kIsBlockWeightScale;
+  static constexpr uint32_t kSFOne = MmaOpClass::kSFIsE4M3 ? 0x38 : 0x7f;
+  static constexpr uint32_t kSFOneWord = kSFOne * 0x01010101u;
 
   Ctx &ctx;
   ArithClass &arith;
@@ -118,6 +122,18 @@ public:
   }
 
   CUDA_INLINE
+  uint32_t get_sfa(uint32_t buffer_id, uint32_t reg_m, uint32_t k) {
+    if constexpr (kIsGroupInputScale) return regs_sfa[buffer_id][reg_m][k];
+    return kSFOneWord;
+  }
+
+  CUDA_INLINE
+  uint32_t get_sfb(uint32_t buffer_id, uint32_t reg_n, uint32_t k) {
+    if constexpr (kIsGroupOrBlockWeightScale) return regs_sfb[buffer_id][reg_n][k];
+    return kSFOneWord;
+  }
+
+  CUDA_INLINE
   void run(uint32_t stage_id, uint32_t iter_id) {
     uint32_t buffer_id = iter_id % 2;
     if constexpr (kAsBlocksPerWord > 1) {
@@ -133,7 +149,7 @@ public:
           uint32_t reg_n = kScaleVec == 1 ? 0 : j / 4;
           MmaOpClass::fma(
               regs_a[buffer_id][m][k], regs_b[buffer_id][j][k],
-              regs_sfa[buffer_id][reg_m][k], regs_sfb[buffer_id][reg_n][k],
+              get_sfa(buffer_id, reg_m, k), get_sfb(buffer_id, reg_n, k),
               regs_c[m][j], regs_c[m][j],
               get_byte_id_a(stage_id, iter_id, m),
               get_thread_id_a(stage_id, iter_id, m),

@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
@@ -11,6 +12,8 @@ from humming.testing import (
 
 SHAPE_N = 1024
 SHAPE_K = 1024
+NUM_EXPERTS = 8
+TOP_K = 2
 
 
 def _case(
@@ -22,22 +25,30 @@ def _case(
     group_size: int,
     c_dtype=dtypes.bfloat16,
     has_zero_point: bool = False,
+    input_group_size: int | None = None,
+    weight_group_size: int | None = None,
+    gemm_type: GemmType = GemmType.DENSE,
 ) -> KernelTestCase:
+    input_group_size = group_size if input_group_size is None else input_group_size
+    weight_group_size = group_size if weight_group_size is None else weight_group_size
+    is_dense = gemm_type == GemmType.DENSE
     return KernelTestCase(
         name=name,
         layer_config=LayerConfig(
             shape_n=SHAPE_N,
             shape_k=SHAPE_K,
+            num_experts=0 if is_dense else NUM_EXPERTS,
             a_dtype=a_dtype,
             b_dtype=b_dtype,
             c_dtype=c_dtype,
             bs_dtype=bs_dtype,
-            input_scale_group_size=group_size,
-            weight_scale_group_size=group_size,
+            input_scale_group_size=input_group_size,
+            weight_scale_group_size=weight_group_size,
             has_zero_point=has_zero_point,
             mma_type=MmaType.MXMMA,
         ),
-        compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        top_k=1 if is_dense else TOP_K,
         seed=2026,
     )
 
@@ -91,6 +102,40 @@ MXMMA_FORMAT_CASES = (
         b_dtype=dtypes.float4e2m1,
         bs_dtype=dtypes.float8e8m0,
         group_size=32,
+    ),
+    _case(
+        "e4m3-e2m1-channel-input",
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+        group_size=32,
+        input_group_size=0,
+    ),
+    _case(
+        "e2m1-e2m1-channel-weight",
+        a_dtype=dtypes.float4e2m1,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.bfloat16,
+        group_size=32,
+        weight_group_size=0,
+    ),
+    _case(
+        "e2m1-e2m1-channel-input-channel-weight",
+        a_dtype=dtypes.float4e2m1,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.bfloat16,
+        group_size=32,
+        input_group_size=0,
+        weight_group_size=0,
+    ),
+    _case(
+        "e4m3-e2m1-channel-input-indexed",
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+        group_size=32,
+        input_group_size=0,
+        gemm_type=GemmType.INDEXED,
     ),
     _case(
         "e2m1-e2m1-e4m3-g16",
@@ -176,6 +221,13 @@ def test_mxmma(test_case):
     assert config.mma_type == MmaType.MXMMA
     skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
     results = KernelTestRunner(test_case).run()
+    for result in results:
+        torch.testing.assert_close(
+            result.outputs,
+            result.outputs_ref,
+            rtol=test_case.rtol,
+            atol=test_case.atol,
+        )
     assert_kernel_test_shape_coverage(results)
 
 
@@ -189,10 +241,15 @@ def test_mxmma_case_coverage():
         dtypes.float8e5m2,
     }
     assert {case.layer_config.bs_dtype for case in MXMMA_CASES} == {
+        dtypes.bfloat16,
         dtypes.float8e4m3,
         dtypes.float8e8m0,
     }
-    assert {case.layer_config.weight_scale_group_size for case in MXMMA_CASES} == {16, 32}
+    assert {case.layer_config.weight_scale_group_size for case in MXMMA_CASES} == {
+        0,
+        16,
+        32,
+    }
     assert any(case.layer_config.mxmma_native_mixed for case in MXMMA_CASES)
 
     assert len(MXMMA_ZERO_POINT_CASES) == 6

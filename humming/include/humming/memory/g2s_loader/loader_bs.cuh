@@ -22,6 +22,7 @@ private:
   static constexpr bool kIsGroup = Ctx::kIsGroupWeightScale;
   static constexpr bool kIsBlock = Ctx::kIsBlockWeightScale;
   static constexpr bool kIsGroupOrBlock = kIsGroup || kIsBlock;
+  static constexpr bool kUseMxScale = kUseMxmma && kIsGroupOrBlock;
   static constexpr uint32_t kGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : ProblemShape::K;
   static constexpr uint32_t kGroupSizeN = kIsBlock ? Ctx::kWeightScaleGroupSizeN : 1;
 
@@ -71,7 +72,7 @@ public:
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     if (ctx.load_thread_id() == 0) {
-      if constexpr (!kUseMxmma) tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+      if constexpr (!kUseMxScale) tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       else tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
     }
   }
@@ -91,7 +92,7 @@ public:
         uint32_t gmem_col = col_offset + thread_id % kNW;
         legacy_load<Ctx::kUseCpAsync>(&gmem_ptr_load[gmem_row * kLoadStride + gmem_col], &smem_ptr_load[thread_id]);
       }
-    } else if constexpr (kUseMxmma) {
+    } else if constexpr (kUseMxScale) {
       legacy_load_2d<
           kUseCpAsync, kMxNumInt4s, kNumLoadThreads,
           kMxGmemStride, kMxSmemStride, kLoadThreadOffset>(gmem_ptr, smem_ptr);
@@ -104,7 +105,7 @@ public:
 
   CUDA_INLINE
   void advance() {
-    if constexpr (kUseMxmma) {
+    if constexpr (kUseMxScale) {
       row_offset += kNumGroups / (kMxScaleVec == 1 ? 2 : 4);
       gmem_ptr += kMxGmemStride * kNumGroups / (kMxScaleVec == 1 ? 2 : 4);
     } else if (kIsGroupOrBlock && (kLoadsPerGroup == 1 || counter == 0)) {
@@ -115,10 +116,14 @@ public:
 
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t n_block_id, uint32_t k_block_id) {
-    row_offset = kProblemNumGroups * expert_id;
+    if constexpr (kUseMxScale) {
+      row_offset = kProblemNumGroups / (kMxScaleVec == 1 ? 2 : 4) * expert_id;
+    } else {
+      row_offset = kProblemNumGroups * expert_id;
+    }
 
     if constexpr (kIsGroupOrBlock) {
-      if constexpr (kUseMxmma) {
+      if constexpr (kUseMxScale) {
         row_offset += k_block_id * (kNumGroups / (kMxScaleVec == 1 ? 2 : 4));
       } else if constexpr (BlockShape::K >= kGroupSize) {
         row_offset += k_block_id * kNumGroups;
@@ -127,7 +132,7 @@ public:
       }
     }
 
-    if constexpr (kUseMxmma) {
+    if constexpr (kUseMxScale) {
       col_offset = n_block_id * (BlockShape::N / (kMxScaleVec == 1 ? 2 : 1));
     } else if constexpr (kIsBlock) {
       col_offset = (n_block_id * BlockShape::N) / kGroupSizeN;
@@ -136,7 +141,7 @@ public:
     }
 
     uint32_t gmem_offset;
-    if constexpr (kUseMxmma) {
+    if constexpr (kUseMxScale) {
       gmem_offset = row_offset * kMxGmemStride + n_block_id * kMxSmemStride;
     } else {
       gmem_offset = row_offset * kGmemStride + n_block_id * kSmemStride;
