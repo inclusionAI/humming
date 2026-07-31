@@ -4,7 +4,7 @@ import torch
 import triton
 from tqdm import tqdm
 
-from humming.utils.test import save_benchmark_result
+from humming.testing import save_benchmark_result
 
 # Block-scaled scaled_mm (cuBLAS) helpers. Available on recent PyTorch builds.
 try:

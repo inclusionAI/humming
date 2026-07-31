@@ -8,12 +8,12 @@ from tqdm import tqdm
 from humming import dtypes, ops
 from humming.config import GemmType, MmaType
 from humming.layer import HummingLayer
-from humming.tune import get_heuristics_config
-from humming.utils.test import (
+from humming.testing import (
     generate_random_moe_tensors,
     random_fill_tensor,
     save_benchmark_result,
 )
+from humming.tune import get_heuristics_config
 
 
 def bench_humming(

@@ -8,7 +8,7 @@ from vllm.scalar_type import scalar_types
 
 from humming import dtypes, ops
 from humming.layer import HummingLayer
-from humming.utils.test import (
+from humming.testing import (
     generate_random_moe_tensors,
     random_fill_tensor,
     save_benchmark_result,
