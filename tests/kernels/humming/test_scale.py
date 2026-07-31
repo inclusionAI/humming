@@ -156,9 +156,7 @@ def test_scale_config_case_coverage():
     assert any(config.input_scale_group_size for config in configs)
 
     bs_configs = [case.layer_config for case in BS_DTYPE_CASES]
-    output_dtypes = {
-        (config.a_dtype, config.bs_dtype): config.c_dtype for config in bs_configs
-    }
+    output_dtypes = {(config.a_dtype, config.bs_dtype): config.c_dtype for config in bs_configs}
     assert len(output_dtypes) == len(BS_DTYPE_CASES)
     for a_dtype in ACTIVATION_DTYPES:
         for bs_dtype in GROUP_SCALE_DTYPES:
@@ -169,9 +167,7 @@ def test_scale_config_case_coverage():
                 assert output_dtypes[a_dtype, bs_dtype] == expected
 
     bs2_configs = [case.layer_config for case in BS2_CASES]
-    secondary_scale_pairs = {
-        (config.bs_dtype, config.weight_scale_2_type) for config in bs2_configs
-    }
+    secondary_scale_pairs = {(config.bs_dtype, config.weight_scale_2_type) for config in bs2_configs}
     assert len(secondary_scale_pairs) == len(BS2_CASES)
     for bs_dtype in GROUP_SCALE_DTYPES:
         for scale_type in SECONDARY_SCALE_TYPES:

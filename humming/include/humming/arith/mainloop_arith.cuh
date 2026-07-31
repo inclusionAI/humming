@@ -556,7 +556,6 @@ public:
             part_regs_c1.y += as_vals.y * part_regs_c0.y;
           }
         }
-
       }
     }
   }

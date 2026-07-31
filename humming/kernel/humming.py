@@ -432,11 +432,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.reduce_overlap_last_stage_only:
             assert not self.is_indexed_gemm, "reduce_overlap_last_stage_only does not support indexed GEMM"
 
-        if (
-            self.has_input_scale
-            and self.input_scale_group_size == 0
-            and self.mma_type != MmaType.MXMMA
-        ):
+        if self.has_input_scale and self.input_scale_group_size == 0 and self.mma_type != MmaType.MXMMA:
             self.use_m_major_input_scale = True
         if self.mma_type == MmaType.MXMMA and self.input_scale_group_size == 0:
             self.use_tma_as = False

@@ -1,5 +1,5 @@
-#include <nvrtc.h>
 #include <dlfcn.h>
+#include <nvrtc.h>
 
 #include <cstdio>
 #include <cstdlib>

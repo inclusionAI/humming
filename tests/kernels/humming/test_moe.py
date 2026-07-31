@@ -117,7 +117,7 @@ def test_grouped_masked_m_major_rejects_unaligned_expert_m():
 
 
 def test_moe_case_coverage():
-    
+
     assert {case.compute_config.gemm_type for case in MOE_CASES} == {
         GemmType.INDEXED,
         GemmType.GROUPED_CONTIGUOUS,
@@ -127,7 +127,5 @@ def test_moe_case_coverage():
     assert any(case.layer_config.pad_shape_n for case in MOE_CASES)
     assert any(case.layer_config.pad_shape_k for case in MOE_CASES)
     assert {
-        case.compute_config.gemm_type
-        for case in MOE_CASES
-        if case.compute_config.use_m_major_input_scale
+        case.compute_config.gemm_type for case in MOE_CASES if case.compute_config.use_m_major_input_scale
     } == {GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED}

@@ -50,6 +50,9 @@ packages = {find = {include = ["humming", "humming.*"]}}
 [tool.ruff]
 line-length = 110
 
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
 [tool.mypy]
 disable_error_code = ["no-untyped-call", "no-untyped-def", "type-arg", "untyped-decorator", "no-any-return"]
 ignore_missing_imports = true

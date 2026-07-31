@@ -71,27 +71,21 @@ class LayerConfig(BaseHummingConfig):
         ):
             return False
         if self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4):
-            return (
-                self.input_scale_group_size in (0, 32)
-                and (
-                    self.is_channel_weight_scale
-                    or self.weight_scale_group_size == 32
-                    and self.bs_dtype == dtypes.float8e8m0
-                )
+            return self.input_scale_group_size in (0, 32) and (
+                self.is_channel_weight_scale
+                or self.weight_scale_group_size == 32
+                and self.bs_dtype == dtypes.float8e8m0
             )
         if self.a_dtype in (dtypes.float4e2m1, dtypes.float4e0m3):
             if self.a_dtype == dtypes.float4e0m3 and self.weight_scale_group_size == 32:
                 return False
 
-            return (
-                self.input_scale_group_size in (0, 16, 32)
-                and (
-                    self.is_channel_weight_scale
-                    or self.weight_scale_group_size == 16
-                    and self.bs_dtype in (dtypes.float8e8m0, dtypes.float8e4m3)
-                    or self.weight_scale_group_size == 32
-                    and self.bs_dtype == dtypes.float8e8m0
-                )
+            return self.input_scale_group_size in (0, 16, 32) and (
+                self.is_channel_weight_scale
+                or self.weight_scale_group_size == 16
+                and self.bs_dtype in (dtypes.float8e8m0, dtypes.float8e4m3)
+                or self.weight_scale_group_size == 32
+                and self.bs_dtype == dtypes.float8e8m0
             )
 
         return False
@@ -157,11 +151,7 @@ class LayerConfig(BaseHummingConfig):
                 self.mma_type = MmaType.MXMMA
             else:
                 self.mma_type = MmaType.MMA
-        if (
-            self.mma_type == MmaType.MXMMA
-            and self.is_group_weight_scale
-            and self.input_scale_group_size > 0
-        ):
+        if self.mma_type == MmaType.MXMMA and self.is_group_weight_scale and self.input_scale_group_size > 0:
             assert self.input_scale_group_size == self.weight_scale_group_size
 
         if not self.has_input_scale:

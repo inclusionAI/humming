@@ -22,10 +22,7 @@ def may_quant_input(
         outputs=quanted_input,
         dtype=str(config.a_dtype),
         group_size=config.input_scale_group_size or None,
-        m_major_scale=(
-            config.mma_type == MmaType.MXMMA
-            and config.input_scale_group_size > 0
-        ),
+        m_major_scale=(config.mma_type == MmaType.MXMMA and config.input_scale_group_size > 0),
         scale_dtype=str(config.as_dtype),
     )
     return quanted_input, input_scale

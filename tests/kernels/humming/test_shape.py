@@ -160,9 +160,7 @@ def test_shape_case_coverage():
     assert (large_k.a_dtype.num_bits, large_k.b_dtype.num_bits) == (4, 3)
 
     pad_configs = {case.name: case.layer_config for case in PAD_SHAPE_CASES}
-    pad_modes = {
-        (bool(config.pad_shape_n), bool(config.pad_shape_k)) for config in pad_configs.values()
-    }
+    pad_modes = {(bool(config.pad_shape_n), bool(config.pad_shape_k)) for config in pad_configs.values()}
     assert pad_modes == {(True, False), (False, True), (True, True)}
 
     one_third = pad_configs["one-third-pad-nk"]
