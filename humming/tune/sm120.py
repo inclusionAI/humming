@@ -86,13 +86,10 @@ class Sm120Heuristics(Sm89Heuristics):
             config["use_tma"] = True
             block_shape = config["block_shape"]
             warp_shape = config["warp_shape"]
-            num_math_threads = (
-                block_shape[0]
-                // warp_shape[0]
-                * (block_shape[1] // warp_shape[1])
-                * (block_shape[2] // warp_shape[2])
-                * 32
-            )
+            m_warps = block_shape[0] // warp_shape[0]
+            n_warps = block_shape[1] // warp_shape[1]
+            k_warps = block_shape[2] // warp_shape[2]
+            num_math_threads = m_warps * n_warps * k_warps * 32
             config["use_warp_spec"] = num_math_threads % 128 == 0
             config["num_stages"] = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=False)
 
@@ -104,14 +101,23 @@ class Sm120Heuristics(Sm89Heuristics):
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_mxmma = cls._is_mxmma(layer_config.a_dtype, group_size, layer_config.use_fused_e8m0_scale)
         if gemm_type != GemmType.INDEXED and is_mxmma:
-            num_stages = cls._fit_num_stages(
-                layer_config,
-                config,
-                gemm_type,
-                reduce_overlap=True,
-            )
+            num_stages = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=True)
             config["num_stages"] = num_stages
             config["reduce_overlap_last_stage_only"] = True
+
+        if gemm_type == GemmType.DENSE:
+            num_blocks_n = layer_config.shape_n // config["block_shape"][1]
+            num_blocks_k = layer_config.shape_k // config["block_shape"][2]
+            num_blocks_nk = num_blocks_n * num_blocks_k
+            config.pop("num_sms", None)
+
+            if config["block_shape"][0] <= 32 and num_blocks_nk < cls.get_num_sms() * 3:
+                config["num_stages"] = 3
+
+            if config["block_shape"][0] <= 32 and num_blocks_nk < cls.get_num_sms() * 2:
+                config["num_stages"] = 2
+                config["use_warp_spec"] = False
+                config["use_tma"] = False
 
         return config
 
