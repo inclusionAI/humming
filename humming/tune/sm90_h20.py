@@ -258,6 +258,4 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config["use_mbarrier"] = False
             config["use_stream_k"] = False
 
-        config["use_pdl"] = True
-
         return config

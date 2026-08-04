@@ -69,7 +69,6 @@ class Sm90Heuristics(DeviceHeuristics):
             "use_stream_k": not use_batch_invariant,
             "use_f16_accum": use_f16_accum,
             "num_stages": 4,
-            "use_pdl": True,
         }
 
         if gemm_type != GemmType.INDEXED:
@@ -114,7 +113,6 @@ class Sm90Heuristics(DeviceHeuristics):
             "use_stream_k": not use_batch_invariant,
             "use_f16_accum": use_f16_accum,
             "num_stages": 4,
-            "use_pdl": block_shape_m <= 32,
         }
 
         if gemm_type != GemmType.INDEXED:
