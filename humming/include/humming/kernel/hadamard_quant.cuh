@@ -167,7 +167,8 @@ template <
     bool kHasExtraScale,
     bool kMMajor = false,
     uint32_t kScaleStore = kScaleStoreF32,
-    bool kHasGlobalScale = false>
+    bool kHasGlobalScale = false,
+    bool kUsePdl = false>
 __global__ void hadamard_quant_input(
     const SourceType *__restrict__ in_ptr,
     void *__restrict__ out_ptr,
@@ -182,6 +183,8 @@ __global__ void hadamard_quant_input(
   static_assert(kBlockSize % kGroupSize == 0);
   static_assert((kThreadsPerTile & (kThreadsPerTile - 1)) == 0);
   static_assert(kBlockSize % kThreadsPerTile == 0);
+
+  if constexpr (kUsePdl) griddepcontrol_wait();
 
   constexpr uint32_t E = kBlockSize / kThreadsPerTile;
   static_assert(kGroupSize >= E && kGroupSize % E == 0,
@@ -293,6 +296,10 @@ __global__ void hadamard_quant_input(
       }
       __syncthreads();
     }
+  }
+
+  if constexpr (kUsePdl) {
+    if (threadIdx.x == 0) griddepcontrol_launch_dependents();
   }
 
   // ---- Per-group reduction ----

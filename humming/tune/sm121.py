@@ -5,6 +5,10 @@ class Sm121Heuristics(Sm120Heuristics):
     sm_version: int = 121
 
     @classmethod
+    def should_use_pdl_for_input(cls, layer_config, shape_m: int) -> bool:
+        return True
+
+    @classmethod
     def _tune_mxmma_dense(cls, layer_config, config, shape_m, is_mxmma, num_blocks_nk) -> None:
         return
 

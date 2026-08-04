@@ -16,6 +16,10 @@ class DeviceHeuristics:
     sm_version: int = 0
 
     @classmethod
+    def should_use_pdl_for_input(cls, layer_config: LayerConfig, shape_m: int) -> bool:
+        return False
+
+    @classmethod
     def get_base_config(
         cls,
         a_dtype: dtypes.DataType,

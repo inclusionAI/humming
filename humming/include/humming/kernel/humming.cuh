@@ -92,10 +92,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   producer.init_mbarrier();
   mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
 
-  if constexpr (kUsePdl) {
-    griddepcontrol_launch_dependents();
-  }
-
   bool pdl_waited = false;
   while (scheduler.get_next_block()) {
     debug_kernel_timeout_check(debug_start_clock);
@@ -114,6 +110,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     if constexpr (kUsePdl) {
       if (!pdl_waited) {
         griddepcontrol_wait();
+        if (threadIdx.x == 0) griddepcontrol_launch_dependents();
         pdl_waited = true;
       }
     }

@@ -33,7 +33,8 @@ template <
     bool kHasExtraScale,
     bool kMMajor = false,
     uint32_t kScaleStore = kScaleStoreF32,
-    bool kHasGlobalScale = false>
+    bool kHasGlobalScale = false,
+    bool kUsePdl = false>
 __global__ void hadamard_quant_input_wide(
     const SourceType *__restrict__ in_ptr,
     void *__restrict__ out_ptr,
@@ -49,6 +50,8 @@ __global__ void hadamard_quant_input_wide(
   static_assert(kGroupSize % kBlockSize == 0);
   static_assert(kBlockSize % kThreadsPerTile == 0);
   static_assert(kThreadsPerTile <= 32, "T_tile must be <= 32 for shuffle-only FHT");
+
+  if constexpr (kUsePdl) griddepcontrol_wait();
 
   constexpr uint32_t E_lane = kBlockSize / kThreadsPerTile;
   static_assert((E_lane & (E_lane - 1)) == 0);
@@ -143,6 +146,10 @@ __global__ void hadamard_quant_input_wide(
   PRAGMA_UNROLL
   for (uint32_t i = 0; i < kElemsPerThread; i++)
     reg[i] *= norm;
+
+  if constexpr (kUsePdl) {
+    if (threadIdx.x == 0) griddepcontrol_launch_dependents();
+  }
 
   // ---- Channel-wide reduction ----
   float local_max, local_min, local_absmax;

@@ -5,7 +5,7 @@
 
 CUDA_INLINE void griddepcontrol_wait() {
 #if (__CUDA_ARCH__ >= 900)
-  asm volatile("griddepcontrol.wait;");
+  asm volatile("griddepcontrol.wait;" ::: "memory");
 #endif
 }
 

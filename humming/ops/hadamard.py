@@ -28,6 +28,7 @@ def hadamard_transform(
     block_size: int,
     scale: float = 1.0,
     outputs: torch.Tensor | None = None,
+    use_pdl: bool = False,
 ) -> torch.Tensor:
     """Apply a normalized Walsh-Hadamard transform along the last dimension.
 
@@ -41,6 +42,7 @@ def hadamard_transform(
         block_size: transform length ``N``, a power of two in ``[2, 4096]``.
         scale: additional scalar multiplier applied after normalization.
         outputs: optional preallocated output tensor (same shape/dtype).
+        use_pdl: allow a following PDL-enabled kernel to overlap this kernel's tail.
     """
     assert inputs.is_cuda
     assert inputs.is_contiguous()
@@ -64,6 +66,7 @@ def hadamard_transform(
             torch_dtype=inputs.dtype,
             block_size=block_size,
             has_scale=(scale != 1.0),
+            use_pdl=use_pdl,
         )
         kernel(inputs=inputs, outputs=outputs, extra_scale=scale)
 
@@ -81,6 +84,7 @@ def hadamard_quant_input(
     m_major_scale: bool = False,
     scale_dtype: str = "float32",
     global_scale: torch.Tensor | None = None,
+    use_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused Walsh-Hadamard transform + per-group symmetric quantization.
 
@@ -102,6 +106,7 @@ def hadamard_quant_input(
             (or be a multiple of it). ``None`` or ``0`` means channelwise
             (= ``inputs.size(-1)``).
         scale: extra scalar absorbed into the returned ``scales``.
+        use_pdl: allow a following PDL-enabled kernel to overlap this kernel's tail.
     """
     assert inputs.is_cuda and inputs.is_contiguous()
     assert inputs.dtype in (torch.float16, torch.bfloat16, torch.float32)
@@ -171,6 +176,7 @@ def hadamard_quant_input(
                 m_major=m_major_scale,
                 scale_dtype=scale_dtype,
                 has_global_scale=(global_scale is not None),
+                use_pdl=use_pdl,
             )
         else:
             kernel = HadamardQuantInputKernel(
@@ -182,6 +188,7 @@ def hadamard_quant_input(
                 m_major=m_major_scale,
                 scale_dtype=scale_dtype,
                 has_global_scale=(global_scale is not None),
+                use_pdl=use_pdl,
             )
         kernel(
             inputs=inputs,

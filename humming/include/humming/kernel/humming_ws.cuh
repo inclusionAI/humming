@@ -88,9 +88,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
   mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
 
-  if constexpr (kUsePdl) {
-    griddepcontrol_launch_dependents();
-  }
   bool pdl_waited = false;
 
   if (ctx.is_load_thread()) {
@@ -107,6 +104,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       if constexpr (kUsePdl) {
         if (!pdl_waited) {
           griddepcontrol_wait();
+          if (threadIdx.x == Ctx::kLoadThreadOffset) griddepcontrol_launch_dependents();
           pdl_waited = true;
         }
       }

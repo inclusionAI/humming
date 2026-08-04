@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from torch._subclasses.fake_tensor import FakeTensor
+from triton.language.extra.cuda import gdc_wait
 
 # Hidden float formats the hardware supports but PTX cannot emit: quantize using
 # the base PTX type below and patch the cubin's cvt to the hidden format.
@@ -12,19 +13,14 @@ _HIDDEN_PATCH_MODE = {"float8e3m4": "cvt_e3m4", "float4e0m3": "cvt_e0m3"}
 @triton.jit
 def gdc_launch_dependents():
     tl.inline_asm_elementwise(
-        asm="griddepcontrol.launch_dependents;",
-        constraints="=r",
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-
-
-@triton.jit
-def gdc_wait():
-    tl.inline_asm_elementwise(
-        asm="griddepcontrol.wait;",
+        asm="""{
+        .reg .pred p;
+        .reg .u32 tid;
+        mov.u32 tid, %tid.x;
+        setp.eq.u32 p, tid, 0;
+        @p griddepcontrol.launch_dependents;
+        mov.u32 $0, 0;
+        }""",
         constraints="=r",
         args=[],
         dtype=tl.int32,
@@ -165,8 +161,8 @@ def _quant_tensor_kernel(
     USE_PDL: tl.constexpr = False,
 ):
     if USE_PDL:
-        gdc_launch_dependents()
         gdc_wait()
+
     block_id = tl.program_id(0).to(tl.int64)
     tl.static_assert(N % GROUP_SIZE == 0)
 
@@ -200,7 +196,6 @@ def _quant_tensor_kernel(
 
             x1 = tl.load(x_ptr + (offset + cols1), mask=mask, other=0.0).to(tl.float32)
             x2 = tl.load(x_ptr + (offset + cols2), mask=mask, other=0.0).to(tl.float32)
-
             if is_dynamic:
                 scale = tl.maximum(calc_scale(x1, dtype), calc_scale(x2, dtype))
                 scale, s_store = finalize_scale(scale, SCALE_DTYPE, gs, inv_gs)
@@ -231,6 +226,12 @@ def _quant_tensor_kernel(
                 if MX_PACK:
                     s_store = s_store.to(tl.uint8, bitcast=True)
                 tl.store(scale_ptr + scale_off, s_store, mask=in_range)
+
+    if USE_PDL:
+        # Trigger after every output store has been issued.  On SM120, waking a
+        # waiting GEMM while quantization still owns substantial resources can
+        # starve the producer and cost far more than the launch latency hidden.
+        gdc_launch_dependents()
 
 
 def quant_input(
@@ -346,7 +347,12 @@ def quant_input(
         )
 
         effective_use_pdl = use_pdl and torch.cuda.get_device_capability(inputs.device)[0] >= 9
-        launch_kwargs = dict(num_warps=num_warps, num_stages=num_stages, USE_PDL=effective_use_pdl)
+        launch_kwargs = dict(
+            num_warps=num_warps,
+            num_stages=num_stages,
+            launch_pdl=effective_use_pdl,
+            USE_PDL=effective_use_pdl,
+        )
 
         patch_mode = _HIDDEN_PATCH_MODE.get(dtype)
         if patch_mode is not None:
