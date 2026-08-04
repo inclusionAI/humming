@@ -1,14 +1,10 @@
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
 
 from humming import dtypes
-from humming.config import GemmType
+from humming.config import GemmType, LayerConfig
 from humming.tune.base import DeviceHeuristics
-
-if TYPE_CHECKING:
-    from humming.layer import HummingLayerMeta
 
 
 class Sm90Heuristics(DeviceHeuristics):
@@ -25,23 +21,25 @@ class Sm90Heuristics(DeviceHeuristics):
     @classmethod
     def get_config1(
         cls,
-        meta: "HummingLayerMeta",
+        layer_config: LayerConfig,
         shape_m: int,
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        if use_f16_accum:
+        if layer_config.use_packed_k_layout:
+            max_block_m = 128
+        elif use_f16_accum:
             max_block_m = 256
         else:
             max_block_m = 176
 
-        num_blocks_list = cls.calc_num_block_list(meta, shape_m, max_block_m)
+        num_blocks_list = cls.calc_num_block_list(layer_config, shape_m, max_block_m)
         block_shape_m = np.argmin(num_blocks_list).item() * 8 + 8
         warp_shape_n = 32
-        warp_shape_k = 1024 // meta.a_dtype.num_bits
+        warp_shape_k = 1024 // layer_config.a_dtype.num_bits
 
-        if meta.shape_n <= 4096 and not use_batch_invariant and block_shape_m <= 64:
+        if layer_config.shape_n <= 4096 and not use_batch_invariant and block_shape_m <= 64:
             block_shape_n = 128
             block_shape_k = warp_shape_k * 2
             if block_shape_m <= 32:
@@ -49,13 +47,21 @@ class Sm90Heuristics(DeviceHeuristics):
             if block_shape_k > 256:
                 block_shape_k = block_shape_k // 2
                 warp_shape_k = warp_shape_k // 2
+
+            while layer_config.shape_k % block_shape_k != 0:
+                block_shape_k = block_shape_k // 2
         else:
             block_shape_n = 256
             block_shape_k = warp_shape_k
-            if block_shape_m <= 32 and meta.b_dtype.num_bits <= 6:
+            if block_shape_m <= 32 and layer_config.b_dtype.num_bits <= 6:
                 block_shape_k = block_shape_k * 2
             elif block_shape_m <= 32:
                 warp_shape_k = warp_shape_k // 2
+
+        while layer_config.shape_k % block_shape_k != 0:
+            warp_shape_k = 512 // layer_config.a_dtype.num_bits
+            block_shape_k = block_shape_k // 2
+            assert block_shape_k >= warp_shape_k
 
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
@@ -71,7 +77,7 @@ class Sm90Heuristics(DeviceHeuristics):
             config["use_tma"] = True
             config["use_mbarrier"] = True
 
-            if meta.shape_n % (block_shape_n * 2) == 0 and shape_m / block_shape_m >= 4:
+            if layer_config.shape_n % (block_shape_n * 2) == 0 and shape_m / block_shape_m >= 4:
                 if gemm_type == GemmType.DENSE:
                     config["multi_cast_size_a"] = 2
 
@@ -80,7 +86,7 @@ class Sm90Heuristics(DeviceHeuristics):
     @classmethod
     def get_config2(
         cls,
-        meta: "HummingLayerMeta",
+        layer_config: LayerConfig,
         shape_m: int,
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
@@ -88,17 +94,19 @@ class Sm90Heuristics(DeviceHeuristics):
     ):
         if use_f16_accum:
             max_block_m = 256
-        elif meta.input_scale_group_size > 0:
+        elif layer_config.input_scale_group_size > 0:
             max_block_m = 160
-        elif meta.weight_scale_group_size < 128:
+        elif layer_config.weight_scale_group_size < 128:
             max_block_m = 192
         else:
             max_block_m = 200
 
-        num_blocks_list = cls.calc_num_block_list(meta, shape_m, max_block_m)
+        num_blocks_list = cls.calc_num_block_list(layer_config, shape_m, max_block_m)
         block_shape_m = np.argmin(num_blocks_list).item() * 8 + 8
 
         block_shape_k = 256 if block_shape_m <= 32 else 128
+        if layer_config.shape_k % 256 != 0:
+            block_shape_k = 128
 
         config = {
             "block_shape": (block_shape_m, 128, block_shape_k),
@@ -122,18 +130,18 @@ class Sm90Heuristics(DeviceHeuristics):
     @classmethod
     def calc_num_block_list(
         cls,
-        meta: "HummingLayerMeta",
+        layer_config: LayerConfig,
         shape_m: int,
         max_block_m: int,
     ):
         num_blocks_list = []
-        if not meta.num_experts:
+        if not layer_config.num_experts:
             for i in range(max_block_m // 8):
                 block_m = i * 8 + 8
                 num_blocks_list.append(math.ceil(shape_m / block_m))
         else:
             random_state = np.random.RandomState(seed=0)
-            samples = random_state.randint(0, meta.num_experts, size=shape_m)
+            samples = random_state.randint(0, layer_config.num_experts, size=shape_m)
             counts = np.bincount(samples)
             for i in range(max_block_m // 8):
                 block_m = i * 8 + 8
@@ -143,27 +151,29 @@ class Sm90Heuristics(DeviceHeuristics):
         for i in range(max_block_m // 8):
             num_blocks = num_blocks_list[i]
             block_m = i * 8 + 8
-            if meta.a_dtype == dtypes.int8 and num_blocks % 16 == 8 and block_m > 32:
-                num_blocks_list[i] = 10000
+            if layer_config.a_dtype == dtypes.int8 and block_m % 16 == 8 and block_m > 32:
+                num_blocks_list[i] = 1000000
 
         return num_blocks_list
 
     @classmethod
     def get_config(
         cls,
-        meta: "HummingLayerMeta",
+        layer_config: LayerConfig,
         shape_m: int,
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        if meta.a_dtype.num_bits == 16:
+        if layer_config.a_dtype.num_bits == 16:
             func = cls.get_config1
-        elif meta.input_scale_group_size == 0 and meta.weight_scale_group_size == 0:
+        elif layer_config.use_packed_k_layout:
             func = cls.get_config1
-        elif meta.use_fused_e8m0_scale:
+        elif layer_config.input_scale_group_size == 0 and layer_config.weight_scale_group_size == 0:
+            func = cls.get_config1
+        elif layer_config.use_fused_e8m0_scale and layer_config.input_scale_group_size == 0:
             func = cls.get_config1
         else:
             func = cls.get_config2
 
-        return func(meta, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+        return func(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)

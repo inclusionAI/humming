@@ -3,16 +3,34 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Callable
 
+import torch
 from cuda.bindings import nvrtc
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
 from humming.utils.cuda import filter_cuda_paths
-from humming.utils.nvrtc import may_build_nvrtc_compile_binary
+from humming.utils.nvrtc import get_nvrtc_library_path, may_build_nvrtc_compile_binary
 
 
 class Compiler:
+    @staticmethod
+    def debug_kernel_flags():
+        enabled = os.environ.get("HUMMING_DEBUG_KERNEL", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        flags = [f"-DHUMMING_DEBUG_KERNEL={int(enabled)}"]
+        if enabled:
+            clock_rate_khz = torch.cuda.get_device_properties().clock_rate
+            timeout_clocks = int(clock_rate_khz) * 1000 * 10
+            flags.append(f"-DHUMMING_DEBUG_KERNEL_TIMEOUT_CLOCKS={timeout_clocks}")
+            flags.append("-lineinfo")
+        return flags
+
     @classmethod
     def signature(self):
         raise NotImplementedError
@@ -36,7 +54,14 @@ class Compiler:
         return json.dumps(data, ensure_ascii=False)
 
     @classmethod
-    def compile(cls, code, sm_version, kernel_expr, disable_fast_math=False):
+    def compile(
+        cls,
+        code,
+        sm_version,
+        kernel_expr,
+        disable_fast_math=False,
+        postprocess_cubin: Callable | None = None,
+    ):
         flags = cls.get_flags(sm_version, disable_fast_math)
         signature = f"{cls.__name__}$${cls.signature()}$${flags}$${kernel_expr}$${code}"
         signature += "$$" + Compiler.cuh_last_update_time()
@@ -61,18 +86,22 @@ class Compiler:
             compile_res = cls._compile(source_path, cache_dirname, sm_version, kernel_expr, flags)
             returncode, stdout, stderr = compile_res
 
+            if returncode == 0 and postprocess_cubin is not None:
+                filename = cache_dirname / "kernel_tmp.cubin"
+                postprocess_cubin(filename.as_posix())
+
             with open(cache_dirname / "stdout.log", "w") as f:
                 f.write(stdout)
             with open(cache_dirname / "stderr.log", "w") as f:
                 f.write(stderr)
 
-        if returncode != 0:
-            print(stderr, flush=True)
-            (cache_dirname / "kernel_tmp.cubin").unlink(missing_ok=True)
-            raise RuntimeError(f"{cls} run failed")
+            if returncode != 0:
+                print(stderr, flush=True)
+                (cache_dirname / "kernel_tmp.cubin").unlink(missing_ok=True)
+                raise RuntimeError(f"{cls} run failed")
 
-        os.replace(cache_dirname / "kernel_tmp.cubin", cache_dirname / "kernel.cubin")
-        return cache_filename.as_posix()
+            os.replace(cache_dirname / "kernel_tmp.cubin", cache_filename)
+            return cache_filename.as_posix()
 
     @classmethod
     def get_flags(cls, sm_version, disable_fast_math=False):
@@ -145,12 +174,13 @@ class NVRTCCompiler(Compiler):
         flags = [
             f"--gpu-architecture=sm_{sm_version}",
             "-std=c++17",
+            *cls.debug_kernel_flags(),
             "--use_fast_math",
             "--dopt=on",
             "-extra-device-vectorization",
             "--ptxas-options=-O3",
             "--ptxas-options=--register-usage-level=10",
-            "--diag-suppress=39,161,174,177,940",
+            "--diag-suppress=39,161,174,177,940,1444",
             "-default-device",
         ]
         for d in cls._get_include_dirs():
@@ -180,8 +210,12 @@ class NVRTCCompiler(Compiler):
         target_path = (Path(cache_dirname) / "kernel_tmp.cubin").as_posix()
         cmd = [
             binary_path,
-            "--input", source_path,
-            "--output", target_path,
+            "--nvrtc-path",
+            get_nvrtc_library_path(),
+            "--input",
+            source_path,
+            "--output",
+            target_path,
             *header_args,
         ]
         if kernel_expr:
@@ -220,9 +254,10 @@ class NVCCCompiler(Compiler):
 
         flags = [
             "-std=c++17",
+            *cls.debug_kernel_flags(),
             "--ptxas-options=--register-usage-level=10",
             "--use_fast_math",
-            "--diag-suppress=39,161,174,177,940,177",
+            "--diag-suppress=39,161,174,177,940,1444",
             *[f"-I{d}" for d in cls.include_dirs()],
             f"-gencode=arch=compute_{sm_version},code=sm_{sm_version}",
             "-cubin",

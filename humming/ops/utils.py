@@ -1,3 +1,4 @@
+import contextlib
 import os
 import subprocess
 import sys
@@ -9,7 +10,6 @@ import torch.utils.cpp_extension
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
-from humming import dtypes
 from humming.utils.cuda import filter_cuda_paths
 
 _libs = {}
@@ -34,7 +34,20 @@ def register_op(
     _lib.define(op_name + schema_str)
     _lib.impl(op_name, impl_func, dispatch_key="CUDA")
     if fake_impl_func is not None:
-        _lib._register_fake(op_name, fake_impl_func)
+        with _shield_lazy_modules():
+            _lib._register_fake(op_name, fake_impl_func)
+
+
+@contextlib.contextmanager
+def _shield_lazy_modules():
+    saved = {}
+    for name, mod in list(sys.modules.items()):
+        if mod is not None and type(mod).__name__ == "_LazyModule":
+            saved[name] = sys.modules.pop(name)
+    try:
+        yield
+    finally:
+        sys.modules.update(saved)
 
 
 def get_humming_launcher_build_dir(use_torch_stable_api: bool):
@@ -47,11 +60,9 @@ def get_humming_launcher_build_dir(use_torch_stable_api: bool):
     )
 
     cache_dir = jit_utils.get_humming_cache_dir()
-    py_version = f"py{sys.version_info.major}{sys.version_info.minor}"
     torch_major, torch_minor = torch.__version__.split(".")[:2]
-    torch_version = f"torch{torch_major}{torch_minor}"
-    abi_tag = "stable" if use_torch_stable_api else "nostable"
-    version = f"{py_version}_{torch_version}_{abi_tag}"
+    version = "torch211_stable" if use_torch_stable_api else f"torch{torch_major}{torch_minor}_nostable"
+    version += "_" + jit_utils.hash_to_hex(jit_utils.get_native_platform_signature())
 
     launcher_build_dir = os.path.join(cache_dir, f"launcher/{version}/{launcher_code_hash}")
     Path(launcher_build_dir).mkdir(exist_ok=True, parents=True)
@@ -59,26 +70,23 @@ def get_humming_launcher_build_dir(use_torch_stable_api: bool):
 
 
 def _resolve_use_torch_stable_api() -> bool:
-    """Decide whether to compile the launcher with the torch stable C ABI.
-
-    Defaults to enabled for torch >= 2.11, which is the first release whose
-    stable ABI registers all ScalarType cases humming relies on, including
-    Float8_e8m0fnu (added in pytorch/pytorch#173669, gated by
-    TORCH_FEATURE_VERSION >= TORCH_VERSION_2_11_0). On torch 2.10.x the
-    stable ABI is missing Float8_e8m0fnu (ScalarType 44), so passing a
-    UE8M0 weight scale through ``torch.ops.humming.launch_kernel`` fails
-    with ``RuntimeError: Not yet supported ScalarType 44``.
-
-    The default can be overridden via the ``HUMMING_USE_TORCH_STABLE_API``
-    environment variable for users who want to force one path or the other
-    (e.g. to test the stable ABI on an older torch with a custom build).
-    """
     from packaging.version import Version
 
     override = os.environ.get("HUMMING_USE_TORCH_STABLE_API")
     if override is not None:
         return override.strip().lower() in ("1", "true", "yes", "on")
     return Version(torch.__version__) >= Version("2.11")
+
+
+def _get_precompiled_launcher_path() -> Path | None:
+    from packaging.version import Version
+
+    if Version(torch.__version__) < Version("2.11"):
+        return None
+
+    humming_dir = Path(__file__).parents[1]
+    csrc_dir = humming_dir / "csrc" / "launcher"
+    return jit_utils.get_precompiled_artifact_path(csrc_dir, "libhumming_launcher.so")
 
 
 def init_humming_launcher():
@@ -89,6 +97,12 @@ def init_humming_launcher():
     USE_TORCH_STABLE_API = _resolve_use_torch_stable_api()
     lock_filename = jit_utils.get_humming_lock_filename("launcher")
     with FileLock(lock_filename):
+        precompiled_path = _get_precompiled_launcher_path() if USE_TORCH_STABLE_API else None
+        if precompiled_path is not None:
+            torch.ops.load_library(str(precompiled_path))
+            _launcher_inited = True
+            return
+
         import humming
 
         build_dir = get_humming_launcher_build_dir(USE_TORCH_STABLE_API)
@@ -103,13 +117,18 @@ def init_humming_launcher():
             required_headers=["cuda.h", "crt/host_defines.h", "cuda/std/cstdint"],
         )
 
+        extra_cflags = ["-O3", f"-DUSE_TORCH_STABLE_API={int(USE_TORCH_STABLE_API)}"]
+        if USE_TORCH_STABLE_API:
+            extra_cflags.append("-DTORCH_TARGET_VERSION=0x020B000000000000")
+
         torch.utils.cpp_extension.load(
             name="humming_launcher",
             sources=[filename],
             extra_include_paths=list(cuda_env["include_paths"]),
             extra_ldflags=["-lcuda", "-lc10_cuda", "-ltorch_cuda"],
-            extra_cflags=["-O3", f"-DUSE_TORCH_STABLE_API={int(USE_TORCH_STABLE_API)}"],
+            extra_cflags=extra_cflags,
             build_directory=build_dir,
+            is_python_module=False,
         )
 
         _launcher_inited = True
@@ -121,7 +140,7 @@ def build_humming_launcher_in_bg():
     cmd = "import humming.ops.utils; humming.ops.utils.init_humming_launcher()"
     env = os.environ.copy()
     env["HUMMING_DISABLE_PARALLEL_BUILD"] = "1"
-    subprocess.Popen(
+    jit_utils.popen_and_reap(
         [sys.executable, "-c", cmd],
         env=env,
         stderr=subprocess.DEVNULL,

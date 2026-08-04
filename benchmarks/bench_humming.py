@@ -6,14 +6,14 @@ import triton
 from tqdm import tqdm
 
 from humming import dtypes, ops
-from humming.config import GemmType
+from humming.config import GemmType, MmaType
 from humming.layer import HummingLayer
-from humming.tune import get_heuristics_config
-from humming.utils.test import (
+from humming.testing import (
     generate_random_moe_tensors,
     random_fill_tensor,
     save_benchmark_result,
 )
+from humming.tune import get_heuristics_config
 
 
 def bench_humming(
@@ -30,6 +30,7 @@ def bench_humming(
     has_zero_point: bool = False,
     is_fp_zero_point: bool = False,
     use_f16_accum: bool = False,
+    use_m_major_input_scale: bool = False,
     is_moe_down: bool = False,
     balanced: bool = False,
     expert_max_tokens: int | None = None,
@@ -55,7 +56,7 @@ def bench_humming(
     for tensor in layer.parameters():
         random_fill_tensor(tensor)
     layer.transform()
-    meta = layer.humming_metas[""]
+    layer_config = layer.humming_config
 
     default_shape_m_list = [2**i for i in range(15)]
     benchmark_result: list[dict[str, int | float]] = []
@@ -63,7 +64,7 @@ def bench_humming(
         if gemm_type == GemmType.DENSE:
             actual_shape_m = shape_m
         elif gemm_type == GemmType.INDEXED:
-            actual_shape_m = shape_m * (1 if is_moe_down else top_k)
+            actual_shape_m = shape_m * (top_k if is_moe_down else 1)
         elif gemm_type == GemmType.GROUPED_CONTIGUOUS:
             actual_shape_m = shape_m * top_k
         else:
@@ -73,16 +74,23 @@ def bench_humming(
         inputs = torch.randn((actual_shape_m, shape_k), dtype=torch_dtype, device="cuda:0")
         input_scale: torch.Tensor | None = None
         if a_dtype not in ["float16", "bfloat16"]:
+            is_mxmma = layer_config.mma_type == MmaType.MXMMA
+            m_major = use_m_major_input_scale and not layer_config.use_fused_e8m0_scale
+            scale_dtype = bs_dtype if is_mxmma else "float32"
             inputs, input_scale = ops.quant_input(
                 inputs,
                 a_dtype,
-                None,
                 group_size=input_scale_group_size,
+                scale_dtype=scale_dtype,
+                m_major_scale=m_major,
             )
+            if is_mxmma and not m_major:
+                input_scale = input_scale.view(torch.int32).contiguous()
 
         tuning_config = get_heuristics_config(
-            meta=meta,
+            layer_config=layer_config,
             use_f16_accum=use_f16_accum,
+            use_m_major_input_scale=use_m_major_input_scale,
             gemm_type=gemm_type,
         )
 
@@ -114,6 +122,10 @@ def bench_humming(
             _, expert_layout, sorted_ids, expert_ids, num_tokens_padded = moe_tensors
 
         def run():
+            valid_shape_m = 0
+            if gemm_type == GemmType.GROUPED_MASKED:
+                valid_shape_m = shape_m * top_k  # noqa
+
             return layer(
                 inputs=inputs,  # noqa
                 input_scale=input_scale,  # noqa
@@ -121,9 +133,11 @@ def bench_humming(
                 expert_ids=expert_ids,  # noqa
                 num_tokens_padded=num_tokens_padded,  # noqa
                 expert_layout=expert_layout,  # noqa
+                valid_shape_m=valid_shape_m,
                 compute_config=json.dumps(
                     {
                         "use_f16_accum": use_f16_accum,
+                        "use_m_major_input_scale": use_m_major_input_scale,
                         "gemm_type": gemm_type.value,
                     }
                 ),
@@ -143,6 +157,14 @@ def bench_humming(
         for tensor in layer.state_dict().values():
             if gemm_type == GemmType.DENSE:
                 nbytes += tensor.nbytes
+            elif gemm_type == GemmType.GROUPED_MASKED:
+                assert expert_layout is not None
+                num_actived_experts = int((expert_layout > 0).sum().item())
+                nbytes += tensor.nbytes // num_experts * num_actived_experts
+            elif gemm_type == GemmType.GROUPED_CONTIGUOUS:
+                assert expert_layout is not None
+                num_actived_experts = int((expert_layout[1:] > expert_layout[:-1]).sum().item())
+                nbytes += tensor.nbytes // num_experts * num_actived_experts
             else:
                 assert expert_ids is not None
                 num_actived_experts = len(set(expert_ids.tolist()))
@@ -169,6 +191,8 @@ def main():
         "float8e4m3",
         "float8e5m2",
         "float4e2m1",
+        "float8e3m4",
+        "float4e0m3",
         "int8",
         "int4",
     ]
@@ -183,6 +207,7 @@ def main():
     parser.add_argument("--zero_point", default=False, action="store_true")
     parser.add_argument("--use_fp_zero_point", default=False, action="store_true")
     parser.add_argument("--use_f16_accum", default=False, action="store_true")
+    parser.add_argument("--use_m_major_input_scale", default=False, action="store_true")
     parser.add_argument("--num_experts", type=int, default=0)
     parser.add_argument("--top_k", type=int, default=0)
     parser.add_argument("--is_moe_down", default=False, action="store_true")
@@ -212,6 +237,7 @@ def main():
         has_zero_point=args.zero_point or args.use_fp_zero_point,
         is_fp_zero_point=args.use_fp_zero_point,
         use_f16_accum=args.use_f16_accum,
+        use_m_major_input_scale=args.use_m_major_input_scale,
         shape_m_list=args.shape_m_list,
         is_moe_down=args.is_moe_down,
         balanced=args.balanced,

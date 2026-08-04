@@ -6,6 +6,7 @@ import torch
 from humming import dtypes
 from humming.kernel.humming import HummingKernel
 from humming.ops.bench import tops_bench  # noqa
+from humming.ops.hadamard import hadamard_quant_input, hadamard_transform
 from humming.ops.input import quant_input
 from humming.ops.moe import moe_fused_mul_sum
 from humming.ops.utils import init_humming_launcher, register_op
@@ -19,21 +20,27 @@ from humming.ops.weight import (
 )
 
 
-def register_kernel(cubin_path: str, func_name: str) -> int:
+def register_kernel(cubin_path: str) -> tuple[int, str]:
     init_humming_launcher()
-    return torch.ops.humming.register_kernel(cubin_path, func_name)
+    return torch.ops.humming.register_kernel(cubin_path)
+
+
+def get_kernel_smem_size(kernel_id: int) -> int:
+    init_humming_launcher()
+    return torch.ops.humming.get_kernel_smem_size(kernel_id)
 
 
 def launch_kernel(
+    *,
     configs: torch.Tensor | list[int],
     inputs: torch.Tensor,
     weight: torch.Tensor,
-    outputs: torch.Tensor | None = None,
+    weight_scale: torch.Tensor,
+    weight_scale_2: torch.Tensor | None = None,
     input_scale: torch.Tensor | None = None,
-    weight_scale: torch.Tensor | None = None,
     zero_point: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
-    global_scale: torch.Tensor | None = None,
+    outputs: torch.Tensor | None = None,
     sorted_ids: torch.Tensor | None = None,
     expert_ids: torch.Tensor | None = None,
     num_tokens_padded: torch.Tensor | None = None,
@@ -42,18 +49,19 @@ def launch_kernel(
     top_k: int = 1,
     valid_shape_m: int = 0,
 ) -> torch.Tensor:
+    assert weight_scale is not None, "weight_scale is required (a lone scale also rides this slot)"
     if isinstance(configs, list):
         configs = torch.tensor(configs, dtype=torch.int64, device="cpu")
     return torch.ops.humming.launch_kernel(
         configs,
         inputs,
         weight,
-        outputs,
-        input_scale,
         weight_scale,
+        weight_scale_2,
+        input_scale,
         zero_point,
         bias,
-        global_scale,
+        outputs,
         sorted_ids,
         expert_ids,
         num_tokens_padded,
@@ -65,17 +73,18 @@ def launch_kernel(
 
 
 def humming_gemm(
+    *,
     layer_config: str,
-    compute_config: str | None,
-    tuning_config: str | None,
     inputs: torch.Tensor,
     weight: torch.Tensor,
-    outputs: torch.Tensor | None = None,
+    weight_scale: torch.Tensor,
+    weight_scale_2: torch.Tensor | None = None,
+    compute_config: str | None = None,
+    tuning_config: str | None = None,
     input_scale: torch.Tensor | None = None,
-    weight_scale: torch.Tensor | None = None,
     zero_point: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
-    global_scale: torch.Tensor | None = None,
+    outputs: torch.Tensor | None = None,
     sorted_ids: torch.Tensor | None = None,
     expert_ids: torch.Tensor | None = None,
     num_tokens_padded: torch.Tensor | None = None,
@@ -84,17 +93,18 @@ def humming_gemm(
     top_k: int = 1,
     valid_shape_m: int = 0,
 ) -> torch.Tensor:
+    assert weight_scale is not None, "weight_scale is required (a lone scale also rides this slot)"
     configs = HummingKernel.prepare_kernels(layer_config, compute_config, tuning_config)
     return torch.ops.humming.launch_kernel(
         configs,
         inputs,
         weight,
-        outputs,
-        input_scale,
         weight_scale,
+        weight_scale_2,
+        input_scale,
         zero_point,
         bias,
-        global_scale,
+        outputs,
         sorted_ids,
         expert_ids,
         num_tokens_padded,
@@ -106,17 +116,18 @@ def humming_gemm(
 
 
 def _humming_gemm_fake(
+    *,
     layer_config: str,
-    compute_config: str | None,
-    tuning_config: str | None,
     inputs: torch.Tensor,
     weight: torch.Tensor,
-    outputs: torch.Tensor | None = None,
+    weight_scale: torch.Tensor,
+    weight_scale_2: torch.Tensor | None = None,
+    compute_config: str | None = None,
+    tuning_config: str | None = None,
     input_scale: torch.Tensor | None = None,
-    weight_scale: torch.Tensor | None = None,
     zero_point: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
-    global_scale: torch.Tensor | None = None,
+    outputs: torch.Tensor | None = None,
     sorted_ids: torch.Tensor | None = None,
     expert_ids: torch.Tensor | None = None,
     num_tokens_padded: torch.Tensor | None = None,
@@ -141,6 +152,8 @@ def _humming_gemm_fake(
     return inputs.new_empty((shape_m, shape_n), dtype=output_dtype)
 
 
+register_op("humming::hadamard_transform", hadamard_transform, hadamard_transform)
+register_op("humming::hadamard_quant_input", hadamard_quant_input, hadamard_quant_input)
 register_op("humming::quant_input", quant_input, quant_input)
 register_op("humming::quant_weight", quant_weight, quant_weight)
 register_op("humming::dequant_weight", dequant_weight, dequant_weight)
@@ -157,6 +170,8 @@ register_op(
 
 
 if not TYPE_CHECKING:
+    hadamard_transform = torch.ops.humming.hadamard_transform
+    hadamard_quant_input = torch.ops.humming.hadamard_quant_input
     quant_input = torch.ops.humming.quant_input
     quant_weight = torch.ops.humming.quant_weight
     dequant_weight = torch.ops.humming.dequant_weight
@@ -169,6 +184,8 @@ if not TYPE_CHECKING:
 
 
 __all__ = [
+    "hadamard_transform",
+    "hadamard_quant_input",
     "quant_input",
     "quant_weight",
     "dequant_weight",

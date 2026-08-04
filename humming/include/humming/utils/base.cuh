@@ -12,6 +12,34 @@
 #define PRAGMA_UNROLL_COUNT(n) _Pragma(STR(unroll n))
 #define CUDA_INLINE __device__ __forceinline__
 
+#ifndef HUMMING_DEBUG_KERNEL
+#define HUMMING_DEBUG_KERNEL 0
+#endif
+
+#ifndef HUMMING_DEBUG_KERNEL_TIMEOUT_CLOCKS
+#define HUMMING_DEBUG_KERNEL_TIMEOUT_CLOCKS 30000000000ULL
+#endif
+
+constexpr uint64_t kDebugKernelTimeoutClocks = HUMMING_DEBUG_KERNEL_TIMEOUT_CLOCKS;
+
+CUDA_INLINE uint64_t debug_kernel_timer_start() {
+#if HUMMING_DEBUG_KERNEL
+  return clock64();
+#else
+  return 0;
+#endif
+}
+
+CUDA_INLINE void debug_kernel_timeout_check(
+    uint64_t start_clock,
+    const char *message = "Humming kernel execution timeout") {
+#if HUMMING_DEBUG_KERNEL
+  if ((threadIdx.x % 32) == 0 && clock64() - start_clock >= kDebugKernelTimeoutClocks) {
+    __assertfail(message, __FILE__, __LINE__, __func__, 1);
+  }
+#endif
+}
+
 
 template <typename T>
 CUDA_INLINE uint32_t cast_smem_ptr_to_uint(T *smem_ptr) {

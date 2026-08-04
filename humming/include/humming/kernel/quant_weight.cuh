@@ -10,10 +10,13 @@ CUDA_INLINE float get_data_type_max_num() {
   if constexpr (DataType::kIsIntegerType) {
     uint32_t val = (1 << (DataType::kBits - 1)) - 1;
     return (float)val;
+  } else if constexpr (DataType::kExponentBits == 0) {
+    // Fixed-point sign-magnitude format (e0mX): {0, +/-1 .. +/-(2^M - 1)}.
+    return (float)((1 << DataType::kMantissaBits) - 1);
   } else if constexpr (DataType::kIsFloatingPointType) {
     uint32_t max_val = (1 << (DataType::kBits - DataType::kIsSigned)) - 1;
 
-    if constexpr (std::is_same<DataType, Float8E4M3>::value) {
+    if constexpr (std::is_same<DataType, Float8E4M3>::value || std::is_same<DataType, Float8E3M4>::value) {
       // FN format
       max_val = max_val - 1;
     } else if constexpr (std::is_same<DataType, Float8E5M2>::value) {
@@ -96,8 +99,23 @@ CUDA_INLINE void quant_buffer(
       out_vals[i] = fminf(out_vals[i], (1 << TargetType::kBits) - 1);
     } else if constexpr (TargetType::kIsIntegerType && !kHasZeroPoint) {
       int32_t *out_vals = reinterpret_cast<int32_t *>(out_buffer_ptr);
-      out_vals[i] = __float2int_rn(vals[i] * inv_scale_val);
-      if constexpr (!TargetType::kIsSigned) out_vals[i] += 1 << (TargetType::kBits - 1);
+      int32_t code = __float2int_rn(vals[i] * inv_scale_val);
+      if constexpr (!TargetType::kIsSigned) {
+        code += 1 << (TargetType::kBits - 1);
+        code = min(max(code, 0), (1 << TargetType::kBits) - 1);
+      } else {
+        code = min(max(code, -(1 << (TargetType::kBits - 1))), (1 << (TargetType::kBits - 1)) - 1);
+      }
+      out_vals[i] = code;
+    } else if constexpr (TargetType::kExponentBits == 0) {
+      // Fixed-point sign-magnitude format (e0mX): sign bit at position M, the
+      // magnitude (0 .. 2^M - 1) in the low M bits.
+      static_assert(TargetType::kIsSigned);
+      int32_t code = __float2int_rn(vals[i] * inv_scale_val);
+      int32_t mag = min(abs(code), (1 << TargetType::kMantissaBits) - 1);
+      uint32_t sign = code < 0 ? 1u : 0u;
+      uint32_t *out_vals = reinterpret_cast<uint32_t *>(out_buffer_ptr);
+      out_vals[i] = (sign << TargetType::kMantissaBits) | (uint32_t)mag;
     } else {
       static_assert(TargetType::kIsSigned);
 
@@ -155,7 +173,8 @@ CUDA_INLINE float warp_reduce_min(float val) {
 template <
     class SourceType, class TargetType,
     uint32_t kQuantGroupSize, bool kHasScale,
-    bool kUseUE8M0Scale, bool kHasZeroPoint, bool kIsFpZeroPoint>
+    bool kUseUE8M0Scale, bool kHasZeroPoint, bool kIsFpZeroPoint,
+    bool kAllowNegativeScale = true>
 __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_ptr, uint32_t *zero_point_ptr) {
 
   static_assert(std::is_same<SourceType, Float16>::value ||
@@ -208,11 +227,22 @@ __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_
     } else if constexpr (!kHasZeroPoint) {
       float min_abs_val = fminf(max_val, fabsf(min_val));
       float dtype_max_val = get_data_type_max_num<TargetType>();
-      float scale_val1 = max_abs_val / (dtype_max_val + 1.499);
-      float scale_val2 = min_abs_val / (dtype_max_val + 0.499);
+      float scale_val1, scale_val2;
+      if constexpr (TargetType::kBits == 1) {
+        // 1-bit has no positive code (dtype_max_val == 0) and
+        // quant_buffer does not clamp: pick a scale that rounds the
+        // positive side to code 0 and the negative side to code -1.
+        scale_val1 = max_abs_val / (dtype_max_val + 1.499);
+        scale_val2 = min_abs_val / (dtype_max_val + 0.499);
+      } else {
+        scale_val1 = max_abs_val / (dtype_max_val + 1.0);
+        scale_val2 = min_abs_val / (dtype_max_val + 0.0);
+      }
 
       scale_val = max(scale_val1, scale_val2);
-      if (max_val > fabsf(min_val)) scale_val = -scale_val;
+      if constexpr (kAllowNegativeScale) {
+        if (max_val > fabsf(min_val)) scale_val = -scale_val;
+      }
     } else {
       scale_val = (max_val - min_val) / (get_data_type_max_num<TargetType>() * 2 + 1);
       zero_point_float = (-min_val) / scale_val;
@@ -223,9 +253,9 @@ __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_
     }
 
     if constexpr (kUseUE8M0Scale) {
-      uint32_t scale_val_uint = *reinterpret_cast<uint32_t *>(&scale_val);
-      scale_val_uint = (scale_val_uint & 0x7F800000) + 1;
-      scale_val = *reinterpret_cast<float *>(&scale_val);
+      uint32_t scale_val_uint = __float_as_uint(scale_val);
+      scale_val_uint = (scale_val_uint + 0x007FFFFF) & 0x7F800000;
+      scale_val = __uint_as_float(scale_val_uint);
     }
 
     if (threadIdx.x == 0) {
@@ -241,8 +271,8 @@ __global__ void quant_weight(uint4 *in_ptr, uint4 *out_ptr, uint32_t *out_scale_
 
       if constexpr (kHasZeroPoint && !kIsFpZeroPoint) {
         zero_point_ptr[blockIdx.x] = static_cast<uint32_t>(zero_point);
-      } else {
-        zero_point_ptr[blockIdx.x] = *reinterpret_cast<uint32_t *>(&zero_point_float);
+      } else if constexpr (kHasZeroPoint && kIsFpZeroPoint) {
+        zero_point_ptr[blockIdx.x] = __float_as_uint(zero_point_float);
       }
     }
   } else {

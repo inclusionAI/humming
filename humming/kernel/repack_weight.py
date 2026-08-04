@@ -26,6 +26,7 @@ class RepackWeightKernel(KernelRuntime):
     use_wgmma: bool = False
     use_fused_e8m0_scale: bool = False
     group_size_zp: int = 0
+    use_packed_k_layout: bool = False
 
     def init_kernel(self):
         if self.should_preprocess_with_zp:
@@ -50,12 +51,14 @@ class RepackWeightKernel(KernelRuntime):
             f"    {int(self.should_preprocess_for_int2fp)},\n"
             f"    {int(self.should_preprocess_with_zp)},\n"
             f"    {int(should_transpose_mini_block)},\n"
-            f"    {self.group_size_zp}>"
+            f"    {self.group_size_zp},\n"
+            f"    {int(self.use_packed_k_layout)}>"
         )
         self.arg_types = (
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_uint32,
             ctypes.c_uint32,
             ctypes.c_uint32,
             ctypes.c_uint32,
@@ -70,6 +73,7 @@ class RepackWeightKernel(KernelRuntime):
         zero_point: torch.Tensor | None,
         padded_shape_n: int | None = None,
         padded_shape_k: int | None = None,
+        interleave_mode: int = 3,
     ):
         self.check_context()
         num_experts = 1 if inputs.ndim == 2 else inputs.size(0)
@@ -98,6 +102,7 @@ class RepackWeightKernel(KernelRuntime):
             shape_k,
             padded_shape_n or shape_n,
             padded_shape_k or shape_k,
+            interleave_mode,
         )
 
-        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)

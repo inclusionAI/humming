@@ -82,6 +82,7 @@ struct KernelData {
   uint32_t multi_cast_size_a;
   uint32_t multi_cast_size_b;
   uint32_t gemm_type_id;
+  uint32_t mma_type_id;
 
   bool use_stream_k;
   bool is_fp_zero_point;
@@ -89,15 +90,21 @@ struct KernelData {
   bool is_group_weight_scale;
   bool is_block_weight_scale;
   bool is_tensor_weight_scale;
+  bool is_channel_weight_scale_2;
+  bool is_tensor_weight_scale_2;
   bool has_zero_point;
   bool has_bias;
+  bool use_m_major_input_scale;
   bool use_tma_a;
+  bool use_tma_as;
   bool use_tma_b;
   bool use_tma_c;
   bool use_tma_bs;
+  bool use_tma_bs2;
   bool use_tma_bzp;
   bool use_tma_bias;
   bool use_pdl;
+  bool use_packed_k_layout;
 };
 
 struct KernelLaunchData {

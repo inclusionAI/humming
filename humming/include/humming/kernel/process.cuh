@@ -2,7 +2,7 @@
 #include <humming/utils/all.cuh>
 
 template <uint32_t kNumBitsB, uint32_t kNumBitsA>
-CUDA_INLINE void humming_pack_weight(uint32_t *in_arr, uint32_t *out_arr) {
+CUDA_INLINE void humming_pack_weight(uint32_t *in_arr, uint32_t *out_arr, uint32_t interleave_mode) {
   constexpr uint32_t kNumBitsPaddedB = static_next_power_of_2(kNumBitsB);
 
   auto get_interleaved_index = [&](uint32_t i) {
@@ -23,8 +23,24 @@ CUDA_INLINE void humming_pack_weight(uint32_t *in_arr, uint32_t *out_arr) {
       PRAGMA_UNROLL
       for (uint32_t k = 0; k < 32 / kNumBitsPaddedB; k++) {
         uint32_t new_k = get_interleaved_index(k);
-        constexpr uint32_t mask = (1 << kNumBitsB) - 1;
-        val |= (in_arr[i * 32 + j * 32 / kNumBitsPaddedB + new_k] & mask) << (k * kNumBitsPaddedB);
+        constexpr uint32_t mask1 = (1 << (kNumBitsB - 1));
+        constexpr uint32_t mask2 = mask1 - 1;
+
+        if (interleave_mode % 2 == 0) {
+          uint32_t single_val = in_arr[i * 32 + j * 32 / kNumBitsPaddedB + k];
+          val |= (single_val & mask2) << (k * kNumBitsPaddedB);
+        } else {
+          uint32_t single_val = in_arr[i * 32 + j * 32 / kNumBitsPaddedB + new_k];
+          val |= (single_val & mask2) << (k * kNumBitsPaddedB);
+        };
+
+        if (interleave_mode / 2 == 0) {
+          uint32_t single_val = in_arr[i * 32 + j * 32 / kNumBitsPaddedB + k];
+          val |= (single_val & mask1) << (k * kNumBitsPaddedB);
+        } else {
+          uint32_t single_val = in_arr[i * 32 + j * 32 / kNumBitsPaddedB + new_k];
+          val |= (single_val & mask1) << (k * kNumBitsPaddedB);
+        };
       }
 
       out_arr[i * kNumBitsPaddedB + j] = val;
@@ -102,11 +118,12 @@ CUDA_INLINE uint32_t extract_packed_value(uint32_t *smem_row, uint32_t index) {
 template <
     uint32_t kNumBitsB, uint32_t kNumBitsA, bool kPackedInput,
     bool kShouldPreprocessForINT2FP, bool kShouldPreprocessWithZP,
-    bool kShouldTransposeMiniBlock, uint32_t kGroupSizeZP>
+    bool kShouldTransposeMiniBlock, uint32_t kGroupSizeZP,
+    bool kUsePackedKLayout = false>
 __global__ void weight_repack_nk(
     const uint32_t *in_ptr, uint32_t *out_ptr, const uint32_t *zp_ptr,
     uint32_t shape_n, uint32_t shape_k,
-    uint32_t padded_shape_n, uint32_t padded_shape_k) {
+    uint32_t padded_shape_n, uint32_t padded_shape_k, uint32_t interleave_mode) {
 
   constexpr uint32_t kNumBitsInputB = kPackedInput ? kNumBitsB : 32;
   constexpr uint32_t smem_stride = 64 * kNumBitsInputB / 32;
@@ -145,14 +162,16 @@ __global__ void weight_repack_nk(
     for (uint32_t i = 0; i < CEIL_DIV(zp_smem_num_rows, 32); i++) {
       if (i * 32 + threadIdx.x < zp_smem_num_rows) {
 
-        PRAGMA_UNROLL
-        for (uint32_t j = 0; j < zp_smem_stride; j++) {
-          uint32_t row = blockIdx.x * zp_smem_num_rows + i * 32 + threadIdx.x;
-          uint32_t col = (blockIdx.y * 64 + j * kGroupSizeZP) / kGroupSizeZP;
-          uint32_t glob_offset = row * zp_gmem_stride + col + blockIdx.z * (zp_gmem_stride * (shape_n * kNumBitsB / 32));
+        if constexpr (zp_smem_stride > 0) {
+          PRAGMA_UNROLL
+          for (uint32_t j = 0; j < zp_smem_stride; j++) {
+            uint32_t row = blockIdx.x * zp_smem_num_rows + i * 32 + threadIdx.x;
+            uint32_t col = (blockIdx.y * 64 + j * kGroupSizeZP) / kGroupSizeZP;
+            uint32_t glob_offset = row * zp_gmem_stride + col + blockIdx.z * (zp_gmem_stride * (shape_n * kNumBitsB / 32));
 
-          if (row < zp_max_row && col < zp_gmem_stride) {
-            zp_smem[i * 32 + threadIdx.x][j] = zp_ptr[glob_offset];
+            if (row < zp_max_row && col < zp_gmem_stride) {
+              zp_smem[i * 32 + threadIdx.x][j] = zp_ptr[glob_offset];
+            }
           }
         }
       }
@@ -182,14 +201,23 @@ __global__ void weight_repack_nk(
     uint32_t row = i * 8 + threadIdx.x / 4;
     uint32_t zp_smem_row[MAX(zp_smem_stride, 1)];
 
-    PRAGMA_UNROLL
-    for (uint32_t j = 0; j < zp_smem_stride; j++) {
-      if constexpr (!kPackedInput) {
-        zp_smem_row[j] = zp_smem[row][j];
-      } else {
-        constexpr uint32_t extracted_mask = (1 << kNumBitsB) - 1;
-        zp_smem_row[j] = zp_smem[row * kNumBitsB / 32][j];
-        zp_smem_row[j] = (zp_smem_row[j] >> (row * kNumBitsB % 32)) & extracted_mask;
+    if constexpr (zp_smem_stride > 0) {
+      PRAGMA_UNROLL
+      for (uint32_t j = 0; j < zp_smem_stride; j++) {
+        if constexpr (!kPackedInput) {
+          zp_smem_row[j] = zp_smem[row][j];
+        } else {
+          constexpr uint32_t extracted_mask = (1 << kNumBitsB) - 1;
+          uint32_t start_bits = row * kNumBitsB;
+          uint32_t end_bits = (row + 1) * kNumBitsB;
+          uint32_t start_word = start_bits / 32;
+          uint32_t end_word = (end_bits - 1) / 32;
+          uint32_t val = zp_smem[start_word][j] >> (start_bits % 32);
+          if (start_word != end_word) {
+            val |= zp_smem[end_word][j] << (32 - (start_bits % 32));
+          }
+          zp_smem_row[j] = val & extracted_mask;
+        }
       }
     }
 
@@ -237,7 +265,7 @@ __global__ void weight_repack_nk(
   constexpr uint32_t kNumBitsPaddedB = static_next_power_of_2(kNumBitsB);
   uint32_t out_arr[4 * kNumBitsPaddedB];
 
-  humming_pack_weight<kNumBitsB, kNumBitsA>(reinterpret_cast<uint32_t *>(tmp), out_arr);
+  humming_pack_weight<kNumBitsB, kNumBitsA>(reinterpret_cast<uint32_t *>(tmp), out_arr, interleave_mode);
 
   uint32_t out_stride = (256 / kNumBitsA) * padded_shape_n * kNumBitsB / 32;
   uint32_t col_offset = (256 / kNumBitsA) * (64 * blockIdx.x) * kNumBitsB / 32;
@@ -245,6 +273,30 @@ __global__ void weight_repack_nk(
 
   constexpr uint32_t num_output_rows = kNumBitsA / 4;
   constexpr uint32_t num_ints_per_row = 16 * kNumBitsB / kNumBitsA;
+
+  if constexpr (kUsePackedKLayout) {
+    static_assert(kNumBitsA == 8);
+    constexpr uint32_t hb = kNumBitsB / 2;
+    uint32_t packed_out_stride = 64 * padded_shape_n * kNumBitsB / 32;
+    uint32_t packed_max_row = gridDim.z * padded_shape_k / 64;
+    uint32_t row = (blockIdx.y * 64 + blockIdx.z * padded_shape_k) / 64;
+    if (row < packed_max_row) {
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < num_output_rows; i++) {
+        PRAGMA_UNROLL
+        for (uint32_t j = 0; j < num_ints_per_row / kNumBitsB; j++) {
+          PRAGMA_UNROLL
+          for (uint32_t k = 0; k < kNumBitsB; k++) {
+            uint32_t region = blockIdx.x * 4 + j * 2 + k / hb;
+            uint32_t s = i * hb + k % hb;
+            uint32_t col = region * (32 * kNumBitsB) + threadIdx.x * kNumBitsB + s;
+            out_ptr[row * packed_out_stride + col] = out_arr[i * num_ints_per_row + j * kNumBitsB + k];
+          }
+        }
+      }
+    }
+    return;
+  }
 
   PRAGMA_UNROLL
   for (uint32_t i = 0; i < num_output_rows; i++) {

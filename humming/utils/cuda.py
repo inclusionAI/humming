@@ -3,6 +3,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 
 
@@ -34,6 +35,17 @@ def _read_cuda_system_version(cuda_home):
                 return _parse_major_minor(f.read())
         except OSError:
             pass
+
+    nvcc_path = os.path.join(cuda_home, "bin/nvcc")
+    if os.path.exists(nvcc_path):
+        try:
+            output = subprocess.check_output(["nvcc", "-V"]).decode()
+            m = re.search(r"release (\d+)\.(\d+),", output)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+        except BaseException:
+            pass
+
     base = os.path.basename(os.path.realpath(cuda_home))
     m = re.match(r"cuda-(\d+(?:\.\d+)?)$", base)
     if m:
@@ -92,9 +104,7 @@ def _find_nvidia_pypi_cuda_paths():
         if not os.path.isdir(nvidia_root) or nvidia_root in seen:
             continue
         seen.add(nvidia_root)
-        if any(
-            os.path.isdir(os.path.join(nvidia_root, sub)) for sub in ("cuda_runtime", "cuda_nvcc")
-        ):
+        if any(os.path.isdir(os.path.join(nvidia_root, sub)) for sub in ("cuda_runtime", "cuda_nvcc")):
             results.append(
                 {
                     "source": "pypi",
@@ -196,6 +206,9 @@ def find_all_cuda_paths():
     results = []
     seen_real = set()
     candidates = ["/usr/local/cuda"] + sorted(glob.glob("/usr/local/cuda-*"))
+    if "CUDA_HOME" in os.environ:
+        candidates.append(os.environ["CUDA_HOME"])
+
     for path in candidates:
         if not os.path.isdir(path):
             continue

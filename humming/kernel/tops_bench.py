@@ -9,6 +9,7 @@ import torch
 from humming import dtypes
 from humming.config import MmaOpClass, MmaType
 from humming.jit.runtime import KernelRuntime
+from humming.utils.device import get_device_num_sms
 
 CODE_TEMPLATE = jinja2.Template("""
 #include <humming/kernel/tops_bench.cuh>
@@ -32,6 +33,7 @@ class TopsBenchKernel(KernelRuntime):
     cd_dtype: str | dtypes.DataType
     repeat_count: int
     unroll_count: int
+    sf_dtype: str | dtypes.DataType | None = None
 
     def init_kernel(self):
         if isinstance(self.mma_type, str):
@@ -40,6 +42,8 @@ class TopsBenchKernel(KernelRuntime):
             self.ab_dtype = dtypes.DataType.from_str(self.ab_dtype)
         if isinstance(self.cd_dtype, str):
             self.cd_dtype = dtypes.DataType.from_str(self.cd_dtype)
+        if isinstance(self.sf_dtype, str):
+            self.sf_dtype = dtypes.DataType.from_str(self.sf_dtype)
 
         self.mma_op_class = MmaOpClass.from_config(
             self.mma_type,
@@ -49,6 +53,7 @@ class TopsBenchKernel(KernelRuntime):
             self.ab_dtype,
             self.ab_dtype,
             self.cd_dtype,
+            sf_dtype=self.sf_dtype,
         )
 
         self.code = CODE_TEMPLATE.render(
@@ -65,7 +70,7 @@ class TopsBenchKernel(KernelRuntime):
         if self.mma_type == MmaType.WGMMA:
             self.ops_per_mma_per_warp = self.ops_per_mma_per_warp // 4
             self.num_warps = self.num_warps // 4
-        self.sm_count = torch.cuda.get_device_properties().multi_processor_count
+        self.sm_count = get_device_num_sms()
         self.num_ctas = self.sm_count * 2
         self.ops_per_call = self.ops_per_mma_per_warp * self.num_warps * self.num_ctas
 
@@ -83,4 +88,4 @@ class TopsBenchKernel(KernelRuntime):
         tensor = torch.empty((1,), dtype=torch.uint32, device="cuda:0")
         arg_values = (tensor.data_ptr(),)
 
-        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)

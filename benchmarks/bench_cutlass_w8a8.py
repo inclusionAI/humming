@@ -5,7 +5,7 @@ import triton
 import vllm._custom_ops as vllm_ops
 from tqdm import tqdm
 
-from humming.utils.test import save_benchmark_result
+from humming.testing import save_benchmark_result
 
 
 def bench_cutlass_w8a8(

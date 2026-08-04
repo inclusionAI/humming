@@ -2,55 +2,62 @@ import functools
 import glob
 import hashlib
 import importlib
+import json
 import os
+import platform
 import re
-import struct
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
-from elftools.elf.elffile import ELFFile
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
 
 
-def read_symbol_value(filename, symbol_name, default_value=None):
-    with open(filename, "rb") as f:
-        elffile = ELFFile(f)
-
-        symbol_table = elffile.get_section_by_name(".symtab")
-        symbol = symbol_table.get_symbol_by_name(symbol_name)
-
-        if symbol is None:
-            return default_value
-
-        symbol = symbol[0]
-        section = elffile.get_section(symbol["st_shndx"])
-        offset = symbol["st_value"]
-        size = symbol["st_size"]
-
-        raw_data = section.data()[offset : offset + size]
-        symbol_value = struct.unpack("<i", raw_data)[0]
-
-    return symbol_value
+def get_native_arch() -> str | None:
+    return {
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+        "arm64": "aarch64",
+        "aarch64": "aarch64",
+    }.get(platform.machine().lower())
 
 
-def find_kernel_name_in_cubin(filename, func_keyword):
-    with open(filename, "rb") as f:
-        elffile = ELFFile(f)
-        symbol_table = elffile.get_section_by_name(".symtab")
+def get_precompiled_artifact_path(source_path, artifact_name) -> Path | None:
+    arch = get_native_arch()
+    if arch is None:
+        return None
 
-        func_symbol_names = []
-        for symbol in symbol_table.iter_symbols():
-            if symbol["st_info"]["type"] != "STT_FUNC":
-                continue
-            if re.findall(f"^_Z\\d+{func_keyword}", symbol.name):
-                func_symbol_names.append(symbol.name)
+    source_path = Path(source_path)
+    native_dir = Path(__file__).parents[1] / "_native" / arch
+    artifact_path = native_dir / artifact_name
+    manifest_path = native_dir / "manifest.json"
+    if not artifact_path.is_file() or not manifest_path.is_file():
+        return None
 
-        assert len(func_symbol_names) == 1
+    manifest = json.loads(manifest_path.read_text())
+    source_hash = hash_path_content(str(source_path), releative=True, text_only=False)
+    return artifact_path if manifest.get(artifact_name) == source_hash else None
 
-    return func_symbol_names[0]
+
+def write_precompiled_artifact_manifest(native_dir, artifact_sources) -> None:
+    manifest = {
+        artifact_name: hash_path_content(str(source), releative=True, text_only=False)
+        for artifact_name, source in artifact_sources.items()
+    }
+    (Path(native_dir) / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+
+def get_native_platform_signature() -> str:
+    return repr((platform.system(), get_native_arch()))
+
+
+def popen_and_reap(cmd, **kwargs):
+    proc = subprocess.Popen(cmd, **kwargs)
+    threading.Thread(target=proc.wait, name="humming-bg-build-reaper", daemon=True).start()
+    return proc
 
 
 def hash_to_hex(s: str) -> str:

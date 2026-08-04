@@ -4,7 +4,7 @@ from typing import Any
 import torch
 
 from humming import dtypes
-from humming.config.enum import WeightScaleType
+from humming.config.enum import WeightScale2Type, WeightScaleType
 from humming.schema.base import BaseInputSchema, BaseWeightSchema
 from humming.schema.humming import HummingInputSchema, HummingWeightSchema
 
@@ -32,7 +32,7 @@ class CompressedTensorsWeightSchema(BaseWeightSchema):
             "mxfp4-pack-quantized",
         ]
         msg = "actorder is not supported by humming"
-        assert self.actorder is None or self.actorder == "weight", msg
+        assert self.actorder is None or self.actorder in ["weight", "static"], msg
         self.weight_key = "weight_packed" if "pack" in self.format else "weight"
         if isinstance(self.block_structure, list):
             self.block_structure = tuple(self.block_structure)
@@ -202,23 +202,24 @@ class CompressedTensorsWeightSchema(BaseWeightSchema):
         output_tensors = {"weight": weight, "weight_scale": weight_scale}
 
         weight_scale_type = None
+        weight_scale_2_type = None
         if self.format == "nvfp4-pack-quantized":
-            global_scale = tensors["weight_global_scale"]
+            weight_scale_2 = tensors["weight_global_scale"]
             target_group_size = 16 if len(shape_k_stacks) > 1 else None
-            global_scale = self._may_process_global_scale(
-                1 / global_scale,
+            weight_scale_2 = self._may_process_global_scale(
+                1 / weight_scale_2,
                 shape_n_stacks=shape_n_stacks,
                 shape_k_stacks=shape_k_stacks,
                 num_experts=num_experts,
                 target_group_size=target_group_size,
             )
-            has_global_scale = global_scale.nelement() == (num_experts or 1)
-            if has_global_scale:
-                weight_scale_type = WeightScaleType.GROUP_TENSOR
-                output_tensors["global_scale"] = global_scale
+            has_tensor_scale = weight_scale_2.nelement() == (num_experts or 1)
+            weight_scale_type = WeightScaleType.GROUP
+            if has_tensor_scale:
+                weight_scale_2_type = WeightScale2Type.TENSOR
+                output_tensors["weight_scale_2"] = weight_scale_2.float()
             else:
-                weight_scale_type = WeightScaleType.GROUP
-                weight_scale = weight_scale.float() * global_scale.float()
+                weight_scale = weight_scale.float() * weight_scale_2.float()
                 output_tensors["weight_scale"] = weight_scale.to(param_dtype)
 
         bs_dtype = None
@@ -227,7 +228,7 @@ class CompressedTensorsWeightSchema(BaseWeightSchema):
             b_dtype = dtypes.uint8 if self.type == "int" else dtypes.float8e4m3
         elif "nvfp4" in self.format:
             b_dtype = dtypes.float4e2m1
-            bs_dtype = dtypes.float8e4m3 if has_global_scale else None
+            bs_dtype = dtypes.float8e4m3 if has_tensor_scale else None
         elif "mxfp4" in self.format:
             b_dtype = dtypes.float4e2m1
             bs_dtype = dtypes.float8e8m0
@@ -248,6 +249,7 @@ class CompressedTensorsWeightSchema(BaseWeightSchema):
             bs_dtype=bs_dtype,
             weight_scale_group_size=group_size,
             weight_scale_type=weight_scale_type,
+            weight_scale_2_type=weight_scale_2_type,
             has_zero_point=not self.symmetric,
         )
 
@@ -270,6 +272,7 @@ class CompressedTensorsInputSchema(BaseInputSchema):
             "int-quantized",
             "float-quantized",
             "naive-quantized",
+            "pack-quantized",
             "nvfp4-pack-quantized",
             "mxfp4-pack-quantized",
         ]

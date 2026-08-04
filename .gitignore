@@ -1,12 +1,27 @@
-*.ipynb
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Packaging and native builds
+/build/
+/dist/
+/humming/_native/
 *.cubin
 *.tmp
-*.pyc
 *.tar
-*.egg-info
-tmp
-__pycache__
-.ipynb_checkpoints
-.git_old/
-dist
-build
+
+# Local files
+/tmp/
+*.ipynb
+.ipynb_checkpoints/
+
+# setuptools_scm generated
+humming/_version.py

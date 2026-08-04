@@ -23,18 +23,28 @@ CUDA_INLINE uint32_t sync_part_threads() {
   } else {
     static_assert(kNumThreads >= kNumSyncThreads);
     static_assert(kNumSyncThreads > 0);
-    asm volatile("bar.sync %0, %1;" ::"r"(kBarrierId), "r"(kNumSyncThreads));
+    asm volatile("bar.sync %0, %1;"
+                 :
+                 : "r"(kBarrierId), "r"(kNumSyncThreads)
+                 : "memory");
   }
 }
 
 template <uint32_t kNumSyncThreads = 0, uint32_t kNumThreads = 0>
 CUDA_INLINE void barrier_acquire(int *lock, int count) {
   if (threadIdx.x == 0) {
+#if HUMMING_DEBUG_KERNEL
+    uint64_t start_clock = debug_kernel_timer_start();
+#endif
     int state = -1;
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
-                   : "l"(lock));
+                   : "l"(lock)
+                   : "memory");
+#if HUMMING_DEBUG_KERNEL
+      debug_kernel_timeout_check(start_clock, "Humming Stream-K barrier timeout");
+#endif
     } while (state != count);
   }
   sync_part_threads<kNumSyncThreads, kNumThreads>();
@@ -43,11 +53,18 @@ CUDA_INLINE void barrier_acquire(int *lock, int count) {
 template <uint32_t kNumSyncThreads = 0, uint32_t kNumThreads = 0>
 CUDA_INLINE void barrier_acquire2(int *lock, int count) {
   if (threadIdx.x == 0) {
+#if HUMMING_DEBUG_KERNEL
+    uint64_t start_clock = debug_kernel_timer_start();
+#endif
     int state = 1;
     do {
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
                    : "=r"(state)
-                   : "l"(lock));
+                   : "l"(lock)
+                   : "memory");
+#if HUMMING_DEBUG_KERNEL
+      debug_kernel_timeout_check(start_clock, "Humming Stream-K barrier timeout");
+#endif
     } while (state > count);
   }
   sync_part_threads<kNumSyncThreads, kNumThreads>();
@@ -61,10 +78,11 @@ CUDA_INLINE void barrier_release(int *lock, bool reset = false) {
       __stcg(&lock[0], 0);
     } else {
       int32_t val = 1;
-      asm volatile("fence.acq_rel.gpu;\n");
+      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
       asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
                    :
-                   : "l"(lock), "r"(val));
+                   : "l"(lock), "r"(val)
+                   : "memory");
     }
   }
 }
@@ -74,21 +92,52 @@ CUDA_INLINE void barrier_release2(int *lock, int32_t val) {
   sync_part_threads<kNumSyncThreads, kNumThreads>();
   if (threadIdx.x == 0) {
     if (val < 0) {
+      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
       __stcg(&lock[0], val);
     } else {
       int32_t val2 = 1;
-      asm volatile("fence.acq_rel.gpu;\n");
+      asm volatile("fence.acq_rel.gpu;\n" ::: "memory");
       asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
                    :
-                   : "l"(lock), "r"(val2));
+                   : "l"(lock), "r"(val2)
+                   : "memory");
     }
   }
 }
 
 CUDA_INLINE
-void mbarrier_wait(void *barrier, bool phase_parity) {
+void mbarrier_wait(void *barrier, bool phase_parity, const char *timeout_message = "Humming mbarrier timeout") {
   uint32_t smem_int_mbar = cast_smem_ptr_to_uint(barrier);
+#if HUMMING_DEBUG_KERNEL
+  uint64_t start_clock = debug_kernel_timer_start();
+  uint32_t ready;
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  do {
+    asm volatile("{\n"
+                 "  .reg .pred p;\n"
+                 "  mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                 "  selp.u32 %0, 1, 0, p;\n"
+                 "}\n"
+                 : "=r"(ready)
+                 : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
+                 : "memory");
+    debug_kernel_timeout_check(start_clock, timeout_message);
+  } while (!ready);
+#else
+  do {
+    asm volatile("{\n"
+                 "  .reg .pred p;\n"
+                 "  mbarrier.test_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                 "  selp.u32 %0, 1, 0, p;\n"
+                 "}\n"
+                 : "=r"(ready)
+                 : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
+                 : "memory");
+    debug_kernel_timeout_check(start_clock, timeout_message);
+  } while (!ready);
+#endif
+#else
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   asm volatile("{\n"
                "  .reg .pred p;\n"
@@ -114,7 +163,20 @@ void mbarrier_wait(void *barrier, bool phase_parity) {
                : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
                : "memory");
 #endif
+#endif
 };
+
+
+template <bool kUseCluster>
+CUDA_INLINE void mbarrier_init_sync() {
+  if constexpr (kUseCluster) {
+    asm volatile("fence.mbarrier_init.release.cluster;");
+    asm volatile("barrier.cluster.arrive;");
+    asm volatile("barrier.cluster.wait;");
+  } else {
+    __syncthreads();
+  }
+}
 
 
 template <bool kUseCluster = false>

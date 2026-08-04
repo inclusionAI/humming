@@ -24,12 +24,12 @@ class Mxfp4WeightSchema(BaseWeightSchema):
         tensor_meta = {
             "weight": {
                 "shape": (shape_n, shape_k // 2),
-                "dtype": torch.int8,
+                "dtype": torch.uint8,
                 "extra_attrs": {"output_dim": 0, "input_dim": 1},
             },
             "weight_scale": {
                 "shape": (shape_n, shape_k // 32),
-                "dtype": torch.float8_e8m0fnu,
+                "dtype": torch.uint8,
                 "extra_attrs": {"output_dim": 0, "input_dim": 1, "scale_type": "group"},
             },
         }

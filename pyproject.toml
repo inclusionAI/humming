@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools", "wheel", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "humming-kernels"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Quantization GEMM Kernel"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,9 +14,10 @@ dependencies = [
     "numpy",
     "safetensors",
     "jinja2",
-    "pyelftools",
     "nvidia-ml-py",
     "cuda-bindings",
+    "tqdm",
+    "tabulate"
 ]
 
 [project.optional-dependencies]
@@ -33,15 +34,24 @@ cu13 = [
     "nvidia-cuda-nvrtc",
 ]
 
+[tool.setuptools_scm]
+fallback_version = "0.0.0"
+version_scheme = "post-release"
+local_scheme = "node-and-date"
+version_file = "humming/_version.py"
+
 [tool.setuptools]
 include-package-data = true
 packages = {find = {include = ["humming", "humming.*"]}}
 
 [tool.setuptools.package-data]
-"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc"]
+"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc", "**/*.so", "_native/*/nvrtc_compile", "_native/*/manifest.json"]
 
 [tool.ruff]
-line-length = 100
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
 
 [tool.mypy]
 disable_error_code = ["no-untyped-call", "no-untyped-def", "type-arg", "untyped-decorator", "no-any-return"]

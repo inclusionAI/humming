@@ -1,4 +1,0 @@
-line-length = 100
-
-[lint]
-select = ["E", "F", "I", "B"]

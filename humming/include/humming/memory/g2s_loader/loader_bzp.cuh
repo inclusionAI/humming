@@ -3,33 +3,39 @@
 #include <humming/utils/all.cuh>
 
 
-template <
-    class ProblemShape, class BlockShape,
-    class ElementB,
-    class LayerConfig, class TuningConfig>
+template <class Ctx>
 class G2SMemoryLoaderBZP {
 private:
-  static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
-  static constexpr bool kUseTma = TuningConfig::kUseTmaBZP;
-  static constexpr bool kUseCpAsync = TuningConfig::kUseCpAsync;
-  static constexpr uint32_t kNumLoadThreads = TuningConfig::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = TuningConfig::kNumThreads - kNumLoadThreads;
+  using ProblemShape = typename Ctx::ProblemShape;
+  using BlockShape = typename Ctx::BlockShape;
+  using ElementA = typename Ctx::ElementA;
+  using ElementB = typename Ctx::ElementB;
 
-  static constexpr bool kIsFpZeroPoint = LayerConfig::kIsFpZeroPoint;
-  static constexpr bool kIsChannel = LayerConfig::kIsChannelWeightScale;
-  static constexpr bool kIsGroup = LayerConfig::kIsGroupWeightScale;
-  static constexpr uint32_t kGroupSize = kIsGroup ? LayerConfig::kWeightScaleGroupSize : ProblemShape::K;
+  static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
+  static constexpr bool kUseTma = Ctx::kUseTmaBZP;
+  static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
+  static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
 
+  static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
+  static constexpr bool kIsChannel = Ctx::kIsChannelWeightScale;
+  static constexpr bool kIsGroup = Ctx::kIsGroupWeightScale;
+  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
+  static constexpr uint32_t kGroupSize = kIsGroup ? Ctx::kWeightScaleGroupSize : ProblemShape::K;
+
+  static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
+  static constexpr uint32_t kNumGroupsPerMma = kUseMxmma && ElementA::kBits == 4 && kIsGroup ? kPartMmaShapeK / kGroupSize : 1;
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
-  static constexpr uint32_t kSmemStride = BlockShape::N * kNumZPBits / 32 / 4;
-  static constexpr uint32_t kGmemStride = ProblemShape::N * kNumZPBits / 32 / 4;
-  static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K, kGroupSize);
-  static constexpr uint32_t kGmemExpertStride = kGmemStride * kProblemNumGroups;
-  static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kGroupSize);
-  static constexpr uint32_t kNumInt4s = kSmemStride * kNumGroups;
+  static constexpr uint32_t kSmemStride = BlockShape::N * kNumZPBits / 32 / 4 * kNumGroupsPerMma;
+  static constexpr uint32_t kGmemStride = ProblemShape::N * kNumZPBits / 32 / 4 * kNumGroupsPerMma;
+  static constexpr uint32_t kProblemNumRows = CEIL_DIV(ProblemShape::K, kGroupSize) / kNumGroupsPerMma;
+  static constexpr uint32_t kGmemExpertStride = kGmemStride * kProblemNumRows;
+  static constexpr uint32_t kNumRows = CEIL_DIV(BlockShape::K, kGroupSize) / kNumGroupsPerMma;
+  static constexpr uint32_t kNumInt4s = kSmemStride * kNumRows;
   static constexpr uint32_t kLoadsPerGroup = kIsChannel ? 1 : CEIL_DIV(kGroupSize, BlockShape::K);
 
 public:
+  Ctx &ctx;
   const CUtensorMap *tensor_map_ptr;
   const int4 *gmem_ptr_raw;
   const int4 *gmem_ptr;
@@ -39,7 +45,8 @@ public:
   uint32_t counter = 0;
 
   CUDA_INLINE
-  G2SMemoryLoaderBZP(const void *ptr) {
+  G2SMemoryLoaderBZP(Ctx &ctx) : ctx(ctx) {
+    const void *ptr = ctx.params.bzp;
     if constexpr (kUseTma) {
       tensor_map_ptr = reinterpret_cast<const CUtensorMap *>(ptr);
     } else {
@@ -57,7 +64,7 @@ public:
 
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
-    if (threadIdx.x == kLoadThreadOffset) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
+    if (ctx.load_thread_id() == 0) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
   }
 
   CUDA_INLINE void load_legacy(int4 *smem_ptr) {
@@ -67,21 +74,21 @@ public:
   CUDA_INLINE
   void advance() {
     if (kIsGroup && (kLoadsPerGroup == 1 || counter == 0)) {
-      row_offset += kNumGroups;
-      gmem_ptr += kGmemStride * kNumGroups;
+      row_offset += kNumRows;
+      gmem_ptr += kGmemStride * kNumRows;
     }
   };
 
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t n_block_id, uint32_t k_block_id) {
-    row_offset = kProblemNumGroups * expert_id;
-    col_offset = n_block_id * (BlockShape::N * kNumZPBits / 32);
+    row_offset = kProblemNumRows * expert_id;
+    col_offset = n_block_id * (kIsFpZeroPoint ? BlockShape::N : (BlockShape::N * kNumZPBits / 32 * kNumGroupsPerMma));
 
     if constexpr (kIsGroup) {
       if constexpr (BlockShape::K >= kGroupSize) {
-        row_offset += k_block_id * kNumGroups;
+        row_offset += k_block_id * kNumRows;
       } else {
-        row_offset += (k_block_id * BlockShape::K) / kGroupSize;
+        row_offset += (k_block_id * BlockShape::K) / kGroupSize / kNumGroupsPerMma;
       }
     }
 

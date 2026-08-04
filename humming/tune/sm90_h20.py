@@ -1,15 +1,11 @@
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
 
 from humming import dtypes
-from humming.config import GemmType
+from humming.config import GemmType, LayerConfig
 from humming.tune.base import DeviceHeuristics
 from humming.utils.smem import estimate_smem_size_layer
-
-if TYPE_CHECKING:
-    from humming.layer import HummingLayerMeta
 
 
 class Sm90H20Heuristics(DeviceHeuristics):
@@ -77,45 +73,53 @@ class Sm90H20Heuristics(DeviceHeuristics):
     @classmethod
     def get_config(
         cls,
-        meta: "HummingLayerMeta",
+        layer_config: LayerConfig,
         shape_m: int,
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
         # 1. base config
-        group_size = meta.input_scale_group_size or meta.weight_scale_group_size
+        group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
+        a_dtype = layer_config.a_dtype
         config = cls.get_base_config(
-            meta.a_dtype,
-            meta.b_dtype,
+            a_dtype,
+            layer_config.b_dtype,
             group_size,
             use_f16_accum,
-            meta.use_fused_e8m0_scale,
+            layer_config.use_fused_e8m0_scale,
             gemm_type,
-            meta.shape_k,
+            layer_config.shape_k,
         )
         block_shape_m, block_shape_n, block_shape_k = config["block_shape"]
         num_ctas_per_sm = config.get("num_ctas_per_sm", 1)
         warp_shape_m, warp_shape_n, warp_shape_k = config["warp_shape"]
+        if layer_config.use_packed_k_layout:
+            warp_shape_n = max(warp_shape_n, 32)
         num_stages = 3
-        assert meta.shape_n % block_shape_n == 0
+        min_warp_shape_n = 32 if a_dtype.num_bits == 16 or layer_config.use_packed_k_layout else 16
+        while layer_config.shape_n % block_shape_n:
+            block_shape_n //= 2
+            warp_shape_n = min(warp_shape_n, block_shape_n // 4)
+        assert warp_shape_n >= min_warp_shape_n
 
         # 2. block_shape_m and warp_shape_m
-        if not meta.num_experts:
+        if not layer_config.num_experts:
             if shape_m <= block_shape_m:
                 block_shape_m = math.ceil(shape_m / 8) * 8
             else:
                 blocks = [math.ceil(shape_m / ((i + 1) * 8)) for i in range(block_shape_m // 8)]
                 block_shape_m = np.argmin(blocks).item() * 8 + 8
-            if meta.a_dtype == dtypes.int8 and block_shape_m > 32 and block_shape_m % 16 != 0:
+            if layer_config.a_dtype == dtypes.int8 and block_shape_m > 32 and block_shape_m % 16 != 0:
                 block_shape_m = math.ceil(block_shape_m / 16) * 16
         else:
-            for moe_block_size in [8, 16, 32, 48, 64]:
-                if shape_m / meta.num_experts / moe_block_size < 0.9:
+            block_size_configs = [(8, 0.7), (16, 0.8), (32, 0.9), (48, 0.9), (64, 0.9)]
+            for moe_block_size, threshold in block_size_configs:
+                if shape_m / layer_config.num_experts / moe_block_size < threshold:
                     break
 
-            new_shape_m = int(shape_m / meta.num_experts / 0.9)
+            new_shape_m = int(shape_m / layer_config.num_experts / 0.9)
             new_shape_m = max(new_shape_m, 1)
             if block_shape_m == 128:
                 if np.ceil(new_shape_m / 96) * 96 < np.ceil(new_shape_m / 64) * 64:
@@ -130,12 +134,12 @@ class Sm90H20Heuristics(DeviceHeuristics):
                 block_shape_m = moe_block_size
 
         warp_shape_m = block_shape_m
-        num_blocks_n = meta.shape_n // block_shape_n
-        num_blocks_m = cls.estimate_num_blocks_m(meta, shape_m, block_shape_m)
+        num_blocks_n = layer_config.shape_n // block_shape_n
+        num_blocks_m = cls.estimate_num_blocks_m(layer_config, shape_m, block_shape_m)
 
         num_sms = cls.get_num_sms()
         while num_blocks_n * num_blocks_m * 2 < num_sms * num_ctas_per_sm:
-            if meta.a_dtype.num_bits != 16 and warp_shape_n == 64:
+            if warp_shape_n == 64:
                 warp_shape_n = warp_shape_n // 2
                 block_shape_n = block_shape_n // 2
                 num_blocks_n = num_blocks_n * 2
@@ -154,41 +158,68 @@ class Sm90H20Heuristics(DeviceHeuristics):
         num_warps = num_warps_m * num_warps_n * num_warps_k * num_ctas_per_sm
 
         if num_warps == 4:
-            warp_shape_k = 512 // meta.a_dtype.num_bits
+            warp_shape_k = 512 // layer_config.a_dtype.num_bits
             block_shape_k = warp_shape_k * 2
 
-        if num_warps <= 8 and block_shape_m <= 16:
-            num_warps_k = block_shape_k // warp_shape_k
-            warp_shape_k = 512 // meta.a_dtype.num_bits
-            block_shape_k = warp_shape_k * num_warps_k * 2
+        if num_warps <= 8 and block_shape_m <= 32:
+            if is_moe and warp_shape_n == 64:
+                warp_shape_n = warp_shape_n // 2
+            else:
+                num_warps_k = block_shape_k // warp_shape_k
+                warp_shape_k = 512 // layer_config.a_dtype.num_bits
+                block_shape_k = warp_shape_k * num_warps_k * 2
+
+        if is_moe and layer_config.shape_k <= 512 and layer_config.shape_n >= 2048 and block_shape_m <= 32:
+            if block_shape_n == 256:
+                warp_shape_n = 32
+                block_shape_n = 128
+                num_blocks_n = num_blocks_n * 2
+
+            if num_blocks_n * num_blocks_m >= num_sms * 4:
+                num_ctas_per_sm = 4
+
+        if warp_shape_k == block_shape_k and warp_shape_k == 512 // layer_config.a_dtype.num_bits:
+            block_shape = (block_shape_m, block_shape_n, block_shape_k * 2)
+            smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, num_stages)
+            if smem_size * num_ctas_per_sm < cls.max_smem_size:
+                block_shape_k = block_shape_k * 2
+                warp_shape_k = warp_shape_k * 2
 
         max_num_stages = 4
         for num_stages_new in range(num_stages + 1, max_num_stages + 1):
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
-            smem_size = estimate_smem_size_layer(meta, block_shape, gemm_type, num_stages_new)
+            smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, num_stages_new)
             if smem_size * num_ctas_per_sm < cls.max_smem_size:
                 num_stages = num_stages_new
 
         if num_ctas_per_sm == 1:
-            factor = min(4.5, meta.shape_n / (3 * block_shape_n))
+            factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
             num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
 
-        while meta.shape_k % block_shape_k != 0:
-            warp_shape_k = 512 // meta.a_dtype.num_bits
+        while layer_config.shape_k % block_shape_k != 0:
+            warp_shape_k = 512 // layer_config.a_dtype.num_bits
             block_shape_k = block_shape_k // 2
             assert block_shape_k >= warp_shape_k
+
+        if (
+            layer_config.a_dtype.num_bits == 8
+            and layer_config.input_scale_group_size > 0
+            and gemm_type != GemmType.GROUPED_MASKED
+            and shape_m >= 6144
+        ):
+            num_ctas_per_sm = min(num_ctas_per_sm, 2)
 
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
-            "use_stream_k": meta.shape_k > 1024,
+            "use_stream_k": layer_config.shape_k > 1024,
             "use_f16_accum": use_f16_accum,
             "num_sms": num_sms,
             "num_stages": num_stages,
             "num_ctas_per_sm": num_ctas_per_sm,
         }
 
-        if meta.shape_k <= 512 and is_moe and shape_m >= 2048:
+        if layer_config.shape_k <= 512 and is_moe and shape_m >= 2048:
             config["use_tma"] = True
             config["use_mbarrier"] = True
             if gemm_type == GemmType.INDEXED:
@@ -201,11 +232,9 @@ class Sm90H20Heuristics(DeviceHeuristics):
             if config["num_ctas_per_sm"] > 1 and shape_m >= 24576:
                 tiles_per_cta = 5
                 block_m, block_n, _ = config["block_shape"]
-                num_tiles = (meta.shape_n // block_n) * (shape_m // block_m)
+                num_tiles = (layer_config.shape_n // block_n) * (shape_m // block_m)
                 sms_target = num_tiles / (config["num_ctas_per_sm"] * tiles_per_cta)
-                config["num_sms"] = max(
-                    config["num_sms"], 1 << round(math.log2(sms_target))
-                )
+                config["num_sms"] = max(config["num_sms"], 1 << round(math.log2(sms_target)))
 
         if block_shape_m >= 48 and num_ctas_per_sm <= 2 and num_warps <= 8 and not is_moe:
             config["use_tma"] = True
@@ -214,13 +243,15 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config["num_stages"] = 3
         elif config["num_stages"] == 4 and block_shape_m <= 32:
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
-            smem_size = estimate_smem_size_layer(meta, block_shape, gemm_type, 5)
+            smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, 5)
             if smem_size * num_ctas_per_sm < cls.max_smem_size:
                 config["num_stages"] = 5
 
         if use_batch_invariant:
-            warp_shape_k = 512 // meta.a_dtype.num_bits
-            block_shape_k = 512 // meta.a_dtype.num_bits
+            warp_shape_k = 512 // layer_config.a_dtype.num_bits
+            block_shape_k = 512 // layer_config.a_dtype.num_bits
+            config["block_shape"] = (block_shape_m, block_shape_n, block_shape_k)
+            config["warp_shape"] = (warp_shape_m, warp_shape_n, warp_shape_k)
             # TODO: check if TMA / cp.async affect batch invariance
             config["use_tma"] = False
             config["use_warp_spec"] = False

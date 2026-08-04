@@ -40,6 +40,24 @@ CUDA_INLINE void dequant_b1248(const uint32_t *qb, uint32_t *res, uint32_t j, ui
 }
 
 
+template <class SourceType>
+CUDA_INLINE void repack_native_mxf8f6f4(const uint32_t *qb, uint32_t *res, uint32_t j) {
+  if constexpr (std::is_same<SourceType, Float4E2M1>::value) {
+    res[0] = (qb[2 * j] & 0x0F0F0F0Fu) << 2;
+    res[1] = (qb[2 * j] & 0xF0F0F0F0u) >> 2;
+    res[2] = (qb[2 * j + 1] & 0x0F0F0F0Fu) << 2;
+    res[3] = (qb[2 * j + 1] & 0xF0F0F0F0u) >> 2;
+  } else {
+    static_assert(std::is_same<SourceType, Float6E3M2>::value || std::is_same<SourceType, Float6E2M3>::value);
+    PRAGMA_UNROLL
+    for (uint32_t i = 0; i < 4; i++) {
+      uint32_t index = j * 4 + i;
+      res[i] = get_quanted_value_group<6, true>(qb + index / 8 * 6, index % 8);
+    }
+  }
+}
+
+
 template <class SourceType, class TargetType, bool kHasZeroPoint, bool kIsFpZeroPoint, uint32_t kNumWarpShapeNSplits = 1>
 CUDA_INLINE void dequant_b3567(const uint32_t *qb, uint32_t *res, uint32_t j, uint32_t *zp_vals = nullptr) {
   static_assert(SourceType::kBits <= TargetType::kBits);
@@ -70,7 +88,7 @@ CUDA_INLINE void dequant_b3567(const uint32_t *qb, uint32_t *res, uint32_t j, ui
         qb_val = get_quanted_value_group<SourceType::kNumBits, !kIsFpToFp>(qb + qb_offset, idx2);
       }
     } else {
-      index = (j + 2) * 4 + i;
+      index = (j + TargetType::kBits / 8) * 4 + i;
       if (index * kPaddedNumBits % TargetType::kBits == 0) {
         const uint32_t idx1 = index / TargetType::kBits;
         const uint32_t idx2 = index * kPaddedNumBits / TargetType::kBits % kPaddedNumBits;

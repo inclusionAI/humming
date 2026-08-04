@@ -81,6 +81,7 @@ inline void check_tensor_b(Tensor &tensor, KernelData &kernel_data, int64_t dev)
   uint32_t problem_shape_k = kernel_data.problem_shape_k;
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id);
   uint32_t pack_size_k = 256 / get_dtype_num_bits(kernel_data.a_dtype_id);
+  if (kernel_data.use_packed_k_layout) pack_size_k = 64;
 
   std::vector<int64_t> expected_shape = {};
   if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
@@ -103,14 +104,37 @@ inline void check_tensor_as(std::optional<Tensor> &tensor, KernelData &kernel_da
   uint32_t problem_shape_k = kernel_data.problem_shape_k;
   uint32_t group_size = kernel_data.input_scale_group_size;
   uint32_t num_groups = group_size == 0 ? 1 : CEIL_DIV(problem_shape_k, group_size);
-
-  std::vector<int64_t> expected_shape = {shape_m};
-  expected_shape.push_back(num_groups);
-  check_tensor_common(tensor.value(), "as", dev, ScalarType::Float, expected_shape);
+  constexpr int64_t input_scale_m_alignment = 4;
+  int64_t m_pad = (shape_m + input_scale_m_alignment - 1) / input_scale_m_alignment * input_scale_m_alignment;
+  if (kernel_data.use_m_major_input_scale && kernel_data.gemm_type_id == 3) {
+    int64_t expert_m = shape_m / kernel_data.num_experts;
+    ASSERT_CHECK(expert_m % input_scale_m_alignment == 0, "expert_m % input_scale_m_alignment != 0");
+  }
+  if (kernel_data.mma_type_id == 3 && group_size > 0) {
+    std::vector<int64_t> expected_shape;
+    if (kernel_data.use_tma_as || kernel_data.use_m_major_input_scale) {
+      expected_shape = {(int64_t)CEIL_DIV(num_groups, 4), m_pad};
+    } else {
+      expected_shape = {shape_m, (int64_t)CEIL_DIV(num_groups, 4)};
+    }
+    check_tensor_common(tensor.value(), "as", dev, ScalarType::Int, expected_shape);
+  } else {
+    std::vector<int64_t> expected_shape;
+    if (kernel_data.use_m_major_input_scale && group_size > 0) {
+      expected_shape = {(int64_t)num_groups, m_pad};
+    } else {
+      expected_shape = {shape_m, (int64_t)num_groups};
+    }
+    check_tensor_common(tensor.value(), "as", dev, ScalarType::Float, expected_shape);
+  }
 };
 
-inline void check_tensor_bs(std::optional<Tensor> &tensor, KernelData &kernel_data, int64_t dev) {
-  if (kernel_data.is_tensor_weight_scale && !kernel_data.is_group_weight_scale) return;
+inline void check_tensor_bs(Tensor &tensor, KernelData &kernel_data, int64_t dev) {
+  if (kernel_data.is_tensor_weight_scale) {
+    std::vector<int64_t> expected_shape = {kernel_data.gemm_type_id != 0 ? kernel_data.num_experts : 1};
+    check_tensor_common(tensor, "bs", dev, ScalarType::Float, expected_shape);
+    return;
+  }
   uint32_t problem_shape_k = kernel_data.problem_shape_k;
   uint32_t problem_shape_n = kernel_data.problem_shape_n;
   uint32_t group_size = kernel_data.weight_scale_group_size;
@@ -120,15 +144,23 @@ inline void check_tensor_bs(std::optional<Tensor> &tensor, KernelData &kernel_da
   uint32_t num_groups_n = group_size_n == 0 ? 1 : CEIL_DIV(problem_shape_n, group_size_n);
 
   std::vector<int64_t> expected_shape = {};
-  if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
-  expected_shape.push_back(num_groups);
-  if (kernel_data.is_block_weight_scale) {
-    expected_shape.push_back(num_groups_n);
-  } else {
-    expected_shape.push_back(kernel_data.problem_shape_n);
-  }
   auto expected_dtype = dtype_id_to_tensor_dtype(kernel_data.bs_dtype_id);
-  check_tensor_common(tensor.value(), "bs", dev, expected_dtype, expected_shape);
+  if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
+  if (kernel_data.mma_type_id == 3 && group_size > 0) {
+    expected_dtype = ScalarType::Int;
+    uint32_t num_bits = get_dtype_num_bits(kernel_data.a_dtype_id);
+    uint32_t scale_vec = 256 / num_bits / group_size;
+    expected_shape.push_back(num_groups / (scale_vec == 1 ? 2 : 4));
+    expected_shape.push_back(kernel_data.problem_shape_n / (scale_vec == 1 ? 2 : 1));
+  } else {
+    expected_shape.push_back(num_groups);
+    if (kernel_data.is_block_weight_scale) {
+      expected_shape.push_back(num_groups_n);
+    } else {
+      expected_shape.push_back(kernel_data.problem_shape_n);
+    }
+  }
+  check_tensor_common(tensor, "bs", dev, expected_dtype, expected_shape);
 };
 
 inline void check_tensor_bzp(std::optional<Tensor> &tensor, KernelData &kernel_data, int64_t dev) {
@@ -142,13 +174,18 @@ inline void check_tensor_bzp(std::optional<Tensor> &tensor, KernelData &kernel_d
 
   std::vector<int64_t> expected_shape = {};
   if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
-  expected_shape.push_back(num_groups);
   ScalarType expected_dtype;
   if (kernel_data.is_fp_zero_point) {
+    expected_shape.push_back(num_groups);
     expected_shape.push_back(kernel_data.problem_shape_n);
     expected_dtype = dtype_id_to_tensor_dtype(kernel_data.c_dtype_id);
   } else {
-    expected_shape.push_back(kernel_data.problem_shape_n * num_bits / 32);
+    uint32_t scale_vec = 1;
+    if (kernel_data.mma_type_id == 3 && get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
+      scale_vec = 256 / 4 / group_size;
+    }
+    expected_shape.push_back(num_groups / scale_vec);
+    expected_shape.push_back(kernel_data.problem_shape_n * num_bits * scale_vec / 32);
     expected_dtype = ScalarType::Int;
   }
   check_tensor_common(tensor.value(), "bzp", dev, expected_dtype, expected_shape);
@@ -164,11 +201,20 @@ inline void check_tensor_bias(std::optional<Tensor> &tensor, KernelData &kernel_
   check_tensor_common(tensor.value(), "bias", dev, expected_dtype, expected_shape);
 };
 
-inline void check_tensor_gs(std::optional<Tensor> &tensor, KernelData &kernel_data, int64_t dev) {
-  if (!kernel_data.is_tensor_weight_scale) return;
-  ASSERT_CHECK(tensor.has_value(), "gs must not be none if has_global_scale");
-  std::vector<int64_t> expected_shape = {kernel_data.gemm_type_id != 0 ? kernel_data.num_experts : 1};
-  check_tensor_common(tensor.value(), "gs", dev, ScalarType::Float, expected_shape);
+inline void check_tensor_bs2(std::optional<Tensor> &tensor, KernelData &kernel_data, int64_t dev) {
+  if (kernel_data.is_channel_weight_scale_2) {
+    ASSERT_CHECK(tensor.has_value(), "bs2 must not be none if is_channel_weight_scale_2");
+    std::vector<int64_t> expected_shape = {};
+    if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
+    expected_shape.push_back(kernel_data.problem_shape_n);
+    auto expected_dtype = dtype_id_to_tensor_dtype(kernel_data.c_dtype_id);
+    check_tensor_common(tensor.value(), "bs2", dev, expected_dtype, expected_shape);
+    return;
+  } else if (kernel_data.is_tensor_weight_scale_2) {
+    ASSERT_CHECK(tensor.has_value(), "bs2 must not be none if is_tensor_weight_scale_2");
+    std::vector<int64_t> expected_shape = {kernel_data.gemm_type_id != 0 ? kernel_data.num_experts : 1};
+    check_tensor_common(tensor.value(), "bs2", dev, ScalarType::Float, expected_shape);
+  }
 };
 
 inline void check_tensor_locks(std::optional<Tensor> &tensor, KernelData &kernel_data, int64_t dev) {
@@ -223,32 +269,80 @@ inline CUtensorMap make_tma_desc_a(Tensor tensor, KernelData &kernel_data) {
     tma_block_shape_k = 1024 / a_dtype_num_bits;
   }
 
+  uint32_t tma_block_shape_k_packed =
+      a_dtype_num_bits < 8 ? tma_block_shape_k * a_dtype_num_bits / 8 : tma_block_shape_k;
+
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  return make_tma_desc(tensor, {tma_block_shape_k, tma_block_shape_m}, swizzle_bytes);
+  return make_tma_desc(tensor, {tma_block_shape_k_packed, tma_block_shape_m}, swizzle_bytes, "a");
+}
+
+inline CUtensorMap make_tma_desc_as(std::optional<Tensor> &tensor_, KernelData &kernel_data) {
+  if (!tensor_.has_value() || !kernel_data.use_tma_as) return CUtensorMap();
+
+  uint32_t block_shape_m = kernel_data.block_shape_m;
+  uint32_t block_shape_k = kernel_data.block_shape_k;
+  uint32_t group_size = kernel_data.input_scale_group_size;
+  uint32_t num_groups = group_size == 0 ? 1 : CEIL_DIV(block_shape_k, group_size);
+
+  auto tensor = tensor_.value();
+  if (kernel_data.mma_type_id == 3 && group_size > 0) {
+    tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
+    return make_tma_desc(tensor, {block_shape_m, CEIL_DIV(num_groups, 4)}, 0, "as");
+  }
+  if (group_size == 0) {
+    tensor = torch_view_shape(tensor, {1, -1});
+  } else {
+    tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
+  }
+
+  return make_tma_desc(tensor, {block_shape_m, num_groups}, 0, "as");
 }
 
 inline CUtensorMap make_tma_desc_b(Tensor &tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_b) return CUtensorMap();
 
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id);
-  uint32_t pack_size_k = 256 / get_dtype_num_bits(kernel_data.a_dtype_id);
   uint32_t block_shape_n = kernel_data.block_shape_n;
   uint32_t block_shape_k = kernel_data.block_shape_k;
 
-  tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  tensor = torch_view_shape(tensor, {tensor.size(0), -1, num_bits * pack_size_k});
+  uint32_t pack_size_k = 256 / get_dtype_num_bits(kernel_data.a_dtype_id);
+  if (kernel_data.use_packed_k_layout) pack_size_k = 64;
 
-  return make_tma_desc(tensor, {num_bits * pack_size_k, block_shape_n / 32, block_shape_k / pack_size_k});
+  tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
+  tensor = torch_view_shape(tensor, {tensor.size(0), -1, pack_size_k});
+
+  return make_tma_desc(tensor, {pack_size_k, block_shape_n * num_bits / 32, block_shape_k / pack_size_k}, 0, "b");
 }
 
 inline CUtensorMap make_tma_desc_c(Tensor tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_c) return CUtensorMap();
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  return make_tma_desc(tensor, {64, kernel_data.block_shape_m}, 128);
+  return make_tma_desc(tensor, {64, kernel_data.block_shape_m}, 128, "c");
 }
 
-inline CUtensorMap make_tma_desc_bs(std::optional<Tensor> &tensor_, KernelData &kernel_data) {
-  if (!tensor_.has_value() || !kernel_data.use_tma_bs) return CUtensorMap();
+inline CUtensorMap make_tma_desc_bs(Tensor tensor, KernelData &kernel_data) {
+  if (!kernel_data.use_tma_bs) return CUtensorMap();
+
+  uint32_t block_shape_n = kernel_data.block_shape_n;
+  uint32_t block_shape_k = kernel_data.block_shape_k;
+  uint32_t group_size = kernel_data.weight_scale_group_size;
+  uint32_t num_groups = group_size == 0 ? 1 : CEIL_DIV(block_shape_k, group_size);
+
+  tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
+
+  if (kernel_data.mma_type_id == 3 && kernel_data.is_group_weight_scale) {
+    uint32_t num_bits = get_dtype_num_bits(kernel_data.a_dtype_id);
+    uint32_t scale_vec = 256 / num_bits / group_size;
+    return make_tma_desc(tensor, {block_shape_n / (scale_vec == 1 ? 2 : 1), num_groups / (scale_vec == 1 ? 2 : 4)}, 0, "bs");
+  }
+
+  tensor = torch_view_shape(tensor, {tensor.size(0), -1, 16});
+
+  return make_tma_desc(tensor, {16, block_shape_n / 16, num_groups}, 0, "bs");
+}
+
+inline CUtensorMap make_tma_desc_bzp(std::optional<Tensor> &tensor_, KernelData &kernel_data) {
+  if (!tensor_.has_value() || !kernel_data.use_tma_bzp) return CUtensorMap();
 
   uint32_t block_shape_n = kernel_data.block_shape_n;
   uint32_t block_shape_k = kernel_data.block_shape_k;
@@ -257,23 +351,18 @@ inline CUtensorMap make_tma_desc_bs(std::optional<Tensor> &tensor_, KernelData &
 
   auto tensor = tensor_.value();
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  tensor = torch_view_shape(tensor, {tensor.size(0), -1, 16});
 
-  return make_tma_desc(tensor, {16, block_shape_n / 16, num_groups});
-}
-
-inline CUtensorMap make_tma_desc_bzp(std::optional<Tensor> &tensor_, KernelData &kernel_data) {
-  if (!tensor_.has_value() || !kernel_data.use_tma_bzp) return CUtensorMap();
+  if (kernel_data.is_fp_zero_point) {
+    return make_tma_desc(tensor, {block_shape_n, num_groups}, 0, "bzp");
+  }
 
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id) <= 4 ? 4 : 8;
-  uint32_t block_shape_n = kernel_data.block_shape_n;
-  uint32_t block_shape_k = kernel_data.block_shape_k;
-  uint32_t group_size = kernel_data.weight_scale_group_size;
-  uint32_t num_groups = group_size == 0 ? 1 : CEIL_DIV(block_shape_k, group_size);
-
-  auto tensor = tensor_.value();
-
-  return make_tma_desc(tensor, {16, block_shape_n * num_bits / 32, num_groups});
+  if (kernel_data.mma_type_id == 3 &&
+      get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
+    uint32_t scale_vec = 256 / 4 / group_size;
+    if (scale_vec > 1) return make_tma_desc(tensor, {block_shape_n * num_bits * scale_vec / 32, num_groups / scale_vec}, 0, "bzp");
+  }
+  return make_tma_desc(tensor, {block_shape_n * num_bits / 32, num_groups}, 0, "bzp");
 }
 
 inline CUtensorMap make_tma_desc_bias(std::optional<Tensor> &tensor_, KernelData &kernel_data) {
@@ -284,5 +373,16 @@ inline CUtensorMap make_tma_desc_bias(std::optional<Tensor> &tensor_, KernelData
   auto tensor = tensor_.value();
   tensor = torch_view_shape(tensor, {-1, 64});
 
-  return make_tma_desc(tensor, {64, block_shape_n / 64});
+  return make_tma_desc(tensor, {64, block_shape_n / 64}, 0, "bias");
+}
+
+inline CUtensorMap make_tma_desc_bs2(std::optional<Tensor> &tensor_, KernelData &kernel_data) {
+  if (!tensor_.has_value() || !kernel_data.use_tma_bs2) return CUtensorMap();
+
+  uint32_t block_shape_n = kernel_data.block_shape_n;
+
+  auto tensor = tensor_.value();
+  tensor = torch_view_shape(tensor, {-1, 64});
+
+  return make_tma_desc(tensor, {64, block_shape_n / 64}, 0, "bs2");
 }

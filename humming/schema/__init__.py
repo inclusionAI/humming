@@ -1,3 +1,4 @@
+from humming.schema.autoround import AutoRoundWeightSchema
 from humming.schema.awq import AWQWeightSchema
 from humming.schema.base import BaseInputSchema, BaseWeightSchema
 from humming.schema.bitnet import BitnetWeightSchema
@@ -13,6 +14,8 @@ from humming.schema.modelopt import ModeloptInputSchema, ModeloptWeightSchema
 from humming.schema.mxfp4 import Mxfp4WeightSchema
 
 WEIGHT_SCHEMA_MAP: dict[str, type[BaseWeightSchema]] = {
+    "auto-round": AutoRoundWeightSchema,
+    "auto_round": AutoRoundWeightSchema,
     "awq": AWQWeightSchema,
     "bitnet": BitnetWeightSchema,
     "compressed-tensors": CompressedTensorsWeightSchema,
