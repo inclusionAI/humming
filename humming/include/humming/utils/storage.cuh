@@ -76,6 +76,12 @@
 #define IF_USE_MBARRIER(x)
 #endif
 
+#if HUMMING_USE_MBARRIER && HUMMING_MULTI_CAST_SIZE_A * HUMMING_MULTI_CAST_SIZE_B > 1
+#define IF_USE_MULTICAST_MBARRIER(x) x
+#else
+#define IF_USE_MULTICAST_MBARRIER(x)
+#endif
+
 #if HUMMING_USE_WARP_SPEC
 #define IF_USE_WARP_SPEC(x) x
 #else
@@ -206,4 +212,5 @@ public:
 
   IF_USE_MBARRIER(alignas(128) uint64_t load_mbar[kNumStages + 2];)
   IF_USE_WARP_SPEC(uint64_t math_mbar[kNumMathMbarriers];)
+  IF_USE_MULTICAST_MBARRIER(uint64_t multicast_mbar[kNumStages];)
 };

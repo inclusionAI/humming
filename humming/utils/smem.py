@@ -81,6 +81,7 @@ def estimate_smem_size_layer(
     reduce_overlap_last_stage_only: bool = False,
     use_mbarrier: bool = False,
     use_warp_spec: bool = False,
+    multi_cast_size: int = 1,
     num_write_splits: int = 1,
     mma_accum_bits: int = 32,
 ) -> int:
@@ -157,6 +158,8 @@ def estimate_smem_size_layer(
         if reduce_overlap_last_stage_only and num_stages == 2:
             num_math_mbarriers += 1
         add(num_math_mbarriers * 8, 8)  # math_mbar
+    if use_mbarrier and multi_cast_size > 1:
+        add(num_stages * 8, 8)  # multicast_mbar
 
     return _align_up(offset, 1024)
 
@@ -181,6 +184,7 @@ def estimate_smem_size_config(
         reduce_overlap_last_stage_only=tuning_config.reduce_overlap_last_stage_only,
         use_mbarrier=bool(tuning_config.use_mbarrier),
         use_warp_spec=bool(tuning_config.use_warp_spec),
+        multi_cast_size=tuning_config.multi_cast_size_a * tuning_config.multi_cast_size_b,
         num_write_splits=tuning_config.num_write_splits,
         mma_accum_bits=16 if compute_config.use_f16_accum else 32,
     )

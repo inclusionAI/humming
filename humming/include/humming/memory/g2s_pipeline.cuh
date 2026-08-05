@@ -132,6 +132,7 @@ public:
   LoaderBZP loader_bzp;
   LoaderBias loader_bias;
   uint32_t phases[SharedStorage::kNumMathMbarriers] = {0};
+  uint32_t multicast_phase_bits = 0;
 
   CUDA_INLINE
   ProducerPipeline(Ctx &ctx)
@@ -183,6 +184,9 @@ public:
           __mbarrier_init(&smem.math_mbar[thread_id], kNumMathThreads * factor);
         }
       }
+      if constexpr (kMultiCastSize > 1) {
+        if (thread_id < kNumStages) __mbarrier_init(&smem.multicast_mbar[thread_id], kMultiCastSize);
+      }
     }
   }
 
@@ -202,6 +206,10 @@ public:
     uint64_t *mbar_ptr = nullptr;
     if constexpr (kUseMBarrier) mbar_ptr = &smem.load_mbar[mbar_index];
     if (pred) {
+      if constexpr (kMultiCastSize > 1) {
+        expect_tma_load<kHasTmaMBarrier>(mbar_ptr, load_bytes.x);
+        wait_multicast_ready(stage_id);
+      }
       loader_a.template load<kShouldAdvance>(smem.stages[stage_id].a, mbar_ptr, stage_id);
       loader_b.template load<kShouldAdvance>(smem.stages[stage_id].b, mbar_ptr);
       if constexpr (kIsGroupInputScale) {
@@ -223,7 +231,9 @@ public:
     } else {
       commit_cp_async_load<kHasStageCpAsyncMBarrier>(mbar_index, pred);
     }
-    if (pred) expect_tma_load<kHasTmaMBarrier>(mbar_ptr, load_bytes.x);
+    if constexpr (kMultiCastSize == 1) {
+      if (pred) expect_tma_load<kHasTmaMBarrier>(mbar_ptr, load_bytes.x);
+    }
   }
 
   CUDA_INLINE void load_channel() {
@@ -248,6 +258,26 @@ public:
       if (ctx.load_thread_id() == 0) {
         tma_expect_tx(mbar_ptr, bytes);
       }
+    }
+  }
+
+  CUDA_INLINE void wait_multicast_ready(uint32_t stage_id) {
+    if constexpr (kMultiCastSize > 1) {
+      // The leader can write this stage in every peer CTA. Rendezvous only after
+      // each CTA has armed its local transaction barrier for the multicast.
+      if (ctx.load_thread_id() == 0) {
+        auto *mbar_ptr = &ctx.smem.multicast_mbar[stage_id];
+        if (ctx.cluster_rank() == 0) {
+          mbarrier_arrive(mbar_ptr);
+          const uint32_t phase = (multicast_phase_bits >> stage_id) & 1U;
+          mbarrier_wait(mbar_ptr, phase, "Humming multicast producer waiting for cluster peers");
+          multicast_phase_bits ^= 1U << stage_id;
+        } else {
+          void *remote_mbar_ptr = __cluster_map_shared_rank(mbar_ptr, 0);
+          mbarrier_arrive<true>(remote_mbar_ptr);
+        }
+      }
+      ctx.sync_load_threads();
     }
   }
 
