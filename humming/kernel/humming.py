@@ -405,6 +405,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def check_config(self):
         assert self.num_threads <= 1024
+        assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
+            "MXMMA does not support FP16 accumulation"
+        )
+        if self.mma_type == MmaType.MXMMA and self.has_zero_point:
+            self.use_stream_k = False
         if self.mma_type == MmaType.WGMMA:
             assert self.num_stages >= 3, "WGMMA requires at least three pipeline stages"
         if self.use_batch_invariant:

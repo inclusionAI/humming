@@ -333,7 +333,15 @@ inline CUtensorMap make_tma_desc_bs(Tensor tensor, KernelData &kernel_data) {
   if (kernel_data.mma_type_id == 3 && kernel_data.is_group_weight_scale) {
     uint32_t num_bits = get_dtype_num_bits(kernel_data.a_dtype_id);
     uint32_t scale_vec = 256 / num_bits / group_size;
-    return make_tma_desc(tensor, {block_shape_n / (scale_vec == 1 ? 2 : 1), num_groups / (scale_vec == 1 ? 2 : 4)}, 0, "bs");
+    uint32_t packed_block_n = block_shape_n / (scale_vec == 1 ? 2 : 1);
+    uint32_t packed_num_groups = num_groups / (scale_vec == 1 ? 2 : 4);
+    if (packed_block_n > 256) {
+      ASSERT_CHECK(packed_block_n % 256 == 0, "MXMMA BS TMA width must be divisible by 256");
+      ASSERT_CHECK(tensor.size(-1) % 256 == 0, "MXMMA packed BS width must be divisible by 256");
+      tensor = torch_view_shape(tensor, {-1, tensor.size(-1) / 256, 256});
+      return make_tma_desc(tensor, {256, packed_block_n / 256, packed_num_groups}, 0, "bs");
+    }
+    return make_tma_desc(tensor, {packed_block_n, packed_num_groups}, 0, "bs");
   }
 
   tensor = torch_view_shape(tensor, {tensor.size(0), -1, 16});

@@ -66,7 +66,7 @@ public:
     if (thread_id < kNumTmaLoadsPerLine) {
       const uint32_t block_idx = thread_id;
       const uint32_t smem_offset = BlockShape::M * 8 * block_idx;
-      const uint32_t col_offset2 = col_offset + (1024 / ElementA::kBits) * block_idx;
+      const uint32_t col_offset2 = col_offset + (1024 / MAX(ElementA::kBits, 8)) * block_idx;
       if constexpr (kMultiCastSizeA == 1) {
         tma_load_2d(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
       } else if (blockIdx.x % kMultiCastSizeA == 0) {

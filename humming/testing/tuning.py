@@ -73,6 +73,8 @@ def _is_legal_geometry(
     block_shape: tuple[int, int, int],
     warp_shape: tuple[int, int, int],
 ) -> bool:
+    if block_shape[0] > 256:
+        return False
     if layer_config.shape_n % block_shape[1] or layer_config.shape_k % block_shape[2]:
         return False
     if any(block % warp for block, warp in zip(block_shape, warp_shape, strict=True)):
@@ -316,8 +318,6 @@ def _try_combine_candidate(
     warp_m = config["warp_shape"][0]
     if config["num_write_splits"] > 1 and (block_m != warp_m or block_m % 32 or config["use_tma_c"]):
         return None
-    if block_m > 256 and any(config[name] for name in ("use_tma_a", "use_tma_as", "use_tma_c")):
-        return None
     if (
         layer_config.has_zero_point
         and layer_config.is_fp_zero_point
@@ -335,6 +335,9 @@ def enumerate_test_tuning_configs(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
 ) -> list[tuple[dict, dict]]:
+    if layer_config.mma_type == MmaType.MXMMA and compute_config.use_f16_accum:
+        return []
+
     rng = random.Random(_get_seed(layer_config, compute_config))
     groups = (
         _generate_geometry_candidates(layer_config, compute_config),

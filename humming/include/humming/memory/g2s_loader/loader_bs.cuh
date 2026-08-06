@@ -36,6 +36,7 @@ private:
 
   static constexpr uint32_t kPartMmaShapeK = 256 / MmaOpClass::kATypeBits;
   static constexpr uint32_t kMxScaleVec = kPartMmaShapeK / kGroupSize;
+  static constexpr uint32_t kMxTmaWidth = BlockShape::N / (kMxScaleVec == 1 ? 2 : 1);
   static constexpr uint32_t kMxSmemStride = BlockShape::N / (kMxScaleVec == 1 ? 8 : 4);
   static constexpr uint32_t kMxGmemStride = ProblemShape::N / (kMxScaleVec == 1 ? 8 : 4);
   static constexpr uint32_t kMxGmemExpertStride = kMxGmemStride * kProblemNumGroups / (kMxScaleVec == 1 ? 2 : 4);
@@ -73,6 +74,7 @@ public:
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     if (ctx.load_thread_id() == 0) {
       if constexpr (!kUseMxScale) tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+      else if constexpr (kMxTmaWidth > 256) tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset / 256, row_offset);
       else tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
     }
   }
