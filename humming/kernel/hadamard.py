@@ -40,6 +40,7 @@ class HadamardKernel(KernelRuntime):
     torch_dtype: torch.dtype
     block_size: int
     has_scale: bool = False
+    use_pdl: bool = False
 
     def init_kernel(self):
         cpp_dtype = _TORCH_TO_CPP_TYPE[self.torch_dtype]
@@ -55,7 +56,8 @@ class HadamardKernel(KernelRuntime):
             f"    {self.block_size},\n"
             f"    {threads_per_tile},\n"
             f"    {tiles_per_block},\n"
-            f"    {int(self.has_scale)}>"
+            f"    {int(self.has_scale)},\n"
+            f"    {int(self.use_pdl)}>"
         )
         self.arg_types = (
             ctypes.c_void_p,
@@ -90,6 +92,7 @@ class HadamardKernel(KernelRuntime):
         config.blockDimY = 1
         config.blockDimZ = 1
         config.hStream = torch.cuda.current_stream(device).cuda_stream
+        self.set_pdl_launch_attribute(config, self.use_pdl)
 
         arg_values = (
             inputs.data_ptr(),

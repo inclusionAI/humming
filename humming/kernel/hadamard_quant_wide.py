@@ -65,6 +65,7 @@ class HadamardQuantInputWideKernel(KernelRuntime):
     m_major: bool = False
     scale_dtype: str = "float32"
     has_global_scale: bool = False
+    use_pdl: bool = False
 
     def init_kernel(self):
         assert self.group_size > self.block_size, (
@@ -90,7 +91,8 @@ class HadamardQuantInputWideKernel(KernelRuntime):
             f"    {int(self.has_extra_scale)},\n"
             f"    {int(self.m_major)},\n"
             f"    {_SCALE_DTYPE_CODE[self.scale_dtype]},\n"
-            f"    {int(self.has_global_scale)}>"
+            f"    {int(self.has_global_scale)},\n"
+            f"    {int(self.use_pdl)}>"
         )
         self.arg_types = (
             ctypes.c_void_p,
@@ -141,6 +143,7 @@ class HadamardQuantInputWideKernel(KernelRuntime):
         config.blockDimY = 1
         config.blockDimZ = 1
         config.hStream = torch.cuda.current_stream(device).cuda_stream
+        self.set_pdl_launch_attribute(config, self.use_pdl)
 
         arg_values = (
             inputs.data_ptr(),

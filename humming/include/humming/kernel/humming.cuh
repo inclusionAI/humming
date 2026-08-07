@@ -51,6 +51,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   uint64_t debug_start_clock = debug_kernel_timer_start();
   constexpr uint32_t kNumThreads = TuningConfig::kNumThreads;
   constexpr uint32_t kNumStages = TuningConfig::kNumStages;
+  constexpr bool kUsePdl = TuningConfig::kUsePdl;
 
   using SharedStorage = SharedStorage<
       MmaOpClass, BlockShape, WarpShape, ElementA, ElementB, ElementBS,
@@ -91,6 +92,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   producer.init_mbarrier();
   mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
 
+  bool pdl_waited = false;
   while (scheduler.get_next_block()) {
     debug_kernel_timeout_check(debug_start_clock);
     mma.zero_accum();
@@ -104,6 +106,13 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     if constexpr (TuningConfig::kUseTmaC) {
       tma_wait_store_group<0, true>();
       __syncthreads();
+    }
+    if constexpr (kUsePdl) {
+      if (!pdl_waited) {
+        griddepcontrol_wait();
+        if (threadIdx.x == 0) griddepcontrol_launch_dependents();
+        pdl_waited = true;
+      }
     }
     producer.template load_stage<true, true>(0);
     PRAGMA_UNROLL

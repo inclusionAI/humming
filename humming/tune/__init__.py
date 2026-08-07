@@ -41,9 +41,10 @@ def get_heuristics_class(
     if isinstance(sm_version, tuple):
         sm_version = sm_version[0] * 10 + sm_version[1]
     assert isinstance(sm_version, int)
-    name = torch.cuda.get_device_name(device)
-    if "H20" in name and "H200" not in name:
-        return Sm90H20Heuristics
+    if sm_version == 90:
+        name = torch.cuda.get_device_name(device)
+        if "H20" in name and "H200" not in name:
+            return Sm90H20Heuristics
 
     return heuristics_map[sm_version]
 

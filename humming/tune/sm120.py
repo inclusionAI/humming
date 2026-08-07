@@ -16,6 +16,10 @@ class Sm120Heuristics(Sm89Heuristics):
     b4_allowed_dtypes: list[dtypes.DataType] = [dtypes.float4e2m1, dtypes.float4e0m3]
 
     @classmethod
+    def should_use_pdl_for_input(cls, layer_config, shape_m: int) -> bool:
+        return layer_config.shape_n >= 4096 and shape_m <= 32
+
+    @classmethod
     def _is_mxmma(cls, a_dtype, group_size, use_fused_e8m0_scale) -> bool:
         return (
             a_dtype.is_floating_point_type

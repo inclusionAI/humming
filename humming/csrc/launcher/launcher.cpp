@@ -179,14 +179,23 @@ Tensor launch_kernel_impl(
   config.blockDimY = 1;
   config.blockDimZ = 1;
 
-  CUlaunchAttribute attrs[1];
+  CUlaunchAttribute attrs[2];
+  uint32_t num_attrs = 0;
   if (kernel_data.multi_cast_size_a * kernel_data.multi_cast_size_b > 1) {
-    attrs[0].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
-    attrs[0].value.clusterDim.x = kernel_data.multi_cast_size_a * kernel_data.multi_cast_size_b;
-    attrs[0].value.clusterDim.y = 1;
-    attrs[0].value.clusterDim.z = 1;
+    attrs[num_attrs].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
+    attrs[num_attrs].value.clusterDim.x = kernel_data.multi_cast_size_a * kernel_data.multi_cast_size_b;
+    attrs[num_attrs].value.clusterDim.y = 1;
+    attrs[num_attrs].value.clusterDim.z = 1;
+    num_attrs++;
+  }
+  if (kernel_data.use_pdl) {
+    attrs[num_attrs].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+    attrs[num_attrs].value.programmaticStreamSerializationAllowed = 1;
+    num_attrs++;
+  }
+  if (num_attrs > 0) {
     config.attrs = attrs;
-    config.numAttrs = 1;
+    config.numAttrs = num_attrs;
   }
 
   config.sharedMemBytes = kernel_data.smem_size;
@@ -272,6 +281,7 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
         reader.getBool("USE_TMA_BS2"),
         reader.getBool("USE_TMA_BZP"),
         reader.getBool("USE_TMA_BIAS"),
+        reader.getBool("USE_PDL"),
         reader.getBool("USE_PACKED_K_LAYOUT")};
   };
 

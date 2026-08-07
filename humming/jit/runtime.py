@@ -122,5 +122,14 @@ class KernelRuntime:
         if not self.cubin_loaded:
             self.load_cubin()
 
+    def set_pdl_launch_attribute(self, config: cbd.CUlaunchConfig, enabled: bool) -> None:
+        if not enabled or self.sm_version < 90:
+            return
+        attr = cbd.CUlaunchAttribute()
+        attr.id = cbd.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+        attr.value.programmaticStreamSerializationAllowed = 1
+        config.attrs = [attr]
+        config.numAttrs = 1
+
     def __call__(self, *args, **kwargs):
         raise NotImplementedError

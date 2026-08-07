@@ -196,12 +196,14 @@ class HummingLayerMethod:
         input_scale: torch.Tensor | None = None,
         quanted_input: torch.Tensor | None = None,
         sublayer_name: str = "",
+        use_pdl: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return may_quant_input(
             cls._get_meta(layer, sublayer_name),
             inputs=inputs,
             input_scale=input_scale,
             quanted_input=quanted_input,
+            use_pdl=use_pdl,
         )
 
     @classmethod
@@ -214,6 +216,7 @@ class HummingLayerMethod:
         quanted_input: torch.Tensor | None = None,
         m_major_scale: bool = False,
         sublayer_name: str = "",
+        use_pdl: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return may_hadamard_quant_input(
             cls._get_meta(layer, sublayer_name),
@@ -222,6 +225,7 @@ class HummingLayerMethod:
             input_scale=input_scale,
             quanted_input=quanted_input,
             m_major_scale=m_major_scale,
+            use_pdl=use_pdl,
         )
 
     @classmethod
@@ -241,6 +245,7 @@ class HummingLayerMethod:
         tuning_config: dict | list | str | None = None,
         sublayer_name: str = "",
         hadamard_block_size: int | None = None,
+        use_pdl: bool | None = None,
     ):
         meta = cls._get_meta(layer, sublayer_name)
         return humming_forward(
@@ -263,6 +268,7 @@ class HummingLayerMethod:
             compute_config=compute_config,
             tuning_config=tuning_config,
             hadamard_block_size=hadamard_block_size,
+            use_pdl=use_pdl,
         )
 
 
@@ -547,6 +553,7 @@ class HummingLayer(torch.nn.Module):
         compute_config: dict | str | None = None,
         tuning_config: dict | list | str | None = None,
         hadamard_block_size: int | None = None,
+        use_pdl: bool | None = None,
     ) -> torch.Tensor:
         assert self.humming_config is not None, "call transform() before forward()"
         return humming_forward(
@@ -569,4 +576,5 @@ class HummingLayer(torch.nn.Module):
             compute_config=compute_config,
             tuning_config=tuning_config,
             hadamard_block_size=hadamard_block_size,
+            use_pdl=use_pdl,
         )

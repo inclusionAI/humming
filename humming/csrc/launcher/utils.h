@@ -103,6 +103,7 @@ struct KernelData {
   bool use_tma_bs2;
   bool use_tma_bzp;
   bool use_tma_bias;
+  bool use_pdl;
   bool use_packed_k_layout;
 };
 

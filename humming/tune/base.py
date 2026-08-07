@@ -16,6 +16,10 @@ class DeviceHeuristics:
     sm_version: int = 0
 
     @classmethod
+    def should_use_pdl_for_input(cls, layer_config: LayerConfig, shape_m: int) -> bool:
+        return False
+
+    @classmethod
     def get_base_config(
         cls,
         a_dtype: dtypes.DataType,
@@ -214,6 +218,7 @@ class DeviceHeuristics:
             "num_stages": num_stages,
             "num_ctas_per_sm": num_ctas_per_sm,
             "num_write_splits": num_write_splits,
+            "use_pdl": cls.sm_version >= 90,
         }
 
     @classmethod

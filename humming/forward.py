@@ -4,6 +4,30 @@ import torch
 
 from humming import ops
 from humming.config import LayerConfig, MmaType
+from humming.tune import get_heuristics_class
+from humming.utils.device import get_device_capability
+
+
+def _resolve_use_pdl(
+    config: LayerConfig,
+    inputs: torch.Tensor,
+    use_pdl: bool | None,
+) -> bool:
+    if use_pdl is not None:
+        return use_pdl
+    if not inputs.is_cuda:
+        return False
+
+    capability = get_device_capability(inputs.device)
+    heuristics = get_heuristics_class(sm_version=capability, device=inputs.device)
+    shape_m = inputs.numel() // inputs.size(-1)
+    return heuristics.should_use_pdl_for_input(config, shape_m)
+
+
+def _prepare_input_scale(config: LayerConfig, input_scale: torch.Tensor) -> torch.Tensor:
+    if str(config.as_dtype) == "float8e8m0" and input_scale.dtype != torch.int32:
+        return input_scale.view(torch.int32)
+    return input_scale
 
 
 def may_quant_input(
@@ -11,11 +35,13 @@ def may_quant_input(
     inputs: torch.Tensor,
     input_scale: torch.Tensor | None = None,
     quanted_input: torch.Tensor | None = None,
+    use_pdl: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     if config.a_dtype.num_bits == 16:
         return inputs, None
     if input_scale is not None:
         return inputs, input_scale
+    use_pdl = _resolve_use_pdl(config, inputs, use_pdl)
     assert config.as_dtype is not None
     quanted_input, input_scale = ops.quant_input(
         inputs=inputs,
@@ -24,8 +50,9 @@ def may_quant_input(
         group_size=config.input_scale_group_size or None,
         m_major_scale=(config.mma_type == MmaType.MXMMA and config.input_scale_group_size > 0),
         scale_dtype=str(config.as_dtype),
+        use_pdl=use_pdl,
     )
-    return quanted_input, input_scale
+    return quanted_input, _prepare_input_scale(config, input_scale)
 
 
 def may_hadamard_quant_input(
@@ -35,6 +62,7 @@ def may_hadamard_quant_input(
     input_scale: torch.Tensor | None = None,
     quanted_input: torch.Tensor | None = None,
     m_major_scale: bool = False,
+    use_pdl: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     should_rotate = hadamard_block_size is not None and hadamard_block_size > 1
     should_quant = config.a_dtype.num_bits != 16
@@ -43,29 +71,39 @@ def may_hadamard_quant_input(
         return inputs, input_scale
     if not should_rotate and not should_quant:
         return inputs, None
+    use_pdl = _resolve_use_pdl(config, inputs, use_pdl)
     if should_rotate and not should_quant:
         outputs = ops.hadamard_transform(
             inputs=inputs,
             block_size=hadamard_block_size,
             outputs=quanted_input,
+            use_pdl=use_pdl,
         )
         return outputs, None
     if not should_rotate:
-        return ops.quant_input(
+        assert config.as_dtype is not None
+        outputs, scales = ops.quant_input(
             inputs=inputs,
             dtype=str(config.a_dtype),
             outputs=quanted_input,
             group_size=config.input_scale_group_size,
             m_major_scale=m_major_scale,
+            scale_dtype=str(config.as_dtype),
+            use_pdl=use_pdl,
         )
-    return ops.hadamard_quant_input(
+        return outputs, _prepare_input_scale(config, scales)
+    assert config.as_dtype is not None
+    outputs, scales = ops.hadamard_quant_input(
         inputs=inputs,
         block_size=hadamard_block_size,
         quant_dtype=str(config.a_dtype),
         group_size=config.input_scale_group_size,
         outputs=quanted_input,
         m_major_scale=m_major_scale,
+        scale_dtype=str(config.as_dtype),
+        use_pdl=use_pdl,
     )
+    return outputs, _prepare_input_scale(config, scales)
 
 
 def humming_forward(
@@ -88,6 +126,7 @@ def humming_forward(
     compute_config: dict | str | None = None,
     tuning_config: dict | list | str | None = None,
     hadamard_block_size: int | None = None,
+    use_pdl: bool | None = None,
 ) -> torch.Tensor:
     m_major_scale = False
     if config.input_scale_group_size > 0:
@@ -103,6 +142,7 @@ def humming_forward(
         hadamard_block_size=hadamard_block_size,
         input_scale=input_scale,
         m_major_scale=m_major_scale,
+        use_pdl=use_pdl,
     )
 
     if isinstance(compute_config, dict):

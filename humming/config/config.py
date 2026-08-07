@@ -359,6 +359,7 @@ class TuningConfig(BaseHummingConfig):
     multi_cast_size_a: int = 1
     multi_cast_size_b: int = 1
 
+    use_pdl: bool = False
     raster_group_m: int = 1
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
