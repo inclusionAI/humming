@@ -377,6 +377,7 @@ class TuningConfig(BaseHummingConfig):
     }
 
     def __post_init__(self):
+        assert self.block_shape[0] <= 256
         if self.use_warp_spec is None:
             self.use_warp_spec = False
 

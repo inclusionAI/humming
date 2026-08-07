@@ -268,9 +268,6 @@ public:
   CUDA_INLINE void wait_stage(uint32_t stage_id) {
     mbarrier_wait(&ctx.smem.math_mbar[stage_id], phases[stage_id], "Humming producer waiting for math stage");
     if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
-    if constexpr (get_stage_load_bytes().x > 0) {
-      tma_fence_async_shared();
-    }
     phases[stage_id] ^= 1;
   }
 
@@ -285,9 +282,6 @@ public:
   CUDA_INLINE void wait_math_epilogue() {
     mbarrier_wait(&ctx.smem.math_mbar[kNumStages], phases[kNumStages], "Humming producer waiting for epilogue");
     if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
-    if constexpr (get_stage_load_bytes<true>().x > 0 || get_channel_load_bytes().x > 0) {
-      tma_fence_async_shared();
-    }
     phases[kNumStages] ^= 1;
   }
 
