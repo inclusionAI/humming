@@ -167,6 +167,15 @@ public:
     if (ctx.load_thread_id() == 0) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, row_offset, col_offset / 4);
   }
 
+  CUDA_INLINE void prefetch_tma() {
+    if constexpr (kUseTma) {
+      if (ctx.load_thread_id() == 0) {
+        if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, row_offset, col_offset / 4);
+        else tma_prefetch_2d(tensor_map_ptr, row_offset, col_offset);
+      }
+    }
+  }
+
   CUDA_INLINE void load_legacy(void *smem_ptr) {
     uint32_t thread_id = ctx.load_thread_id();
     if constexpr (!kIsIndexedGemm && kIsChannelScale) {

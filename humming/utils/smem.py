@@ -115,7 +115,8 @@ def estimate_smem_size_layer(
     warp_reduce = 0
     if warp_shape and n_warps_k >= 2:
         m_warps = block_m // warp_shape[0]
-        warp_reduce = m_warps * 16 * block_n * mma_accum_bits // 128 * (n_warps_k // 2)
+        reduce_buffers = n_warps_k - 1 if n_warps_k <= 4 else n_warps_k // 2
+        warp_reduce = m_warps * 16 * block_n * mma_accum_bits // 128 * reduce_buffers
     block_output = block_m * block_n // 2 // 4 // max(1, num_write_splits)
     reduce_bytes = max(warp_reduce, block_output) * _INT4
 

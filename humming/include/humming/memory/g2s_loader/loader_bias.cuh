@@ -48,6 +48,13 @@ public:
   }
 
   CUDA_INLINE
+  void prefetch_tma() {
+    if constexpr (kUseTma) {
+      if (ctx.load_thread_id() == 0) tma_prefetch_2d(tensor_map_ptr, 0, offset);
+    }
+  }
+
+  CUDA_INLINE
   void load_legacy(int4 *smem_ptr) {
     legacy_load_1d<kUseCpAsync, kNumInt4s, kNumLoadThreads, kLoadThreadOffset>(gmem_ptr, smem_ptr);
   }

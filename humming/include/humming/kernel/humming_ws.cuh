@@ -100,7 +100,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       uint32_t &slice_iters = scheduler.slice_iters;
 
       producer.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
-      if constexpr (!Ctx::kIsIndexedGemm) producer.wait_math_epilogue();
+      if constexpr (!Ctx::kIsIndexedGemm) {
+        producer.prefetch_stage();
+        producer.wait_math_epilogue();
+      }
       if constexpr (kUsePdl) {
         if (!pdl_waited) {
           griddepcontrol_wait();

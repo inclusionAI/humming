@@ -122,7 +122,8 @@ public:
   static constexpr uint32_t kNumWarpsDimK = BlockShape::K / WarpShape::K;
   static constexpr uint32_t kMmaCTypeBits = MmaOpClass::kCTypeBits;
   static constexpr uint32_t M_WARPS = (BlockShape::M / WarpShape::M);
-  static constexpr uint32_t kWarpReduceSize = M_WARPS * 16 * BlockShape::N * kMmaCTypeBits / 128 * (kNumWarpsDimK / 2);
+  static constexpr uint32_t kWarpReduceBuffers = kNumWarpsDimK <= 4 ? kNumWarpsDimK - 1 : kNumWarpsDimK / 2;
+  static constexpr uint32_t kWarpReduceSize = M_WARPS * 16 * BlockShape::N * kMmaCTypeBits / 128 * kWarpReduceBuffers;
   static constexpr uint32_t kBlockOutputSize = BlockShape::M * BlockShape::N / 2 / 4 / kNumWriteSplits;
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
 

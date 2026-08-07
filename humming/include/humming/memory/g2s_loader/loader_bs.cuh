@@ -80,6 +80,17 @@ public:
   }
 
   CUDA_INLINE
+  void prefetch_tma() {
+    if constexpr (kUseTma) {
+      if (ctx.load_thread_id() == 0) {
+        if constexpr (!kUseMxScale) tma_prefetch_3d(tensor_map_ptr, 0, col_offset, row_offset);
+        else if constexpr (kMxTmaWidth > 256) tma_prefetch_3d(tensor_map_ptr, 0, col_offset / 256, row_offset);
+        else tma_prefetch_2d(tensor_map_ptr, col_offset, row_offset);
+      }
+    }
+  }
+
+  CUDA_INLINE
   void load_legacy(int4 *smem_ptr) {
     if constexpr (kIsBlock) {
       constexpr uint32_t kLoadStride = ProblemShape::N / kGroupSizeN;

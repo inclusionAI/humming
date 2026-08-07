@@ -39,11 +39,13 @@ public:
     constexpr uint32_t num_scalars_per_value = sizeof(ReductionValue) / sizeof(ValTypeC32);
     constexpr uint32_t group_num_warps = BlockShape::K / WarpShape::K;
     constexpr uint32_t num_groups = Ctx::kNumMathThreads / 32 / group_num_warps;
+    constexpr bool use_direct_reduce = group_num_warps <= 4;
+    constexpr uint32_t num_smem_buffers = use_direct_reduce ? group_num_warps - 1 : group_num_warps / 2;
     uint32_t group_id = ctx.warp_id() % num_groups;
     uint32_t group_warp_id = ctx.warp_id() / num_groups;
     uint32_t laneid = ctx.lane_id();
 
-    using ReductionSmemType = ReductionValue[group_num_warps / 2][num_groups][num_values_per_time][32];
+    using ReductionSmemType = ReductionValue[num_smem_buffers][num_groups][num_values_per_time][32];
     auto &smem_arr = *reinterpret_cast<ReductionSmemType *>(ctx.smem.reduce);
 
     auto write_to_smem = [&](uint32_t buffer_id, uint32_t m) {
@@ -82,21 +84,32 @@ public:
 
     PRAGMA_UNROLL
     for (uint32_t m = 0; m < num_reduce_iters; m++) {
-      PRAGMA_UNROLL
-      for (uint32_t i = 1; i < group_num_warps; i *= 2) {
-        uint32_t buffer_id = group_warp_id % (group_num_warps / (2 * i));
-        if (group_warp_id >= group_num_warps / i) {
-          ctx.sync_math_threads();
-        } else if (group_warp_id >= group_num_warps / (2 * i)) {
-          write_to_smem(buffer_id, m);
-          ctx.sync_math_threads();
-        } else {
-          ctx.sync_math_threads();
-          read_from_smem_and_reduce(buffer_id, m);
-        };
-
+      if constexpr (use_direct_reduce) {
+        if (group_warp_id != 0) write_to_smem(group_warp_id - 1, m);
         ctx.sync_math_threads();
-      };
-    };
+        if (group_warp_id == 0) {
+          PRAGMA_UNROLL
+          for (uint32_t buffer_id = 0; buffer_id < group_num_warps - 1; buffer_id++) {
+            read_from_smem_and_reduce(buffer_id, m);
+          }
+        }
+        ctx.sync_math_threads();
+      } else {
+        PRAGMA_UNROLL
+        for (uint32_t i = 1; i < group_num_warps; i *= 2) {
+          uint32_t buffer_id = group_warp_id % (group_num_warps / (2 * i));
+          if (group_warp_id >= group_num_warps / i) {
+            ctx.sync_math_threads();
+          } else if (group_warp_id >= group_num_warps / (2 * i)) {
+            write_to_smem(buffer_id, m);
+            ctx.sync_math_threads();
+          } else {
+            ctx.sync_math_threads();
+            read_from_smem_and_reduce(buffer_id, m);
+          }
+          ctx.sync_math_threads();
+        }
+      }
+    }
   };
 };

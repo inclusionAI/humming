@@ -24,6 +24,7 @@ private:
 
   static constexpr bool kUseMBarrier = Ctx::kUseMBarrier;
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
+  static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
   static constexpr bool kUseTma = Ctx::kUseTma;
   static constexpr bool kUseTmaA = Ctx::kUseTmaA;
   static constexpr bool kUseTmaAS = Ctx::kUseTmaAS && !Ctx::kIsIndexedGemm;
@@ -143,17 +144,18 @@ public:
         loader_bs2(ctx),
         loader_bzp(ctx),
         loader_bias(ctx) {
-
-    if (ctx.load_thread_id() == 0) {
-      if constexpr (kUseTmaA) prefetch_tensor_map(ctx.params.a);
-      if constexpr (kUseTmaAS) prefetch_tensor_map(ctx.params.as);
-      if constexpr (kUseTmaB) prefetch_tensor_map(ctx.params.b);
-      if constexpr (kUseTmaBS) prefetch_tensor_map(ctx.params.bs);
-      if constexpr (kUseTmaBS2) prefetch_tensor_map(ctx.params.bs2);
-      if constexpr (kUseTmaBZP) prefetch_tensor_map(ctx.params.bzp);
-      if constexpr (kUseTmaBias) prefetch_tensor_map(ctx.params.bias);
+    if constexpr (!kUseWarpSpec) {
+      if (ctx.load_thread_id() == 0) {
+        if constexpr (kUseTmaA) prefetch_tensor_map(ctx.params.a);
+        if constexpr (kUseTmaAS) prefetch_tensor_map(ctx.params.as);
+        if constexpr (kUseTmaB) prefetch_tensor_map(ctx.params.b);
+        if constexpr (kUseTmaBS) prefetch_tensor_map(ctx.params.bs);
+        if constexpr (kUseTmaBS2) prefetch_tensor_map(ctx.params.bs2);
+        if constexpr (kUseTmaBZP) prefetch_tensor_map(ctx.params.bzp);
+        if constexpr (kUseTmaBias) prefetch_tensor_map(ctx.params.bias);
+      }
+      __syncwarp();
     }
-    __syncwarp();
   }
 
   CUDA_INLINE static void init_mbarrier(Ctx &ctx) {
@@ -240,6 +242,16 @@ public:
       commit_cp_async_load<kHasChannelCpAsyncMBarrier>(kNumStages + 1);
     }
     expect_tma_load<kHasChannelTmaMBarrier>(channel_mbar_ptr, load_bytes.x);
+  }
+
+  CUDA_INLINE void prefetch_stage() {
+    loader_a.prefetch_tma();
+    loader_b.prefetch_tma();
+    loader_as.prefetch_tma();
+    loader_bs.prefetch_tma();
+    loader_bs2.prefetch_tma();
+    loader_bzp.prefetch_tma();
+    loader_bias.prefetch_tma();
   }
 
   template <bool kHasTmaMBarrier>

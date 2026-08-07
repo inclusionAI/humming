@@ -67,6 +67,13 @@ public:
     if (ctx.load_thread_id() == 0) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
   }
 
+  CUDA_INLINE
+  void prefetch_tma() {
+    if constexpr (kUseTma) {
+      if (ctx.load_thread_id() == 0) tma_prefetch_2d(tensor_map_ptr, col_offset, row_offset);
+    }
+  }
+
   CUDA_INLINE void load_legacy(int4 *smem_ptr) {
     legacy_load_2d<kUseCpAsync, kNumInt4s, kNumLoadThreads, kGmemStride, kSmemStride, kLoadThreadOffset>(gmem_ptr, smem_ptr);
   }

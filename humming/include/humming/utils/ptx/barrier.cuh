@@ -139,16 +139,17 @@ void mbarrier_wait(void *barrier, bool phase_parity, const char *timeout_message
 #endif
 #else
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  uint32_t suspend_time_hint = 10000000;
   asm volatile("{\n"
                "  .reg .pred p;\n"
                "  waitLoop:\n"
-               "  mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
+               "  mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1, %2;\n"
                "  @p bra done;\n"
                "  bra waitLoop;\n"
                "  done:\n"
                "}\n"
                :
-               : "r"(smem_int_mbar), "r"((uint32_t)phase_parity)
+               : "r"(smem_int_mbar), "r"((uint32_t)phase_parity), "r"(suspend_time_hint)
                : "memory");
 #else
   asm volatile("{\n"

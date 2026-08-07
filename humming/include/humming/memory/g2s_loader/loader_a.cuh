@@ -76,6 +76,18 @@ public:
   }
 
   CUDA_INLINE
+  void prefetch_tma() {
+    if constexpr (kUseTma) {
+      uint32_t thread_id = ctx.load_thread_id();
+      if (thread_id < kNumTmaLoadsPerLine && (kMultiCastSizeA == 1 || blockIdx.x % kMultiCastSizeA == 0)) {
+        const uint32_t block_idx = thread_id;
+        const uint32_t col_offset2 = col_offset + (1024 / MAX(ElementA::kBits, 8)) * block_idx;
+        tma_prefetch_2d(tensor_map_ptr, col_offset2, row_offset);
+      }
+    }
+  }
+
+  CUDA_INLINE
   void load_legacy(int4 *smem_ptr, uint32_t stage_id) {
     if constexpr (kSwizzleBytes == 128) {
       load_legacy_swizzled_128B(smem_ptr, stage_id);

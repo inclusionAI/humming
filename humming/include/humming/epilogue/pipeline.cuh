@@ -38,8 +38,11 @@ public:
       : ctx(ctx), locks(ctx.params.locks), arith(arith),
         smem_reducer(ctx), smem_writer(ctx, arith), gmem_writer(ctx, arith) {
     if constexpr (Ctx::kUseTmaC) {
-      if constexpr (kIsGroupedGemm) gmem_writer.update_tensor_map_ptr(ctx.params.tensor_map_buffer + blockIdx.x);
-      else if (threadIdx.x == 0) prefetch_tensor_map(ctx.params.c);
+      if constexpr (kIsGroupedGemm) {
+        gmem_writer.update_tensor_map_ptr(ctx.params.tensor_map_buffer + blockIdx.x);
+      } else if constexpr (!Ctx::kUseWarpSpec) {
+        if (threadIdx.x == 0) prefetch_tensor_map(ctx.params.c);
+      }
     }
     ctx.sync_math_threads();
   }
