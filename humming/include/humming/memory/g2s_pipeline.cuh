@@ -177,7 +177,7 @@ public:
       }
 
       if (thread_id < kNumStages + 2) __mbarrier_init(&smem.load_mbar[thread_id], count);
-      uint32_t factor = (kMultiCastSize > 1 && cluster_rank == 0 && thread_id < kNumStages) ? kMultiCastSize : 1;
+      uint32_t factor = (kMultiCastSize > 1 && cluster_rank == 0 && thread_id < SharedStorage::kNumMathMbarriers) ? kMultiCastSize : 1;
       if constexpr (Ctx::kUseWarpSpec) {
         if (thread_id < SharedStorage::kNumMathMbarriers) {
           __mbarrier_init(&smem.math_mbar[thread_id], kNumMathThreads * factor);
@@ -372,7 +372,7 @@ public:
     auto &smem = ctx.smem;
     mbarrier_arrive(&smem.math_mbar[stage_id]);
     if constexpr (kMultiCastSize > 1) {
-      if (ctx.cluster_rank() >= 1 && stage_id < kNumStages) {
+      if (ctx.cluster_rank() >= 1 && stage_id < SharedStorage::kNumMathMbarriers) {
         void *aa = __cluster_map_shared_rank(&smem.math_mbar[stage_id], 0);
         mbarrier_arrive<true>(aa);
       }
