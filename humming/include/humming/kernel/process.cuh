@@ -1,7 +1,7 @@
 
 #include <humming/utils/all.cuh>
 
-template <uint32_t kNumBitsB, uint32_t kNumBitsA>
+template <uint32_t kNumBitsB, uint32_t kNumBitsA, bool kUseNativeDequant>
 CUDA_INLINE void humming_pack_weight(uint32_t *in_arr, uint32_t *out_arr, uint32_t interleave_mode) {
   constexpr uint32_t kNumBitsPaddedB = static_next_power_of_2(kNumBitsB);
 
@@ -22,6 +22,13 @@ CUDA_INLINE void humming_pack_weight(uint32_t *in_arr, uint32_t *out_arr, uint32
       uint32_t val = 0;
       PRAGMA_UNROLL
       for (uint32_t k = 0; k < 32 / kNumBitsPaddedB; k++) {
+        if constexpr (kUseNativeDequant) {
+          constexpr uint32_t mask = (1 << kNumBitsB) - 1;
+          uint32_t single_val = in_arr[i * 32 + j * 32 / kNumBitsPaddedB + k];
+          val |= (single_val & mask) << (k * kNumBitsPaddedB);
+          continue;
+        }
+
         uint32_t new_k = get_interleaved_index(k);
         constexpr uint32_t mask1 = (1 << (kNumBitsB - 1));
         constexpr uint32_t mask2 = mask1 - 1;
@@ -119,7 +126,7 @@ template <
     uint32_t kNumBitsB, uint32_t kNumBitsA, bool kPackedInput,
     bool kShouldPreprocessForINT2FP, bool kShouldPreprocessWithZP,
     bool kShouldTransposeMiniBlock, uint32_t kGroupSizeZP,
-    bool kUsePackedKLayout = false>
+    bool kUsePackedKLayout = false, bool kUseNativeDequant = false>
 __global__ void weight_repack_nk(
     const uint32_t *in_ptr, uint32_t *out_ptr, const uint32_t *zp_ptr,
     uint32_t shape_n, uint32_t shape_k,
@@ -265,7 +272,7 @@ __global__ void weight_repack_nk(
   constexpr uint32_t kNumBitsPaddedB = static_next_power_of_2(kNumBitsB);
   uint32_t out_arr[4 * kNumBitsPaddedB];
 
-  humming_pack_weight<kNumBitsB, kNumBitsA>(reinterpret_cast<uint32_t *>(tmp), out_arr, interleave_mode);
+  humming_pack_weight<kNumBitsB, kNumBitsA, kUseNativeDequant>(reinterpret_cast<uint32_t *>(tmp), out_arr, interleave_mode);
 
   uint32_t out_stride = (256 / kNumBitsA) * padded_shape_n * kNumBitsB / 32;
   uint32_t col_offset = (256 / kNumBitsA) * (64 * blockIdx.x) * kNumBitsB / 32;

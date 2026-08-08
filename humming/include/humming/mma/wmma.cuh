@@ -18,6 +18,7 @@ public:
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
   static constexpr bool kNativeMixed = MmaOpClass::kNativeMixed;
+  static constexpr bool kUseNativeDequant = Ctx::kUseNativeDequant && kUseNativeWeightDequant<ElementB, ElementA>;
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
@@ -69,7 +70,11 @@ public:
         uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id][i * 16 / MmaShape::N]);
         uint4 zp_vals = arith.prepare_zp_for_dequant(buffer_id, i);
         uint32_t *zp_vals_ptr = reinterpret_cast<uint32_t *>(&zp_vals);
-        dequant<ElementB, ElementA, kHasZeroPoint, kIsFpZeroPoint, kNumWarpShapeNSplits>(regs_qb[buffer_id], regs_b_ptr, i, zp_vals_ptr);
+        if constexpr (kUseNativeDequant) {
+          dequant_native<ElementB, ElementA>(regs_qb[buffer_id], regs_b_ptr, i);
+        } else {
+          dequant<ElementB, ElementA, kHasZeroPoint, kIsFpZeroPoint, kNumWarpShapeNSplits>(regs_qb[buffer_id], regs_b_ptr, i, zp_vals_ptr);
+        }
         arith.may_apply_bs_and_zp_on_b(regs_b_ptr, i, buffer_id);
       };
     }

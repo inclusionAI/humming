@@ -1,4 +1,5 @@
 import dataclasses
+import functools
 import math
 from typing import ClassVar
 
@@ -7,6 +8,12 @@ import torch
 from humming import dtypes
 from humming.config.base import BaseHummingConfig
 from humming.config.enum import GemmType, MmaType, WeightScale2Type, WeightScaleType
+
+
+@functools.cache
+def _cuda_compiler_version(compiler_cls):
+    version = compiler_cls.signature().split("+", 1)[1]
+    return tuple(int(x) for x in version.split(".")[:2])
 
 
 @dataclasses.dataclass(kw_only=True, unsafe_hash=True)
@@ -56,7 +63,37 @@ class LayerConfig(BaseHummingConfig):
         "has_channel_weight_scale",
         "has_tensor_weight_scale",
         "has_input_scale",
+        "use_native_dequant",
     )
+
+    @property
+    def use_native_dequant(self):
+        from humming.jit.runtime import KernelRuntime
+
+        cuda_version = _cuda_compiler_version(KernelRuntime._get_compiler())
+        major, minor = torch.cuda.get_device_capability()
+        sm = major * 10 + minor
+        native_low_bit_sm = sm >= 100
+        if self.mma_type != MmaType.MMA:
+            return False
+
+        accepted_b_dtype = tuple()
+        if self.a_dtype == dtypes.float16:
+            if sm >= 89 and cuda_version >= (11, 8):
+                accepted_b_dtype += (dtypes.float8e4m3, dtypes.float8e5m2)
+            if native_low_bit_sm and cuda_version >= (12, 7):
+                accepted_b_dtype += (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
+
+        if self.a_dtype == dtypes.bfloat16 and native_low_bit_sm and cuda_version >= (13, 2):
+            accepted_b_dtype += (
+                dtypes.float4e2m1,
+                dtypes.float6e3m2,
+                dtypes.float6e2m3,
+                dtypes.float8e4m3,
+                dtypes.float8e5m2,
+            )
+
+        return self.b_dtype in accepted_b_dtype
 
     @property
     def mxmma_supported(self):

@@ -39,6 +39,11 @@ private:
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
   static constexpr bool kUseIntWeightScale = Ctx::kUseIntWeightScale;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
+  static constexpr bool kUseNativeDequantB =
+      Ctx::kUseNativeDequant && kUseNativeWeightDequant<ElementB, ElementA>;
+  static constexpr bool kUseNativeDequantBS =
+      Ctx::kUseNativeDequant && kIsGroupWeightScale && !kUseFusedE8m0Scale &&
+      kNativeDequantSupported<ElementBS, ElementA>;
 
   static constexpr uint32_t kInputScaleGroupSize = kIsGroupInputScale ? Ctx::kInputScaleGroupSize : 1;
   static constexpr uint32_t kWeightScaleGroupSize = kIsGroupOrBlockWeightScale ? Ctx::kWeightScaleGroupSize : 1;
@@ -51,7 +56,7 @@ private:
       ElementA, ElementB, ElementBS, kHasZeroPoint,
       kIsF16Accum, kIsGroupInputScale,
       kIsGroupOrBlockWeightScale && !kUseFusedE8m0Scale,
-      MmaOpClass::kNativeMixed>();
+      MmaOpClass::kNativeMixed, kUseNativeDequantB, kUseNativeDequantBS>();
 
   static constexpr uint32_t kDequantBSBits = (ElementA::kBits < 16 && !kIsF16Accum) ? 32 : 16;
   static constexpr uint32_t kNumSubBlocksM = CEIL_DIV(WarpShape::M, 16);
@@ -120,23 +125,31 @@ public:
 
     if (j % 2 == 0) {
       if constexpr (ElementA::kBits == 16 && ElementBS::kBits == 8 && kIsGroupWeightScale && !kUseFusedE8m0Scale) {
-        dequant<ElementBS, ElementA>(bs[buffer_id], dq_bs, 0);
+        if constexpr (kUseNativeDequantBS) {
+          dequant_native<ElementBS, ElementA>(bs[buffer_id], dq_bs, 0);
+        } else {
+          dequant<ElementBS, ElementA>(bs[buffer_id], dq_bs, 0);
+        }
 
         scalar_t *dq_bs_scalar_ptr = reinterpret_cast<scalar_t *>(dq_bs);
 
-        PRAGMA_UNROLL
-        for (uint32_t j = 0; j < 2; j++) {
-          scalar_t tmp = dq_bs_scalar_ptr[2 + 4 * j];
-          dq_bs_scalar_ptr[2 + 4 * j] = dq_bs_scalar_ptr[1 + 4 * j];
-          dq_bs_scalar_ptr[1 + 4 * j] = tmp;
+        if constexpr (!kUseNativeDequantBS) {
+          PRAGMA_UNROLL
+          for (uint32_t j = 0; j < 2; j++) {
+            scalar_t tmp = dq_bs_scalar_ptr[2 + 4 * j];
+            dq_bs_scalar_ptr[2 + 4 * j] = dq_bs_scalar_ptr[1 + 4 * j];
+            dq_bs_scalar_ptr[1 + 4 * j] = tmp;
+          }
         }
 
-        const scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, kExpOffset.y>();
-        scalar_t2 *dq_bs_scalar2_ptr = reinterpret_cast<scalar_t2 *>(dq_bs);
+        if constexpr (kExpOffset.y) {
+          const scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, kExpOffset.y>();
+          scalar_t2 *dq_bs_scalar2_ptr = reinterpret_cast<scalar_t2 *>(dq_bs);
 
-        PRAGMA_UNROLL
-        for (uint32_t j = 0; j < 4; j++) {
-          dq_bs_scalar2_ptr[j] = __hmul2(dq_bs_scalar2_ptr[j], scale_factor);
+          PRAGMA_UNROLL
+          for (uint32_t j = 0; j < 4; j++) {
+            dq_bs_scalar2_ptr[j] = __hmul2(dq_bs_scalar2_ptr[j], scale_factor);
+          }
         }
       };
     };

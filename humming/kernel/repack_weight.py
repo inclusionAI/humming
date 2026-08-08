@@ -27,6 +27,7 @@ class RepackWeightKernel(KernelRuntime):
     use_fused_e8m0_scale: bool = False
     group_size_zp: int = 0
     use_packed_k_layout: bool = False
+    use_native_dequant: bool = False
 
     def init_kernel(self):
         if self.should_preprocess_with_zp:
@@ -52,7 +53,8 @@ class RepackWeightKernel(KernelRuntime):
             f"    {int(self.should_preprocess_with_zp)},\n"
             f"    {int(should_transpose_mini_block)},\n"
             f"    {self.group_size_zp},\n"
-            f"    {int(self.use_packed_k_layout)}>"
+            f"    {int(self.use_packed_k_layout)},\n"
+            f"    {int(self.use_native_dequant)}>"
         )
         self.arg_types = (
             ctypes.c_void_p,

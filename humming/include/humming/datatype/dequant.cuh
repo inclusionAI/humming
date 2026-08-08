@@ -1,6 +1,7 @@
 #pragma once
 
 #include <humming/datatype/dequant_fused.cuh>
+#include <humming/datatype/dequant_native.cuh>
 #include <humming/datatype/dequant_prepare.cuh>
 #include <humming/datatype/dequant_single.cuh>
 #include <humming/utils/all.cuh>

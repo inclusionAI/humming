@@ -117,6 +117,7 @@ def repack_weight(
     padded_shape_k: int | None = None,
     zero_point: torch.Tensor | None = None,
     use_packed_k_layout: bool = False,
+    use_native_dequant: bool = False,
 ) -> torch.Tensor:
     assert inputs.ndim in [2, 3]
     assert inputs.is_cuda
@@ -163,6 +164,7 @@ def repack_weight(
             use_fused_e8m0_scale=use_fused_e8m0_scale,
             group_size_zp=group_size_zp,
             use_packed_k_layout=use_packed_k_layout,
+            use_native_dequant=use_native_dequant,
         )
 
         kernel(
