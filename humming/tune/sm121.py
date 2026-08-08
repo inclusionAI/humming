@@ -13,10 +13,29 @@ class Sm121Heuristics(Sm120Heuristics):
         return
 
     @classmethod
-    def _tune_small_m_dense(cls, layer_config, config, is_wna16: bool) -> None:
+    def _should_use_stream_k(cls, layer_config, config, shape_m: int) -> bool:
+        if not config.get("use_stream_k", False):
+            return False
+
+        block_m, block_n, _ = config["block_shape"]
+        num_n_blocks = (layer_config.shape_n + block_n - 1) // block_n
+        num_m_blocks = (shape_m + block_m - 1) // block_m
+        num_output_tiles = num_n_blocks * num_m_blocks
+        num_sms = cls.get_num_sms()
+        if num_output_tiles * 3 < num_sms or num_output_tiles >= num_sms:
+            return True
+        if block_m <= 16 and num_output_tiles * 3 >= num_sms * 2:
+            return False
+
+        candidate = config | {"use_stream_k": False}
+        super()._rebalance_dense_warps(layer_config, candidate, shape_m)
+        return all(candidate[key] == config[key] for key in ("block_shape", "warp_shape"))
+
+    @classmethod
+    def _tune_small_m_dense(cls, layer_config, config, shape_m: int, is_wna16: bool) -> None:
         block_m, block_n, block_k = config["block_shape"]
         warp_m, warp_n, warp_k = config["warp_shape"]
-        if block_m > 32:
+        if shape_m > block_m or block_m > 32:
             return
 
         num_a_bits = layer_config.a_dtype.num_bits

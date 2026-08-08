@@ -1,5 +1,7 @@
+import math
+
 from humming import dtypes
-from humming.config import GemmType
+from humming.config import GemmType, MmaType
 from humming.tune.sm8x import Sm89Heuristics
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -18,6 +20,42 @@ class Sm120Heuristics(Sm89Heuristics):
     @classmethod
     def should_use_pdl_for_input(cls, layer_config, shape_m: int) -> bool:
         return layer_config.shape_n >= 4096 and shape_m <= 32
+
+    @classmethod
+    def _fit_dense_block_m_to_grid(
+        cls,
+        block_shape: tuple[int, int],
+        layer_config,
+        shape_m: int,
+        gemm_type: GemmType,
+        num_ctas_per_sm: int,
+    ) -> int:
+        block_shape_m, block_shape_n = block_shape
+        unsupported = gemm_type != GemmType.DENSE or layer_config.mma_type not in (MmaType.MMA, MmaType.MXMMA)
+        unsuitable_m = block_shape_m <= 16 or shape_m <= block_shape_m <= 32
+        if unsupported or unsuitable_m:
+            return block_shape_m
+
+        min_grid_blocks = math.ceil(cls.get_num_sms() * num_ctas_per_sm / 2)
+        num_blocks_n = layer_config.shape_n // block_shape_n
+        num_blocks_m = math.ceil(shape_m / block_shape_m)
+        num_blocks = num_blocks_n * num_blocks_m
+        if num_blocks >= min_grid_blocks:
+            return block_shape_m
+
+        max_num_blocks_m = num_blocks_m * 4
+        target_grid_blocks = min_grid_blocks if num_blocks * 4 >= min_grid_blocks else num_blocks * 2
+        candidates = [
+            candidate
+            for candidate in range(16, block_shape_m, 16)
+            if num_blocks_n * math.ceil(shape_m / candidate) >= target_grid_blocks
+            and math.ceil(shape_m / candidate) <= max_num_blocks_m
+        ]
+        return min(
+            candidates,
+            key=lambda candidate: (math.ceil(shape_m / candidate) * candidate, -candidate),
+            default=block_shape_m,
+        )
 
     @classmethod
     def _is_mxmma(cls, a_dtype, group_size, use_fused_e8m0_scale) -> bool:
@@ -127,23 +165,50 @@ class Sm120Heuristics(Sm89Heuristics):
             num_blocks_nk = num_blocks_n * num_blocks_k
             config.pop("num_sms", None)
 
-            if config["block_shape"][0] <= 32 and num_blocks_nk < cls.get_num_sms() * 3:
+            is_small_m = shape_m <= config["block_shape"][0] <= 32
+            if is_small_m and num_blocks_nk < cls.get_num_sms() * 3:
                 config["num_stages"] = 3
 
-            if config["block_shape"][0] <= 32 and num_blocks_nk < cls.get_num_sms() * 2:
+            if is_small_m and num_blocks_nk < cls.get_num_sms() * 2:
                 config["num_stages"] = 2
                 config["use_warp_spec"] = False
                 config["use_tma"] = False
 
-            cls._tune_small_m_dense(layer_config, config, is_wna16)
+            cls._tune_small_m_dense(layer_config, config, shape_m, is_wna16)
             cls._tune_mxmma_dense(layer_config, config, shape_m, is_mxmma, num_blocks_nk)
+            config["use_stream_k"] = cls._should_use_stream_k(layer_config, config, shape_m)
+            use_stream_k = config["use_stream_k"]
+            rebalance_stream_k = cls._should_rebalance_stream_k(layer_config, config, shape_m)
+            rebalance_stream_k = rebalance_stream_k and use_stream_k
+            block_m, block_n, block_k = config["block_shape"]
+            num_output_tiles = math.ceil(shape_m / block_m) * math.ceil(layer_config.shape_n / block_n)
+            num_sms = cls.get_num_sms()
+            if rebalance_stream_k and block_m <= 16 and num_output_tiles * 3 >= num_sms:
+                config["use_stream_k"] = False
+
+            moderate_nk_grid = cls.sm_version == 120 and num_sms * 2 <= num_blocks_nk < num_sms * 3
+            if is_small_m and not config["use_stream_k"] and moderate_nk_grid:
+                config["use_tma"] = False
+                config["use_warp_spec"] = False
+                for key in [key for key in config if key.startswith("use_tma_")]:
+                    config.pop(key)
+                warp_m, warp_n, warp_k = config["warp_shape"]
+                config["warp_shape"] = (warp_m, warp_n, min(block_k, warp_k * 2))
+
+            if config["use_stream_k"] and block_m <= 16:
+                warp_m, warp_n, warp_k = config["warp_shape"]
+                mn_warps = block_m // warp_m * (block_n // warp_n)
+                target_k_warps = max(1, 4 // mn_warps)
+                config["warp_shape"] = (warp_m, warp_n, max(warp_k, block_k // target_k_warps))
+
+            cls._rebalance_dense_warps(layer_config, config, shape_m)
 
         return config
 
     @classmethod
-    def _tune_small_m_dense(cls, layer_config, config, is_wna16: bool) -> None:
+    def _tune_small_m_dense(cls, layer_config, config, shape_m: int, is_wna16: bool) -> None:
         block_m, block_n, block_k = config["block_shape"]
-        if block_m > 32 or not is_wna16:
+        if shape_m > block_m or block_m > 32 or not is_wna16:
             return
 
         use_stream_k = config.get("use_stream_k", False)
@@ -175,6 +240,75 @@ class Sm120Heuristics(Sm89Heuristics):
         config["warp_shape"] = (block_m, 32, 64)
         config["num_stages"] = 4 if num_blocks_nk >= cls.get_num_sms() * 3 else 2
 
+    @classmethod
+    def _should_use_stream_k(cls, layer_config, config, shape_m: int) -> bool:
+        return config.get("use_stream_k", False)
+
+    @classmethod
+    def _should_rebalance_stream_k(cls, layer_config, config, shape_m: int) -> bool:
+        block_m, block_n, block_k = config["block_shape"]
+        num_blocks_m = math.ceil(shape_m / block_m)
+        num_blocks_n = math.ceil(layer_config.shape_n / block_n)
+        num_k_tiles = layer_config.shape_k // block_k
+        num_ctas = cls.get_num_sms() * config.get("num_ctas_per_sm", 1)
+        return num_blocks_m * num_blocks_n * num_k_tiles < num_ctas * config["num_stages"] * 2
+
+    @classmethod
+    def _rebalance_dense_warps(cls, layer_config, config, shape_m: int) -> None:
+        use_stream_k = config.get("use_stream_k", False)
+        block_m, block_n, _ = config["block_shape"]
+        _, warp_n, _ = config["warp_shape"]
+        mma_k = 1024 // layer_config.a_dtype.num_bits
+        block_k = min(layer_config.shape_k, mma_k * 2)
+        if layer_config.shape_k % block_k:
+            return
+
+        num_warps_n = block_n // warp_n
+        num_warps_m = min(2, block_m // 16, max(1, 4 // num_warps_n))
+        if num_warps_m * num_warps_n < 4:
+            return
+
+        warp_m = block_m // num_warps_m
+        if warp_m % 16:
+            return
+
+        num_k_tiles = layer_config.shape_k // block_k
+        avoid_small_warp_m = cls.sm_version == 120 and shape_m <= block_m and warp_m < 32 and num_k_tiles > 4
+        if not use_stream_k and avoid_small_warp_m:
+            return
+
+        candidate = config | {
+            "block_shape": (block_m, block_n, block_k),
+            "warp_shape": (warp_m, warp_n, block_k),
+        }
+        if all(candidate[key] == config[key] for key in ("block_shape", "warp_shape")):
+            return
+
+        if warp_m < 64:
+            candidate["use_tma"] = False
+            candidate["use_warp_spec"] = False
+            for key in [key for key in candidate if key.startswith("use_tma_")]:
+                candidate.pop(key)
+
+        max_stages = min(4, candidate["num_stages"])
+        for num_stages in range(max_stages, 1, -1):
+            smem = estimate_smem_size_layer(
+                layer_config,
+                candidate["block_shape"],
+                GemmType.DENSE,
+                num_stages,
+                warp_shape=candidate["warp_shape"],
+                reduce_overlap_last_stage_only=candidate.get("reduce_overlap_last_stage_only", False),
+                use_mbarrier=True,
+                use_warp_spec=candidate.get("use_warp_spec", False),
+                num_write_splits=candidate.get("num_write_splits", 1),
+            )
+            if smem <= cls.max_smem_size:
+                candidate["num_stages"] = num_stages
+                config.clear()
+                config.update(candidate)
+                return
+
     @staticmethod
     def _use_tma_b_only(config) -> None:
         config.update(
@@ -201,7 +335,7 @@ class Sm120Heuristics(Sm89Heuristics):
     @classmethod
     def _fit_num_stages(cls, layer_config, config, gemm_type, reduce_overlap: bool) -> int:
         best = 2
-        for num_stages in (3, 4):
+        for num_stages in range(3, 6 if cls.sm_version == 121 else 5):
             smem = estimate_smem_size_layer(
                 layer_config,
                 config["block_shape"],

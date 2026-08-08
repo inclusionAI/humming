@@ -2,14 +2,21 @@
 
 #include <humming/utils/base.cuh>
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#define CP_ASYNC_L2_HINT ".L2::256B"
+#else
+#define CP_ASYNC_L2_HINT ""
+#endif
+#define CP_ASYNC_PREFIX(MODE) "cp.async." #MODE ".shared.global" CP_ASYNC_L2_HINT
+
 #define CP_ASYNC_ASM(MODE)                                          \
-  asm volatile("cp.async." #MODE ".shared.global [%0], [%1], %2;\n" \
+  asm volatile(CP_ASYNC_PREFIX(MODE) " [%0], [%1], %2;\n" \
                :                                                    \
                : "r"(smem), "l"(gmem_ptr), "n"(BYTES)               \
                : "memory");
 
 #define CP_ASYNC_ZFILL_ASM(MODE)                                        \
-  asm volatile("cp.async." #MODE ".shared.global [%0], [%1], %2, %3;\n" \
+  asm volatile(CP_ASYNC_PREFIX(MODE) " [%0], [%1], %2, %3;\n" \
                :                                                        \
                : "r"(smem), "l"(gmem_ptr), "n"(BYTES), "r"(src_size)    \
                : "memory");
@@ -18,7 +25,7 @@
   asm volatile("{\n"                                                       \
                "  .reg .pred p;\n"                                         \
                "  setp.ne.s32 p, %0, 0;\n"                                 \
-               "  @p cp.async." #MODE ".shared.global [%1], [%2], %3;\n"   \
+               "  @p " CP_ASYNC_PREFIX(MODE) " [%1], [%2], %3;\n"       \
                "}\n"                                                       \
                :                                                           \
                : "r"((uint32_t)pred), "r"(smem), "l"(gmem_ptr), "n"(BYTES) \
@@ -28,7 +35,7 @@
   asm volatile("{\n"                                                                       \
                "  .reg .pred p;\n"                                                         \
                "  setp.ne.s32 p, %0, 0;\n"                                                 \
-               "  @p cp.async." #MODE ".shared.global [%1], [%2], %3, %4;\n"               \
+               "  @p " CP_ASYNC_PREFIX(MODE) " [%1], [%2], %3, %4;\n"                       \
                "}\n"                                                                       \
                :                                                                           \
                : "r"((uint32_t)pred2), "r"(smem), "l"(gmem_ptr), "n"(BYTES), "r"(src_size) \

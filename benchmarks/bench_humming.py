@@ -103,6 +103,14 @@ def bench_humming(
                     break
             assert block_size_config is not None
 
+        tuning_config = json.dumps(tuning_config)
+        compute_config = {
+            "use_f16_accum": use_f16_accum,
+            "use_m_major_input_scale": use_m_major_input_scale,
+            "gemm_type": gemm_type.value,
+        }
+        compute_config = json.dumps(compute_config)
+
         torch.cuda.manual_seed(shape_m)
         if gemm_type == GemmType.DENSE:
             expert_layout = None
@@ -134,13 +142,7 @@ def bench_humming(
                 num_tokens_padded=num_tokens_padded,  # noqa
                 expert_layout=expert_layout,  # noqa
                 valid_shape_m=valid_shape_m,
-                compute_config=json.dumps(
-                    {
-                        "use_f16_accum": use_f16_accum,
-                        "use_m_major_input_scale": use_m_major_input_scale,
-                        "gemm_type": gemm_type.value,
-                    }
-                ),
+                compute_config=compute_config,  # noqa
                 tuning_config=tuning_config,  # noqa
                 top_k=top_k if not is_moe_down else 1,
             )

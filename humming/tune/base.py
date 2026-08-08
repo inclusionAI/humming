@@ -108,6 +108,16 @@ class DeviceHeuristics:
 
         num_sms = cls.get_num_sms()
         while num_blocks_n * num_blocks_m * 2 < num_sms * num_ctas_per_sm:
+            prefer_m_split = shape_m > block_shape_m >= block_shape_n and num_blocks_m < num_blocks_n
+            fitted_block_m = cls._fit_dense_block_m_to_grid(
+                (block_shape_m, block_shape_n),
+                layer_config,
+                shape_m,
+                gemm_type,
+                num_ctas_per_sm,
+            )
+            if prefer_m_split and fitted_block_m != block_shape_m:
+                break
             if warp_shape_n > layer_config.a_dtype.num_bits * 4 and block_shape_n > 64:
                 warp_shape_n = warp_shape_n // 2
                 block_shape_n = block_shape_n // 2
@@ -166,6 +176,34 @@ class DeviceHeuristics:
                 warp_shape_k = warp_shape_k // 2
                 block_shape_k = block_shape_k // 2
 
+        dense_block_m = cls._fit_dense_block_m_to_grid(
+            (block_shape_m, block_shape_n),
+            layer_config,
+            shape_m,
+            gemm_type,
+            num_ctas_per_sm,
+        )
+        use_dense_output_grid = False
+        if dense_block_m != block_shape_m:
+            num_warps_n = block_shape_n // warp_shape_n
+            num_warps_m = 2 if dense_block_m > 32 and dense_block_m % 32 == 0 else 1
+            target_k_warps = max(1, 4 // (num_warps_m * num_warps_n))
+            min_warp_shape_k = 1024 // layer_config.a_dtype.num_bits
+            dense_warp_shape_k = min(
+                block_shape_k,
+                max(min_warp_shape_k, block_shape_k // target_k_warps),
+            )
+            num_warps_k = block_shape_k // dense_warp_shape_k
+            if num_warps_m * num_warps_n * num_warps_k < 4:
+                dense_block_m = block_shape_m
+            else:
+                block_shape_m = dense_block_m
+                num_blocks_m = math.ceil(shape_m / block_shape_m)
+                warp_shape_m = block_shape_m // num_warps_m
+                warp_shape_k = dense_warp_shape_k
+                min_grid_blocks = math.ceil(num_sms * num_ctas_per_sm / 2)
+                use_dense_output_grid = num_blocks_n * num_blocks_m >= min_grid_blocks
+
         max_num_stages = 5 if cls.sm_version == 80 else 3
         for num_stages_new in range(num_stages + 1, max_num_stages + 1):
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
@@ -197,7 +235,7 @@ class DeviceHeuristics:
                 warp_shape_k = 512 // layer_config.a_dtype.num_bits
                 assert block_shape_k >= warp_shape_k
 
-        use_stream_k = layer_config.shape_k > 1024 and use_stream_k
+        use_stream_k = layer_config.shape_k > 1024 and use_stream_k and not use_dense_output_grid
         if use_batch_invariant:
             assert not use_stream_k
             assert block_shape_k == warp_shape_k
@@ -231,6 +269,17 @@ class DeviceHeuristics:
             estimated_num_blocks_m = layer_config.num_experts
 
         return estimated_num_blocks_m
+
+    @classmethod
+    def _fit_dense_block_m_to_grid(
+        cls,
+        block_shape: tuple[int, int],
+        layer_config: LayerConfig,
+        shape_m: int,
+        gemm_type: GemmType,
+        num_ctas_per_sm: int,
+    ) -> int:
+        return block_shape[0]
 
     @classmethod
     def get_num_sms(cls):
