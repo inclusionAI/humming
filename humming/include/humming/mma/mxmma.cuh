@@ -201,4 +201,8 @@ public:
   CUDA_INLINE T *final_regs_c_as_ptr() {
     return regs_c_as_ptr<T>(0);
   };
+
+  static constexpr uint32_t final_regs_c_index() {
+    return 0;
+  }
 };

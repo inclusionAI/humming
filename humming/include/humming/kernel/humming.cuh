@@ -99,6 +99,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     __syncthreads();
 
     uint32_t &slice_iters = scheduler.slice_iters;
+    constexpr uint32_t kStaticSliceIters = ProblemShape::K / BlockShape::K;
+    const uint32_t num_slice_iters = Ctx::kUseStreamK ? slice_iters : kStaticSliceIters;
     producer.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
     if constexpr (Ctx::kUseTmaA) producer.prefetch_stage();
     epilogue.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.current_shape_m, scheduler.m_offset);
@@ -118,44 +120,53 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     producer.template load_stage<true, true>(0);
     PRAGMA_UNROLL
     for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
-      producer.load_stage(stage_id, stage_id < slice_iters);
+      producer.load_stage(stage_id, stage_id < num_slice_iters);
     };
 
     consumer.template wait_stage<true>(kNumStages);
     s2r_pipe.template load_stage_iter<true>(0, 0);
     mma.transform_b(0, 0);
 
-    while (slice_iters) {
+    auto consume_stage = [&](auto stage, uint32_t slice_iter) {
+      constexpr uint32_t stage_id = decltype(stage)::value;
       debug_kernel_timeout_check(debug_start_clock);
+      const uint32_t remaining_iters = num_slice_iters - slice_iter;
+      if (remaining_iters == 1) producer.load_channel();
       PRAGMA_UNROLL
-      for (uint32_t stage_id = 0; stage_id < kNumStages; stage_id++) {
-        debug_kernel_timeout_check(debug_start_clock);
-        if (slice_iters == 1) producer.load_channel();
-        PRAGMA_UNROLL
-        for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-          s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-          mma.run(stage_id, warp_iter_id);
-          if (warp_iter_id == Ctx::kWarpIters - 2) {
-            if constexpr (kNumStages == 2) {
-              __syncthreads();
-              if (slice_iters > 1) consumer.wait_stage((stage_id + 1) % kNumStages);
-            } else {
-              __syncthreads();
-              producer.load_stage(stage_id + kNumStages - 1, slice_iters >= kNumStages);
-              if (slice_iters > 1) consumer.wait_stage((stage_id + 1) % kNumStages);
-            }
-          }
-
-          mma.transform_b(
-              (warp_iter_id + 1) % 2,
-              (warp_iter_id + 1) % Ctx::kWarpIters);
+      for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
+        if (warp_iter_id == Ctx::kWarpIters - 1 && remaining_iters > 1) {
+          consumer.wait_stage((stage_id + 1) % kNumStages);
         }
-
-        if constexpr (kNumStages == 2) producer.load_stage(stage_id, slice_iters > kNumStages);
-        slice_iters--;
-        if (!slice_iters) break;
-      };
+        s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
+        mma.run(stage_id, warp_iter_id);
+        if (warp_iter_id == Ctx::kWarpIters - 2) {
+          __syncthreads();
+          if constexpr (kNumStages > 2) {
+            producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
+          }
+        }
+        mma.transform_b(
+            (warp_iter_id + 1) % 2,
+            (warp_iter_id + 1) % Ctx::kWarpIters);
+      }
+      if constexpr (kNumStages == 2) {
+        producer.load_stage(stage_id, remaining_iters > kNumStages);
+      }
     };
+
+    const uint32_t num_full_stage_cycles = num_slice_iters / kNumStages;
+    for (uint32_t cycle_id = 0; cycle_id < num_full_stage_cycles; cycle_id++) {
+      static_for<0, kNumStages>([&](auto stage) {
+        consume_stage(stage, cycle_id * kNumStages + decltype(stage)::value);
+      });
+    }
+    const uint32_t tail_stage_iters = num_slice_iters % kNumStages;
+    static_for<0, kNumStages>([&](auto stage) {
+      constexpr uint32_t stage_id = decltype(stage)::value;
+      if (stage_id < tail_stage_iters) {
+        consume_stage(stage, num_full_stage_cycles * kNumStages + stage_id);
+      }
+    });
 
     consumer.wait_channel();
     s2r_pipe.load_channel(scheduler.slice_id);

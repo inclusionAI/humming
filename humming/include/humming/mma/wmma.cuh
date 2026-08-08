@@ -117,6 +117,10 @@ public:
 
   template <class T = uint32_t>
   CUDA_INLINE T *final_regs_c_as_ptr() {
+    return regs_c_as_ptr<T>(final_regs_c_index());
+  };
+
+  static constexpr uint32_t final_regs_c_index() {
     uint32_t index = 0;
     constexpr bool kIsGroupInputScale = Ctx::kInputScaleGroupSize > 0;
     constexpr bool kIsGroupWeightScale = Ctx::kIsGroupWeightScale;
@@ -130,6 +134,6 @@ public:
       index = 1;
     }
 
-    return regs_c_as_ptr<T>(index);
-  };
+    return index;
+  }
 };

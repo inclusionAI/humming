@@ -60,9 +60,9 @@ public:
 
   // for stream-k
   uint32_t slice_iters;
-  uint32_t slice_count;
-  uint32_t slice_id;
-  uint32_t locks_offset;
+  uint32_t slice_count = 1;
+  uint32_t slice_id = 0;
+  uint32_t locks_offset = 0;
 
   // for tma multi-cast
   uint32_t cluster_rank = blockIdx.x % kMultiCastSize;
@@ -121,15 +121,14 @@ public:
         if (streamk_mnk_iters > streamk_mnk_total_iters) streamk_mnk_iters = streamk_mnk_total_iters;
       };
     } else {
-      dp_mn_iters = mn_blocks / kNumCtaGroups;
-      if (blockIdx.x / kMultiCastSize < mn_blocks % kNumCtaGroups) { dp_mn_iters += 1; };
+      dp_mn_next_index = blockIdx.x / kMultiCastSize;
+      dp_mn_iters = dp_mn_next_index < mn_blocks;
     }
 
     dp_mn_total_iters = dp_mn_iters;
-    slice_count = 1;
-    slice_id = 0;
-
-    if (dp_mn_iters) { dp_mn_next_index = blockIdx.x / kMultiCastSize; };
+    if constexpr (kUseStreamK) {
+      if (dp_mn_iters) dp_mn_next_index = blockIdx.x / kMultiCastSize;
+    }
   };
 
   CUDA_INLINE
@@ -220,7 +219,8 @@ public:
       }
       k_block_id = 0;
       dp_mn_next_index += gridDim.x / kMultiCastSize;
-      dp_mn_iters--;
+      if constexpr (kUseStreamK) dp_mn_iters--;
+      else dp_mn_iters = dp_mn_next_index < mn_blocks;
       has_next_block = true;
     } else if constexpr (kUseStreamK) {
       has_next_block = get_streamk_next_block();

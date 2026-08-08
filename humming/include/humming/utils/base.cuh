@@ -12,6 +12,19 @@
 #define PRAGMA_UNROLL_COUNT(n) _Pragma(STR(unroll n))
 #define CUDA_INLINE __device__ __forceinline__
 
+template <uint32_t kValue>
+struct CompileTimeConstant {
+  static constexpr uint32_t value = kValue;
+};
+
+template <uint32_t kIndex = 0, uint32_t kEnd, class Func>
+CUDA_INLINE void static_for(Func &&func) {
+  if constexpr (kIndex < kEnd) {
+    func(CompileTimeConstant<kIndex>{});
+    static_for<kIndex + 1, kEnd>(static_cast<Func &&>(func));
+  }
+}
+
 #ifndef HUMMING_DEBUG_KERNEL
 #define HUMMING_DEBUG_KERNEL 0
 #endif
