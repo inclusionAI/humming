@@ -101,6 +101,8 @@ def may_build_nvrtc_compile_binary():
         sort_keys=True,
         ensure_ascii=False,
     )
+    compiler = os.environ.get("CXX") or "g++"
+    env_signature += jit_utils.get_native_platform_signature()
     full_hash = jit_utils.hash_to_hex(src_hash + "$$" + env_signature)
 
     build_dir = Path(jit_utils.get_humming_cache_dir()) / "nvrtc_compile" / full_hash
@@ -117,7 +119,7 @@ def may_build_nvrtc_compile_binary():
             _cached_binary_path = binary_path.as_posix()
             return _cached_binary_path
 
-        _cached_binary_path = build_nvrtc_compile_binary(binary_path)
+        _cached_binary_path = build_nvrtc_compile_binary(binary_path, compiler=compiler)
         return _cached_binary_path
 
 

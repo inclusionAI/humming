@@ -16,6 +16,7 @@ from humming.tune.sm90 import Sm90Heuristics
 from humming.tune.sm90_h20 import Sm90H20Heuristics
 from humming.tune.sm100 import Sm100Heuristics
 from humming.tune.sm120 import Sm120Heuristics
+from humming.tune.sm121 import Sm121Heuristics
 
 heuristics_map: dict[int, type[DeviceHeuristics]] = {
     75: Sm75Heuristics,
@@ -27,7 +28,7 @@ heuristics_map: dict[int, type[DeviceHeuristics]] = {
     100: Sm100Heuristics,
     103: Sm100Heuristics,
     120: Sm120Heuristics,
-    121: Sm120Heuristics,
+    121: Sm121Heuristics,
 }
 
 
@@ -40,9 +41,10 @@ def get_heuristics_class(
     if isinstance(sm_version, tuple):
         sm_version = sm_version[0] * 10 + sm_version[1]
     assert isinstance(sm_version, int)
-    name = torch.cuda.get_device_name(device)
-    if "H20" in name and "H200" not in name:
-        return Sm90H20Heuristics
+    if sm_version == 90:
+        name = torch.cuda.get_device_name(device)
+        if "H20" in name and "H200" not in name:
+            return Sm90H20Heuristics
 
     return heuristics_map[sm_version]
 

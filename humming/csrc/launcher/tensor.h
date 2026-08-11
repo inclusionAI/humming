@@ -110,7 +110,7 @@ inline void check_tensor_as(std::optional<Tensor> &tensor, KernelData &kernel_da
     int64_t expert_m = shape_m / kernel_data.num_experts;
     ASSERT_CHECK(expert_m % input_scale_m_alignment == 0, "expert_m % input_scale_m_alignment != 0");
   }
-  if (kernel_data.mma_type_id == 3) {
+  if (kernel_data.mma_type_id == 3 && group_size > 0) {
     std::vector<int64_t> expected_shape;
     if (kernel_data.use_tma_as || kernel_data.use_m_major_input_scale) {
       expected_shape = {(int64_t)CEIL_DIV(num_groups, 4), m_pad};
@@ -146,7 +146,7 @@ inline void check_tensor_bs(Tensor &tensor, KernelData &kernel_data, int64_t dev
   std::vector<int64_t> expected_shape = {};
   auto expected_dtype = dtype_id_to_tensor_dtype(kernel_data.bs_dtype_id);
   if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
-  if (kernel_data.mma_type_id == 3) {
+  if (kernel_data.mma_type_id == 3 && group_size > 0) {
     expected_dtype = ScalarType::Int;
     uint32_t num_bits = get_dtype_num_bits(kernel_data.a_dtype_id);
     uint32_t scale_vec = 256 / num_bits / group_size;
@@ -305,7 +305,7 @@ inline CUtensorMap make_tma_desc_as(std::optional<Tensor> &tensor_, KernelData &
   uint32_t num_groups = group_size == 0 ? 1 : CEIL_DIV(block_shape_k, group_size);
 
   auto tensor = tensor_.value();
-  if (kernel_data.mma_type_id == 3) {
+  if (kernel_data.mma_type_id == 3 && group_size > 0) {
     tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
     return make_tma_desc(tensor, {block_shape_m, CEIL_DIV(num_groups, 4)}, 0, "as");
   }
@@ -350,10 +350,18 @@ inline CUtensorMap make_tma_desc_bs(Tensor tensor, KernelData &kernel_data) {
 
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
 
-  if (kernel_data.mma_type_id == 3) {
+  if (kernel_data.mma_type_id == 3 && kernel_data.is_group_weight_scale) {
     uint32_t num_bits = get_dtype_num_bits(kernel_data.a_dtype_id);
     uint32_t scale_vec = 256 / num_bits / group_size;
-    return make_tma_desc(tensor, {block_shape_n / (scale_vec == 1 ? 2 : 1), num_groups / (scale_vec == 1 ? 2 : 4)}, 0, "bs");
+    uint32_t packed_block_n = block_shape_n / (scale_vec == 1 ? 2 : 1);
+    uint32_t packed_num_groups = num_groups / (scale_vec == 1 ? 2 : 4);
+    if (packed_block_n > 256) {
+      ASSERT_CHECK(packed_block_n % 256 == 0, "MXMMA BS TMA width must be divisible by 256");
+      ASSERT_CHECK(tensor.size(-1) % 256 == 0, "MXMMA packed BS width must be divisible by 256");
+      tensor = torch_view_shape(tensor, {-1, tensor.size(-1) / 256, 256});
+      return make_tma_desc(tensor, {256, packed_block_n / 256, packed_num_groups}, 0, "bs");
+    }
+    return make_tma_desc(tensor, {packed_block_n, packed_num_groups}, 0, "bs");
   }
 
   tensor = torch_view_shape(tensor, {tensor.size(0), -1, 16});

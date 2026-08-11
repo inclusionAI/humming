@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     invoke_fused_moe_triton_kernel,
 )
 
-from humming.utils.test import generate_random_moe_tensors, save_benchmark_result
+from humming.testing import generate_random_moe_tensors, save_benchmark_result
 
 
 def generate_random_tensor(dtype, shape: tuple[int, ...]):

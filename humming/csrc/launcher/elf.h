@@ -58,6 +58,7 @@ struct Elf64_Sym {
 class CubinReader {
 private:
   std::map<std::string, uint64_t> symbolOffsets;
+  std::vector<std::string> kernelNames;
   std::vector<char> data;
 
 public:
@@ -97,6 +98,10 @@ public:
     return getUint32(name) > 0;
   }
 
+  const std::vector<std::string> &getKernelNames() const {
+    return kernelNames;
+  }
+
   void readSymbolTable(const Elf64_Shdr *shdrs, int num_shdrs, int symIdx) {
     const Elf64_Shdr &symtab = shdrs[symIdx];
     const Elf64_Shdr &strtab = shdrs[symtab.sh_link];
@@ -110,6 +115,9 @@ public:
       if (sym.st_name == 0 || sym.st_name >= strtab.sh_size) continue;
       if (sym.st_shndx >= num_shdrs) continue;
       std::string sName = names + sym.st_name;
+      if ((sym.st_info & 0xF) == 2 && (sym.st_other & 0x10) != 0) {
+        kernelNames.push_back(sName);
+      }
 
       const auto &shdr = shdrs[sym.st_shndx];
       if (shdr.sh_type == SHT_NOBITS) {

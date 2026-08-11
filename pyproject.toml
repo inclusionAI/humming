@@ -45,10 +45,13 @@ include-package-data = true
 packages = {find = {include = ["humming", "humming.*"]}}
 
 [tool.setuptools.package-data]
-"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc", "**/*.so", "_native/*/nvrtc_compile"]
+"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc", "**/*.so", "_native/*/nvrtc_compile", "_native/*/manifest.json"]
 
 [tool.ruff]
 line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
 
 [tool.mypy]
 disable_error_code = ["no-untyped-call", "no-untyped-def", "type-arg", "untyped-decorator", "no-any-return"]

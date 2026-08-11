@@ -33,6 +33,16 @@ def prepare_layer_config(
     assert isinstance(input_schema, HummingInputSchema)
     assert isinstance(weight_schema, HummingWeightSchema)
 
+    use_channel_scale_2 = (
+        input_schema.a_dtype == dtypes.int8
+        and weight_schema.b_dtype == dtypes.float4e2m1
+        and weight_schema.bs_dtype == dtypes.float8e8m0
+        and weight_schema.weight_scale_type == WeightScaleType.GROUP
+    )
+    weight_scale_2_type = weight_schema.weight_scale_2_type
+    if use_channel_scale_2:
+        weight_scale_2_type = WeightScale2Type.CHANNEL
+
     return LayerConfig(
         a_dtype=input_schema.a_dtype or f16_dtype,
         b_dtype=weight_schema.b_dtype,
@@ -49,7 +59,7 @@ def prepare_layer_config(
         weight_scale_group_size=weight_schema.weight_scale_group_size,
         weight_scale_group_size_n=weight_schema.weight_scale_group_size_n,
         weight_scale_type=weight_schema.weight_scale_type,
-        weight_scale_2_type=weight_schema.weight_scale_2_type,
+        weight_scale_2_type=weight_scale_2_type,
         has_zero_point=weight_schema.has_zero_point,
         is_fp_zero_point=weight_schema.is_fp_zero_point,
     )
@@ -73,6 +83,18 @@ def check_and_pad_tensors(config: LayerConfig, tensors: dict[str, torch.Tensor])
         tensors["weight_scale"] = tensors["weight_scale"].to(dtype)
 
     if config.use_int_weight_scale or config.use_fused_e8m0_scale:
+        if (
+            config.weight_scale_2_type == WeightScale2Type.CHANNEL
+            and "weight_scale_2" in tensors
+            and tensors["weight_scale_2"].ndim == 1
+        ):
+            weight_scale_2 = tensors["weight_scale_2"]
+            shape_n = config.shape_n - config.pad_shape_n
+            if config.num_experts:
+                weight_scale_2 = weight_scale_2.unsqueeze(-1)
+                tensors["weight_scale_2"] = weight_scale_2.expand(-1, shape_n)
+            elif weight_scale_2.numel() == 1:
+                tensors["weight_scale_2"] = weight_scale_2.expand(shape_n)
         if "weight_scale_2" not in tensors:
             if config.weight_scale_2_type == WeightScale2Type.CHANNEL:
                 shape: tuple[int, ...] = (config.shape_n - config.pad_shape_n,)
@@ -110,6 +132,17 @@ def check_and_pad_tensors(config: LayerConfig, tensors: dict[str, torch.Tensor])
     for key, attrs in tensors_attrs.items():
         shape = attrs["shape"]
         tensor = tensors[key]
+        if (
+            key == "weight_scale"
+            and config.use_fused_e8m0_scale
+            and tensor.dtype == torch.float8_e8m0fnu
+            and tensor.shape[-1] < shape[-1]
+        ):
+            pad_size = shape[-1] - tensor.shape[-1]
+            scale_max = tensor.view(torch.uint8).amax(-1, keepdim=True)
+            scale_pad = scale_max.expand(*tensor.shape[:-1], pad_size)
+            tensor = torch.cat((tensor.view(torch.uint8), scale_pad), dim=-1)
+            tensor = tensor.view(torch.float8_e8m0fnu)
         padding: list[int] = []
         value = 0 if tensor.dtype != torch.float8_e8m0fnu else 1
         for i in range(1, len(shape) + 1):
@@ -416,7 +449,9 @@ def transform_humming_tensors(
     )
 
     if weight_scale is not None:
-        is_mxmma = config.mma_type == MmaType.MXMMA
+        is_mxmma = config.mma_type == MmaType.MXMMA and (
+            config.is_group_weight_scale or config.is_block_weight_scale
+        )
         mxmma_scale_vec = None
         if is_mxmma:
             mxmma_scale_vec = 256 // config.a_dtype.num_bits // config.weight_scale_group_size
@@ -435,11 +470,9 @@ def transform_humming_tensors(
             and config.a_dtype.num_bits == 4
             and config.weight_scale_group_size > 0
         )
-        num_groups_per_mma = (
-            256 // config.a_dtype.num_bits // config.weight_scale_group_size
-            if use_mxmma_zp_layout
-            else 1
-        )
+        num_groups_per_mma = 1
+        if use_mxmma_zp_layout:
+            num_groups_per_mma = 256 // config.a_dtype.num_bits // config.weight_scale_group_size
         zero_point = transform_humming_zero_point(
             zero_point,
             config.b_dtype,

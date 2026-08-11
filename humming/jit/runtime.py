@@ -8,12 +8,13 @@ import torch
 
 from humming import dtypes
 from humming.jit.compiler import NVCCCompiler, NVRTCCompiler
+from humming.utils.cubin import get_cubin_kernel_names
 
 
 @dataclasses.dataclass(kw_only=True)
 class KernelRuntime:
     disable_fast_math: ClassVar[bool] = False
-    _instances: ClassVar[dict[tuple[str, tuple[Any, ...]], "KernelRuntime"]] = {}
+    _instances: ClassVar[dict[tuple[Any, ...], "KernelRuntime"]] = {}
 
     def __new__(cls, *args, **kwargs):
         def get_value(value):
@@ -25,7 +26,7 @@ class KernelRuntime:
 
         args_items = tuple(get_value(x) for x in args)
         kwargs_items = tuple((key, get_value(kwargs[key])) for key in sorted(kwargs.keys()))
-        signature = (cls.__name__, args_items + kwargs_items)
+        signature = (cls.__name__, cls.current_context(), args_items + kwargs_items)
 
         if signature not in cls._instances or not cls._instances[signature].inited:
             instance = super().__new__(cls)
@@ -76,6 +77,12 @@ class KernelRuntime:
     def _ensure_cuda_context():
         torch.cuda.set_device(torch.cuda.current_device())
 
+    @staticmethod
+    def current_context():
+        result, context = cbd.cuCtxGetCurrent()
+        assert result == 0, repr(result)
+        return context
+
     def prepare(self):
         self._ensure_cuda_context()
         compiler_cls = self._get_compiler()
@@ -98,31 +105,31 @@ class KernelRuntime:
         if self.cubin_loaded:
             return None
         kernel_filename = self.kernel_filename
-        result, lib = cbd.cuLibraryLoadFromFile(kernel_filename.encode(), [], [], 0, [], [], 0)
+        result, module = cbd.cuModuleLoad(kernel_filename.encode())
         assert result == 0, repr(result)
-        result, num_kernels = cbd.cuLibraryGetKernelCount(lib)
+        matched = [name for name in get_cubin_kernel_names(kernel_filename) if self.name in name]
+        assert len(matched) == 1, (kernel_filename, self.name, matched)
+        self.kernel_name = matched[0]
+        result, func = cbd.cuModuleGetFunction(module, self.kernel_name.encode())
         assert result == 0, repr(result)
-        result, kernels = cbd.cuLibraryEnumerateKernels(num_kernels, lib)
-        assert result == 0, repr(result)
-        keyword = self.name.encode()
-        matched = []
-        for kernel in kernels:
-            result, name = cbd.cuKernelGetName(kernel)
-            assert result == 0, repr(result)
-            if keyword in name:
-                matched.append((kernel, name))
-        assert len(matched) == 1, (kernel_filename, self.name, [x[1] for x in matched])
-        self.kernel, kernel_name = matched[0]
-        self.kernel_name = kernel_name.decode()
-        result, func = cbd.cuKernelGetFunction(self.kernel)
-        assert result == 0, repr(result)
+        self.module = module
         self.func = func
+        self.kernel = func
         self.cubin_loaded = True
 
     def check_context(self):
         assert threading.current_thread() is threading.main_thread()
         if not self.cubin_loaded:
             self.load_cubin()
+
+    def set_pdl_launch_attribute(self, config: cbd.CUlaunchConfig, enabled: bool) -> None:
+        if not enabled or self.sm_version < 90:
+            return
+        attr = cbd.CUlaunchAttribute()
+        attr.id = cbd.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+        attr.value.programmaticStreamSerializationAllowed = 1
+        config.attrs = [attr]
+        config.numAttrs = 1
 
     def __call__(self, *args, **kwargs):
         raise NotImplementedError

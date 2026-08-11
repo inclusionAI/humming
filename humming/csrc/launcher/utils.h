@@ -58,7 +58,7 @@ ScalarType dtype_id_to_tensor_dtype(uint32_t dtype_id) {
 };
 
 struct KernelData {
-  CUlibrary library;
+  CUmodule module;
   CUfunction func;
 
   uint32_t smem_size;
@@ -103,6 +103,7 @@ struct KernelData {
   bool use_tma_bs2;
   bool use_tma_bzp;
   bool use_tma_bias;
+  bool use_pdl;
   bool use_packed_k_layout;
 };
 

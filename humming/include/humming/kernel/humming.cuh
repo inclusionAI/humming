@@ -52,6 +52,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   uint64_t debug_start_clock = debug_kernel_timer_start();
   constexpr uint32_t kNumThreads = TuningConfig::kNumThreads;
   constexpr uint32_t kNumStages = TuningConfig::kNumStages;
+  constexpr bool kUsePdl = TuningConfig::kUsePdl;
 
   using SharedStorage = SharedStorage<
       MmaOpClass, BlockShape, WarpShape, ElementA, ElementB, ElementBS,
@@ -92,6 +93,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   producer.init_mbarrier();
   mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
 
+  bool pdl_waited = false;
   while (scheduler.get_next_block()) {
     debug_kernel_timeout_check(debug_start_clock);
     mma.zero_accum();
@@ -106,6 +108,13 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       tma_wait_store_group<0, true>();
       __syncthreads();
     }
+    if constexpr (kUsePdl) {
+      if (!pdl_waited) {
+        griddepcontrol_wait();
+        if (threadIdx.x == 0) griddepcontrol_launch_dependents();
+        pdl_waited = true;
+      }
+    }
     producer.template load_stage<true, true>(0);
     PRAGMA_UNROLL
     for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
@@ -114,7 +123,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
     consumer.template wait_stage<true>(kNumStages);
     s2r_pipe.template load_stage_iter<true>(0, 0);
-    mma.transform_b(0);
+    mma.transform_b(0, 0);
 
     while (slice_iters) {
       debug_kernel_timeout_check(debug_start_clock);
@@ -137,7 +146,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             }
           }
 
-          mma.transform_b((warp_iter_id + 1) % 2);
+          mma.transform_b(
+              (warp_iter_id + 1) % 2,
+              (warp_iter_id + 1) % Ctx::kWarpIters);
         }
 
         if constexpr (kNumStages == 2) producer.load_stage(stage_id, slice_iters > kNumStages);

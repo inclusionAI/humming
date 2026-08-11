@@ -9,18 +9,8 @@ import torch.nn.functional as F
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig
 from humming.kernel.humming import HummingKernel
-from humming.transform import (
-    process_fused_e8m0_scale,
-    transform_humming_bias,
-    transform_humming_weight,
-    transform_humming_weight_scale,
-)
+from humming.testing import KernelTestCase, KernelTestRunner, skip_if_unsupported
 from humming.tune.sm90_h20 import Sm90H20Heuristics
-from humming.utils.test import (
-    generate_random_inputs,
-    generate_random_weight,
-    skip_if_unsupported,
-)
 
 
 def test_h20_indexed_mxfp4_enables_fp32_streamk_reduce():
@@ -114,17 +104,6 @@ def test_indexed_streamk_fp32_reduce_is_batch_invariant():
     block_m = 32
     block_n = 256
 
-    torch.manual_seed(7)
-    torch.cuda.manual_seed(7)
-    _, _, weight, weight_scale, _, weight_scale_2 = generate_random_weight(
-        n=shape_n,
-        k=shape_k,
-        group_size=weight_scale_group_size,
-        dtype=dtypes.float4e2m1,
-        scale_dtype=dtypes.float8e8m0,
-        num_experts=num_experts,
-        weight_scale_2_type="channel",
-    )
     layer_config = LayerConfig(
         shape_n=shape_n,
         shape_k=shape_k,
@@ -141,37 +120,32 @@ def test_indexed_streamk_fp32_reduce_is_batch_invariant():
         weight_scale_2_type="channel",
         use_fused_e8m0_scale=True,
     )
-    weight, weight_scale, weight_scale_2 = process_fused_e8m0_scale(
-        layer_config,
-        weight=weight,
-        weight_scale=weight_scale,
-        weight_scale_2=weight_scale_2,
+    compute_config = ComputeConfig(
+        use_f16_accum=False,
+        gemm_type="indexed",
     )
-    weight = transform_humming_weight(
-        weight,
-        dtypes.float4e2m1,
-        dtypes.float8e4m3,
-        use_fused_e8m0_scale=True,
-        interleave_mode=2,
-    )
-    weight_scale = transform_humming_weight_scale(
-        weight_scale,
-        to_apply_on_c=False,
-    )
-    weight_scale_2 = transform_humming_bias(weight_scale_2.to(torch.bfloat16))
-    bias = transform_humming_bias(
-        torch.randn(
-            (num_experts, shape_n),
-            dtype=torch.bfloat16,
-            device=weight.device,
+    runner = KernelTestRunner(
+        KernelTestCase(
+            name="indexed-streamk-fp32-reduce",
+            layer_config=layer_config,
+            compute_config=compute_config,
+            top_k=top_k,
+            seed=7,
         )
     )
-    _, _, inputs, input_scale = generate_random_inputs(
-        m=large_m,
-        k=shape_k,
-        group_size=0,
-        dtype=dtypes.float8e4m3,
+    weight = runner.kernel_tensors["weight"]
+    weight_scale = runner.kernel_tensors["weight_scale"]
+    weight_scale_2 = runner.kernel_tensors["weight_scale_2"]
+    bias = runner.kernel_tensors["bias"]
+
+    torch.manual_seed(7)
+    torch.cuda.manual_seed(7)
+    inputs_orig = torch.randn(
+        (large_m, shape_k),
+        dtype=torch.float32,
+        device=weight.device,
     )
+    _, inputs, input_scale = runner.prepare_inputs(inputs_orig)
     generator = torch.Generator(device=inputs.device).manual_seed(19)
     scores = torch.randn(
         (large_m, num_experts),
@@ -180,10 +154,6 @@ def test_indexed_streamk_fp32_reduce_is_batch_invariant():
     )
     topk_ids = torch.topk(scores, top_k, dim=1).indices.to(torch.int32)
 
-    compute_config = ComputeConfig(
-        use_f16_accum=False,
-        gemm_type="indexed",
-    )
     tuning_config = json.dumps(
         {
             "block_shape": (block_m, block_n, 64),

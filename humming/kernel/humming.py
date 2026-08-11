@@ -20,10 +20,6 @@ from humming.config import (
 )
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
-from humming.utils.device import (
-    fits_device_smem,
-    get_device_smem_limits,
-)
 from humming.utils.smem import estimate_smem_size_config
 
 CODE_TEMPLATE = jinja2.Template("""
@@ -108,7 +104,7 @@ extern "C" __constant__ uint32_t BS_DTYPE_ID = {{bs_dtype}}::kId;
 @dataclasses.dataclass(kw_only=True)
 class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     name: ClassVar[str] = "humming"
-    _str2kernel_cache: ClassVar[dict[tuple[str, str, str, int], int | list[int]]] = {}
+    _str2kernel_cache: ClassVar[dict[tuple, torch.Tensor]] = {}
     _id2kernel: ClassVar[dict[int, "HummingKernel"]] = {}
 
     def __post_init__(self):
@@ -226,11 +222,22 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.warp_shape[0] % mma_shape_m == 0
             assert self.warp_shape[1] % mma_shape_n == 0
             assert self.warp_shape[2] % mma_shape_k == 0
-            group = self.weight_scale_group_size or mma_shape_k
+            group = (
+                self.weight_scale_group_size
+                or self.input_scale_group_size
+                or (32 if self.a_dtype.num_bits == 4 else mma_shape_k)
+            )
             assert mma_shape_k % group == 0
             scale_vec = mma_shape_k // group
 
             self.mma_b_dtype = self.b_dtype if self.mxmma_native_mixed else self.a_dtype
+            sf_dtype = (
+                self.bs_dtype
+                if self.is_group_weight_scale or self.is_block_weight_scale
+                else self.as_dtype
+                if self.input_scale_group_size > 0
+                else dtypes.float8e8m0
+            )
             return MmaOpClass.from_config(
                 self.mma_type,
                 mma_shape_m,
@@ -239,7 +246,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 self.mma_a_dtype,
                 self.mma_b_dtype,
                 dtypes.float32,
-                sf_dtype=self.bs_dtype,
+                sf_dtype=sf_dtype,
                 scale_vec=scale_vec,
             )
 
@@ -253,8 +260,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         mma_shape_m = self.warp_shape[0] if self.mma_type == MmaType.WGMMA else 16
         mma_shape_n = 64 if self.mma_type == MmaType.WGMMA else 8
         mma_shape_k = 256 // self.a_dtype.num_bits
-        if self.sm_version == 75 and self.a_dtype == dtypes.int8:
-            mma_shape_m = 8
+        if self.sm_version == 75:
+            if self.a_dtype == dtypes.float16:
+                mma_shape_k = 8
+            elif self.a_dtype == dtypes.int8:
+                mma_shape_m = 8
 
         if self.mma_type == MmaType.MMA and self.warp_shape[0] % 16 == 8:
             mma_shape_m = 8
@@ -305,6 +315,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         assert jit_utils.is_power_of_two(self.block_shape[0] // self.warp_shape[0])
         assert jit_utils.is_power_of_two(self.block_shape[1] // self.warp_shape[1])
         assert jit_utils.is_power_of_two(self.block_shape[2] // self.warp_shape[2])
+        if self.mma_type == MmaType.WGMMA:
+            n_warps = self.block_shape[1] // self.warp_shape[1]
+            assert (n_warps) % 4 == 0, "WGMMA requires complete four-warp groups along N"
         assert self.problem_shape[1] > self.pad_shape[1]
         assert self.problem_shape[2] > self.pad_shape[2]
         assert self.pad_shape[1] % 8 == 0
@@ -383,7 +396,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_integer_type:
             assert self.use_fused_e8m0_scale
-            raise NotImplementedError
 
         if self.use_f16_accum:
             if self.a_dtype == dtypes.float8e4m3:
@@ -393,6 +405,13 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def check_config(self):
         assert self.num_threads <= 1024
+        assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
+            "MXMMA does not support FP16 accumulation"
+        )
+        if self.mma_type == MmaType.MXMMA and self.has_zero_point:
+            self.use_stream_k = False
+        if self.mma_type == MmaType.WGMMA:
+            assert self.num_stages >= 3, "WGMMA requires at least three pipeline stages"
         if self.use_batch_invariant:
             assert not self.use_stream_k, "batch-invariant kernels require use_stream_k=False"
             assert self.warp_shape[2] == self.block_shape[2], (
@@ -423,8 +442,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.reduce_overlap_last_stage_only:
             assert not self.is_indexed_gemm, "reduce_overlap_last_stage_only does not support indexed GEMM"
 
-        if self.has_input_scale and self.input_scale_group_size == 0:
+        if self.has_input_scale and self.input_scale_group_size == 0 and self.mma_type != MmaType.MXMMA:
             self.use_m_major_input_scale = True
+        if self.mma_type == MmaType.MXMMA and self.input_scale_group_size == 0:
+            self.use_tma_as = False
+            self.use_m_major_input_scale = False
 
         if self.use_tma_as and self.is_indexed_gemm:
             self.use_tma_as = False
@@ -479,7 +501,12 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         layer_config_str = prepare_config_str(layer_config)
         compute_config_str = prepare_config_str(compute_config)
         tuning_config_str = prepare_config_str(tuning_config)
-        cache_key = (layer_config_str, compute_config_str, tuning_config_str)
+        cache_key = (
+            layer_config_str,
+            compute_config_str,
+            tuning_config_str,
+            cls.current_context(),
+        )
         if cache_key in cls._str2kernel_cache:
             return cls._str2kernel_cache[cache_key]
 

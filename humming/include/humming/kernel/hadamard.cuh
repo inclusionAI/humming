@@ -198,7 +198,8 @@ template <
     uint32_t kBlockSize,
     uint32_t kThreadsPerTile,
     uint32_t kTilesPerBlock,
-    bool kHasScale>
+    bool kHasScale,
+    bool kUsePdl = false>
 __global__ void hadamard_transform(
     const T *__restrict__ in_ptr,
     T *__restrict__ out_ptr,
@@ -208,6 +209,8 @@ __global__ void hadamard_transform(
   static_assert((kBlockSize & (kBlockSize - 1)) == 0);
   static_assert((kThreadsPerTile & (kThreadsPerTile - 1)) == 0);
   static_assert(kBlockSize % kThreadsPerTile == 0);
+
+  if constexpr (kUsePdl) griddepcontrol_wait();
 
   constexpr uint32_t E = kBlockSize / kThreadsPerTile;
   static_assert((E & (E - 1)) == 0);
@@ -300,6 +303,10 @@ __global__ void hadamard_transform(
       }
       __syncthreads();
     }
+  }
+
+  if constexpr (kUsePdl) {
+    if (threadIdx.x == 0) griddepcontrol_launch_dependents();
   }
 
   // ---- Normalize and store ----

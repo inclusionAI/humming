@@ -388,6 +388,7 @@ class MxMmaOpClassImpl:
             f"static constexpr uint32_t kCTypeBits = {DTYPE_BIT_WIDTH_MAP[self.cd_dtype]};",
             f"static constexpr uint32_t kDTypeBits = {DTYPE_BIT_WIDTH_MAP[self.cd_dtype]};",
             f"static constexpr uint32_t kSFTypeBits = {DTYPE_BIT_WIDTH_MAP[self.sf_dtype]};",
+            f"static constexpr bool kSFIsE4M3 = {'true' if self.sf_ptx == 'ue4m3' else 'false'};",
             f"static constexpr bool kNativeMixed = {'true' if self.native_mixed else 'false'};",
             "",
             f"using ARegisters = uint32_t[{self.reg_a_count}];",

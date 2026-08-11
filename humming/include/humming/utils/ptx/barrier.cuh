@@ -3,6 +3,19 @@
 #include <humming/utils/base.cuh>
 
 
+CUDA_INLINE void griddepcontrol_wait() {
+#if (__CUDA_ARCH__ >= 900)
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+
+CUDA_INLINE void griddepcontrol_launch_dependents() {
+#if (__CUDA_ARCH__ >= 900)
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
+}
+
+
 template <uint32_t kNumSyncThreads, uint32_t kNumThreads, uint32_t kBarrierId = 1>
 CUDA_INLINE uint32_t sync_part_threads() {
   if constexpr (kNumSyncThreads == kNumThreads) {

@@ -51,6 +51,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
   uint64_t debug_start_clock = debug_kernel_timer_start();
   constexpr uint32_t kNumStages = TuningConfig::kNumStages;
+  constexpr bool kUsePdl = TuningConfig::kUsePdl;
   constexpr bool kReduceOverlapLastStageOnly = TuningConfig::kReduceOverlapLastStageOnly;
   constexpr uint32_t kLoadThreadRegisters = TuningConfig::kNumMathThreads > 256 || (TuningConfig::kNumCtasPerSm == 1 && ElementA::kBits != 16) ? 40 : 24;
 
@@ -71,7 +72,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   using S2RMemoryPipeline = S2RMemoryPipeline<Ctx, MMA, Epilogue>;
   constexpr bool kUseTwoStageReduceBarrier = SharedStorage::kUseTwoStageReduceBarrier;
   static_assert(Ctx::kWarpIters >= 2, "warp-specialized mainloop requires at least two warp iterations");
-  static_assert(!Ctx::kUseWgmma || kNumStages >= 3, "WGMMA requires an empty pipeline stage");
 
   extern __shared__ int4 shared_memory[];
   auto &smem = *reinterpret_cast<SharedStorage *>(shared_memory);
@@ -89,6 +89,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
   mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();
 
+  bool pdl_waited = false;
+
   if (ctx.is_load_thread()) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(kLoadThreadRegisters));
 
@@ -100,6 +102,13 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
       producer.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id, scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
       if constexpr (!Ctx::kIsIndexedGemm) producer.wait_math_epilogue();
+      if constexpr (kUsePdl) {
+        if (!pdl_waited) {
+          griddepcontrol_wait();
+          if (threadIdx.x == Ctx::kLoadThreadOffset) griddepcontrol_launch_dependents();
+          pdl_waited = true;
+        }
+      }
       producer.load_stage<true, true>(0);
       if constexpr (kUseTwoStageReduceBarrier) producer.wait_reduce_epilogue();
       PRAGMA_UNROLL
@@ -158,7 +167,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
       consumer.wait_stage<true>(kNumStages);
       s2r_pipe.load_stage_iter<true>(0, 0);
-      mma.transform_b(0);
+      mma.transform_b(0, 0);
 
       while (slice_iters) {
         debug_kernel_timeout_check(debug_start_clock);
@@ -175,7 +184,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                 consumer.wait_stage((stage_id + 1) % kNumStages);
               }
             }
-            mma.transform_b((warp_iter_id + 1) % 2);
+            mma.transform_b(
+                (warp_iter_id + 1) % 2,
+                (warp_iter_id + 1) % Ctx::kWarpIters);
           }
 
           slice_iters--;

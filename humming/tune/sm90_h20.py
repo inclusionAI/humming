@@ -82,6 +82,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         # 1. base config
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
+        a_dtype = layer_config.a_dtype
         use_stream_k = layer_config.shape_k > 1024 and not use_batch_invariant
         use_fp32_stream_k_reduce = (
             layer_config.use_fused_e8m0_scale
@@ -90,7 +91,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
             and not use_f16_accum
         )
         config = cls.get_base_config(
-            layer_config.a_dtype,
+            a_dtype,
             layer_config.b_dtype,
             group_size,
             use_f16_accum,
@@ -104,7 +105,11 @@ class Sm90H20Heuristics(DeviceHeuristics):
         if layer_config.use_packed_k_layout:
             warp_shape_n = max(warp_shape_n, 32)
         num_stages = 3
-        assert layer_config.shape_n % block_shape_n == 0
+        min_warp_shape_n = 32 if a_dtype.num_bits == 16 or layer_config.use_packed_k_layout else 16
+        while layer_config.shape_n % block_shape_n:
+            block_shape_n //= 2
+            warp_shape_n = min(warp_shape_n, block_shape_n // 4)
+        assert warp_shape_n >= min_warp_shape_n
 
         # 2. block_shape_m and warp_shape_m
         if not layer_config.num_experts:
@@ -274,6 +279,8 @@ class Sm90H20Heuristics(DeviceHeuristics):
         if use_batch_invariant:
             warp_shape_k = 512 // layer_config.a_dtype.num_bits
             block_shape_k = 512 // layer_config.a_dtype.num_bits
+            config["block_shape"] = (block_shape_m, block_shape_n, block_shape_k)
+            config["warp_shape"] = (warp_shape_m, warp_shape_n, warp_shape_k)
             # TODO: check if TMA / cp.async affect batch invariance
             config["use_tma"] = False
             config["use_warp_spec"] = False

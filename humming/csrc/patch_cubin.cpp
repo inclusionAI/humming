@@ -19,7 +19,7 @@
 //         FP8: E4M3=(1,0,0,1) E5M2=(0,0,0,1) E3M4=(0,1,0,1)  E5M2->E3M4: b85=1
 //         FP4: E2M1=(1,1,0,0) E0M3=(0,1,0,0)                 E2M1->E0M3: b76=0
 //
-// Only instructions whose riginal bits are the expected base format (E5M2 for 
+// Only instructions whose riginal bits are the expected base format (E5M2 for
 // e3m4 modes, E2M1 for e0m3 modes) are modified; anything else is skipped.
 // A cubin that is not sm_120a is rejected outright.
 //
@@ -79,9 +79,15 @@ struct Sec {
 static bool read_file(const char *p, std::vector<uint8_t> &out) {
   FILE *f = fopen(p, "rb");
   if (!f) return false;
-  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return false;
+  }
   long n = ftell(f);
-  if (n < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
+  if (n < 0 || fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    return false;
+  }
   out.resize(n);
   bool ok = (fread(out.data(), 1, n, f) == (size_t)n);
   fclose(f);
@@ -143,7 +149,7 @@ static void collect_exec_sections(const std::vector<uint8_t> &d, std::vector<Sec
     uint64_t sh_flag = rd<uint64_t>(d, sh + 0x08);
     uint64_t sh_off = rd<uint64_t>(d, sh + 0x18);
     uint64_t sh_size = rd<uint64_t>(d, sh + 0x20);
-    if (sh_type == 1 && (sh_flag & 0x4)) { // PROGBITS + EXECINSTR
+    if (sh_type == 1 && (sh_flag & 0x4)) {        // PROGBITS + EXECINSTR
       if (stroff + sh_name >= d.size()) continue; // guard section-name string
       const char *nm = (const char *)&d[stroff + sh_name];
       secs.push_back({std::string(nm), sh_off, sh_size});
@@ -187,7 +193,10 @@ static int handle(std::vector<uint8_t> &d, size_t o, const Mode &m, bool dry, st
     if (m.a) { // A field {78,82,83}==001(LE) is E5M2; E3M4==010 clears bit78, sets bit82
       int f78 = getbit(d, o, 78), f82 = getbit(d, o, 82), f83 = getbit(d, o, 83);
       if (f78 == 1 && f82 == 0 && f83 == 0) {
-        if (!dry) { setbit(d, o, 78, 0); setbit(d, o, 82, 1); }
+        if (!dry) {
+          setbit(d, o, 78, 0);
+          setbit(d, o, 82, 1);
+        }
         did = 1;
         r += "A:E5M2->E3M4 ";
       } else {
@@ -198,7 +207,10 @@ static int handle(std::vector<uint8_t> &d, size_t o, const Mode &m, bool dry, st
     if (m.b) { // B field {79,84,85}==001(LE) is E5M2; E3M4==010 clears bit79, sets bit84
       int f79 = getbit(d, o, 79), f84 = getbit(d, o, 84), f85 = getbit(d, o, 85);
       if (f79 == 1 && f84 == 0 && f85 == 0) {
-        if (!dry) { setbit(d, o, 79, 0); setbit(d, o, 84, 1); }
+        if (!dry) {
+          setbit(d, o, 79, 0);
+          setbit(d, o, 84, 1);
+        }
         did = 1;
         r += "B:E5M2->E3M4 ";
       } else {
