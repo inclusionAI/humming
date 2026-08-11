@@ -21,6 +21,7 @@ struct KernelParams {
   const uint32_t *expert_layout_ptr;
   CUtensorMap *tensor_map_buffer;
   int32_t *locks;
+  float *streamk_workspace;
 };
 
 template <

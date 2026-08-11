@@ -83,6 +83,13 @@ class Sm90H20Heuristics(DeviceHeuristics):
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
         a_dtype = layer_config.a_dtype
+        use_stream_k = layer_config.shape_k > 1024 and not use_batch_invariant
+        use_fp32_stream_k_reduce = (
+            layer_config.use_fused_e8m0_scale
+            and gemm_type == GemmType.INDEXED
+            and use_stream_k
+            and not use_f16_accum
+        )
         config = cls.get_base_config(
             a_dtype,
             layer_config.b_dtype,
@@ -180,7 +187,14 @@ class Sm90H20Heuristics(DeviceHeuristics):
 
         if warp_shape_k == block_shape_k and warp_shape_k == 512 // layer_config.a_dtype.num_bits:
             block_shape = (block_shape_m, block_shape_n, block_shape_k * 2)
-            smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, num_stages)
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                block_shape,
+                gemm_type,
+                num_stages,
+                use_stream_k=use_stream_k,
+                use_fp32_stream_k_reduce=use_fp32_stream_k_reduce,
+            )
             if smem_size * num_ctas_per_sm < cls.max_smem_size:
                 block_shape_k = block_shape_k * 2
                 warp_shape_k = warp_shape_k * 2
@@ -188,7 +202,14 @@ class Sm90H20Heuristics(DeviceHeuristics):
         max_num_stages = 4
         for num_stages_new in range(num_stages + 1, max_num_stages + 1):
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
-            smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, num_stages_new)
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                block_shape,
+                gemm_type,
+                num_stages_new,
+                use_stream_k=use_stream_k,
+                use_fp32_stream_k_reduce=use_fp32_stream_k_reduce,
+            )
             if smem_size * num_ctas_per_sm < cls.max_smem_size:
                 num_stages = num_stages_new
 
@@ -212,7 +233,8 @@ class Sm90H20Heuristics(DeviceHeuristics):
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
-            "use_stream_k": layer_config.shape_k > 1024,
+            "use_stream_k": use_stream_k,
+            "use_fp32_stream_k_reduce": use_fp32_stream_k_reduce,
             "use_f16_accum": use_f16_accum,
             "num_sms": num_sms,
             "num_stages": num_stages,
@@ -243,7 +265,14 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config["num_stages"] = 3
         elif config["num_stages"] == 4 and block_shape_m <= 32:
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
-            smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, 5)
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                block_shape,
+                gemm_type,
+                5,
+                use_stream_k=use_stream_k,
+                use_fp32_stream_k_reduce=use_fp32_stream_k_reduce,
+            )
             if smem_size * num_ctas_per_sm < cls.max_smem_size:
                 config["num_stages"] = 5
 

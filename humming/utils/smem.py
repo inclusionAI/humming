@@ -81,6 +81,8 @@ def estimate_smem_size_layer(
     reduce_overlap_last_stage_only: bool = False,
     use_mbarrier: bool = False,
     use_warp_spec: bool = False,
+    use_stream_k: bool = False,
+    use_fp32_stream_k_reduce: bool = False,
     num_write_splits: int = 1,
     mma_accum_bits: int = 32,
 ) -> int:
@@ -117,7 +119,10 @@ def estimate_smem_size_layer(
         m_warps = block_m // warp_shape[0]
         warp_reduce = m_warps * 16 * block_n * mma_accum_bits // 128 * (n_warps_k // 2)
     block_output = block_m * block_n // 2 // 4 // max(1, num_write_splits)
-    reduce_bytes = max(warp_reduce, block_output) * _INT4
+    block_output_fp32 = 0
+    if use_fp32_stream_k_reduce and use_stream_k and gemm_type == GemmType.INDEXED:
+        block_output_fp32 = block_m * block_n // 4 // max(1, num_write_splits)
+    reduce_bytes = max(warp_reduce, block_output, block_output_fp32) * _INT4
 
     struct_b_fields: list[tuple[int, int]] = []
     if reduce_overlap_last_stage_only:
@@ -181,6 +186,8 @@ def estimate_smem_size_config(
         reduce_overlap_last_stage_only=tuning_config.reduce_overlap_last_stage_only,
         use_mbarrier=bool(tuning_config.use_mbarrier),
         use_warp_spec=bool(tuning_config.use_warp_spec),
+        use_stream_k=bool(tuning_config.use_stream_k),
+        use_fp32_stream_k_reduce=bool(tuning_config.use_fp32_stream_k_reduce),
         num_write_splits=tuning_config.num_write_splits,
         mma_accum_bits=16 if compute_config.use_f16_accum else 32,
     )

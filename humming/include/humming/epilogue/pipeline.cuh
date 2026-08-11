@@ -19,6 +19,10 @@ private:
   using GmemWriter = EpilogueGmemWriter<Ctx, ArithClass>;
 
   static constexpr bool kIsGroupedGemm = Ctx::kIsGroupedGemm;
+  static constexpr bool kUseFp32StreamKReduce =
+      Ctx::kUseFp32StreamKReduce &&
+      Ctx::kUseStreamK &&
+      Ctx::kIsIndexedGemm;
   static constexpr uint32_t kNumWriteSplits = Ctx::kNumWriteSplits;
 
 public:
@@ -55,23 +59,48 @@ public:
       static_assert(!Ctx::kUseTmaC);
     }
 
-    if (slice_count > 1) acquire_gmem_barrier();
+    bool use_fp32_streamk_reduce = false;
+    if constexpr (kUseFp32StreamKReduce) {
+      use_fp32_streamk_reduce = ctx.params.streamk_workspace != nullptr;
+    }
+
+    if (slice_count > 1) acquire_gmem_barrier(use_fp32_streamk_reduce);
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kNumWriteSplits; i++) {
-      smem_writer.write(regs_c_ptr, slice_count, i);
+      if constexpr (kUseFp32StreamKReduce) {
+        if (use_fp32_streamk_reduce) {
+          smem_writer.write_float(regs_c_ptr, i);
+        } else {
+          smem_writer.write(regs_c_ptr, slice_count, i);
+        }
+      } else {
+        smem_writer.write(regs_c_ptr, slice_count, i);
+      }
       if constexpr (Ctx::kUseTmaC) {
         if (ctx.is_math_thread()) tma_fence_async_shared();
       }
       ctx.sync_math_threads();
-      gmem_writer.write(slice_id, slice_count, i);
+      if constexpr (kUseFp32StreamKReduce) {
+        if (use_fp32_streamk_reduce) {
+          gmem_writer.write_float_streamk(
+              slice_id, slice_count, i, locks_offset);
+        } else {
+          gmem_writer.write(slice_id, slice_count, i);
+        }
+      } else {
+        gmem_writer.write(slice_id, slice_count, i);
+      }
       ctx.sync_math_threads();
     }
-    if (slice_count > 1) release_gmem_barrier();
+    if (slice_count > 1) release_gmem_barrier(use_fp32_streamk_reduce);
   }
 
   CUDA_INLINE
-  void acquire_gmem_barrier() {
-    if (Ctx::kUseTmaC || slice_count > 3) {
+  void acquire_gmem_barrier(bool use_fp32_streamk_reduce) {
+    if (use_fp32_streamk_reduce) {
+      barrier_acquire<Ctx::kNumMathThreads, Ctx::kNumThreads>(
+          &locks[locks_offset], slice_id);
+    } else if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 0 : -1;
       barrier_acquire2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val);
     } else {
@@ -80,8 +109,11 @@ public:
   }
 
   CUDA_INLINE
-  void release_gmem_barrier() {
-    if (Ctx::kUseTmaC || slice_count > 3) {
+  void release_gmem_barrier(bool use_fp32_streamk_reduce) {
+    if (use_fp32_streamk_reduce) {
+      barrier_release<Ctx::kNumMathThreads, Ctx::kNumThreads>(
+          &locks[locks_offset], slice_id == slice_count - 1);
+    } else if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 1 - static_cast<int32_t>(slice_count) : 0;
       barrier_release2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val);
     } else {

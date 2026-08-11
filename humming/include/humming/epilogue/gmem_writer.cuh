@@ -83,6 +83,83 @@ public:
   };
 
   CUDA_INLINE
+  void write_float_streamk(
+      uint32_t slice_id,
+      uint32_t slice_count,
+      uint32_t split_idx,
+      uint32_t locks_offset) {
+    static_assert(kIsIndexedGemm);
+    static_assert(!kUseTmaC);
+
+    constexpr uint32_t total_write_float2s =
+        BlockShape::M * BlockShape::N / 2 / kNumWriteSplits;
+    constexpr bool is_full_div = total_write_float2s % kNumMathThreads == 0;
+    constexpr uint32_t iters = CEIL_DIV(total_write_float2s, kNumMathThreads);
+    constexpr uint32_t real_shape_n = ProblemShape::N - PadShape::N;
+    constexpr uint32_t tile_float2s = BlockShape::M * BlockShape::N / 2;
+    uint32_t smem_base = offsetof(SharedStorage, reduce) / 128 % 8;
+
+    float2 *smem_float2_ptr = reinterpret_cast<float2 *>(ctx.smem.reduce);
+    float2 *workspace_float2_ptr =
+        reinterpret_cast<float2 *>(ctx.params.streamk_workspace);
+    scalar_t2 *output_scalar2_ptr =
+        reinterpret_cast<scalar_t2 *>(gmem_ptr_raw);
+
+    PRAGMA_UNROLL
+    for (uint32_t i = 0; i < iters; i++) {
+      uint32_t smem_offset = threadIdx.x + kNumMathThreads * i;
+      if (is_full_div || i != iters - 1 || smem_offset < total_write_float2s) {
+        uint32_t smem_row = smem_offset / 32;
+        uint32_t smem_pair_col = smem_offset % 32;
+        uint32_t smem_col_swizzled = smem_pair_col / 4;
+        uint32_t smem_pair_in_int4 = smem_pair_col % 4;
+        uint32_t smem_col = smem_col_swizzled ^ ((smem_row + smem_base) % 8);
+        uint32_t smem_offset_swizzled =
+            smem_row * 32 + smem_col * 4 + smem_pair_in_int4;
+
+        uint32_t local_row = smem_row % (BlockShape::M / kNumWriteSplits);
+        if constexpr (kNumWriteSplits == 2) {
+          local_row += BlockShape::M / 2 * split_idx;
+        }
+        uint32_t gmem_row = ctx.smem.wr_row_index[local_row];
+
+        uint32_t local_pair_col =
+            smem_row / (BlockShape::M / kNumWriteSplits) * 32 +
+            smem_col_swizzled * 4 + smem_pair_in_int4;
+        uint32_t output_pair_col = col_offset / 2 + local_pair_col;
+        bool pred1 = gmem_row < output_shape_m;
+        bool pred2 = PadShape::N == 0 || output_pair_col * 2 < real_shape_n;
+
+        if (!pred1 || !pred2) continue;
+
+        float2 val = smem_float2_ptr[smem_offset_swizzled];
+        uint32_t gmem_pair_offset =
+            gmem_row * (real_shape_n / 2) + output_pair_col;
+
+        if (slice_count == 1) {
+          output_scalar2_ptr[gmem_pair_offset] = this->float22num2(val);
+        } else {
+          uint32_t workspace_pair_offset =
+              locks_offset * tile_float2s +
+              local_row * (BlockShape::N / 2) +
+              local_pair_col;
+          if (slice_id == 0) {
+            workspace_float2_ptr[workspace_pair_offset] = val;
+          } else {
+            float2 acc = workspace_float2_ptr[workspace_pair_offset];
+            acc.x += val.x;
+            acc.y += val.y;
+            workspace_float2_ptr[workspace_pair_offset] = acc;
+            if (slice_id == slice_count - 1) {
+              output_scalar2_ptr[gmem_pair_offset] = this->float22num2(acc);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  CUDA_INLINE
   void write_legacy(uint32_t slice_id, uint32_t slice_count, uint32_t split_idx) {
     constexpr uint32_t total_write_int4s = BlockShape::M * BlockShape::N * 2 / 16 / kNumWriteSplits;
     constexpr bool is_full_div = total_write_int4s % kNumMathThreads == 0;

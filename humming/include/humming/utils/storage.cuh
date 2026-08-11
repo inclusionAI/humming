@@ -124,6 +124,12 @@ public:
   static constexpr uint32_t M_WARPS = (BlockShape::M / WarpShape::M);
   static constexpr uint32_t kWarpReduceSize = M_WARPS * 16 * BlockShape::N * kMmaCTypeBits / 128 * (kNumWarpsDimK / 2);
   static constexpr uint32_t kBlockOutputSize = BlockShape::M * BlockShape::N / 2 / 4 / kNumWriteSplits;
+  static constexpr bool kUseFp32StreamKReduce =
+      TuningConfig::kUseFp32StreamKReduce &&
+      TuningConfig::kUseStreamK &&
+      ComputeConfig::kGemmType == GemmType::INDEXED;
+  static constexpr uint32_t kBlockOutputFp32Size =
+      kUseFp32StreamKReduce ? BlockShape::M * BlockShape::N / 4 / kNumWriteSplits : 0;
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
 
   static constexpr uint32_t kSmemStrideA = BlockShape::K * ElementA::kBits / 32 / 4;
@@ -192,7 +198,7 @@ public:
       IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_BIAS(alignas(128) int4 reduce_skip_bias[kBiasSize];))
       IF_REDUCE_LAST_STAGE_ONLY(IF_HAS_CHANNEL_INPUT_SCALE(alignas(128) int4 reduce_skip_as_c[kChannelSizeAS];))
       IF_REDUCE_LAST_STAGE_ONLY(StageStorage reduce_skip[kNumStages - 1];)
-      alignas(128) int4 reduce[MAX(kWarpReduceSize, kBlockOutputSize)];
+      alignas(128) int4 reduce[MAX(MAX(kWarpReduceSize, kBlockOutputSize), kBlockOutputFp32Size)];
     };
   };
 
