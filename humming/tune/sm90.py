@@ -10,6 +10,8 @@ from humming.utils.smem import estimate_smem_size_layer
 
 class Sm90Heuristics(DeviceHeuristics):
     max_smem_size: int = 227 * 1024
+    # Keep two-CTA configs at 256 threads; 512 would force a 64-register limit.
+    max_indexed_threads_for_two_ctas: int = 256
     b16_allowed_dtypes: list[dtypes.DataType] = [dtypes.float16, dtypes.bfloat16]
     b8_allowed_dtypes: list[dtypes.DataType] = [
         dtypes.int8,
@@ -20,6 +22,93 @@ class Sm90Heuristics(DeviceHeuristics):
     sm_version: int = 90
 
     @classmethod
+    def _estimate_indexed_ctas_per_sm(
+        cls,
+        layer_config: LayerConfig,
+        block_shape: tuple[int, int, int],
+        warp_shape: tuple[int, int, int],
+        num_stages: int,
+        num_output_tiles: int,
+        num_sms: int,
+    ) -> int:
+        num_threads = math.prod(block_shape) // math.prod(warp_shape) * 32
+        smem_size = estimate_smem_size_layer(
+            layer_config,
+            block_shape,
+            GemmType.INDEXED,
+            num_stages,
+            warp_shape=warp_shape,
+        )
+        resource_limit = 1 + int(
+            num_threads <= cls.max_indexed_threads_for_two_ctas and smem_size * 2 <= cls.max_smem_size
+        )
+        grid_limit = math.ceil(num_output_tiles / num_sms)
+        return max(1, min(resource_limit, grid_limit))
+
+    @classmethod
+    def _fit_indexed_a16_config(
+        cls,
+        layer_config: LayerConfig,
+        shape_m: int,
+        config: dict,
+    ) -> dict:
+        block_shape = tuple(config["block_shape"])
+        warp_shape = tuple(config["warp_shape"])
+        num_stages = config["num_stages"]
+        num_sms = cls.get_num_sms()
+        num_output_tiles = (
+            layer_config.shape_n
+            // block_shape[1]
+            * cls.estimate_num_blocks_m(layer_config, shape_m, block_shape[0])
+        )
+        num_ctas_per_sm = cls._estimate_indexed_ctas_per_sm(
+            layer_config,
+            block_shape,
+            warp_shape,
+            num_stages,
+            num_output_tiles,
+            num_sms,
+        )
+
+        # A smaller K tile is useful only when it admits another resident CTA.
+        smaller_block_k = block_shape[2] // 2
+        scale_group_sizes = (
+            layer_config.input_scale_group_size,
+            layer_config.weight_scale_group_size,
+        )
+        # K tiles must nest cleanly with every active scale group.
+        scale_groups_align = all(
+            not group_size or group_size % smaller_block_k == 0 or smaller_block_k % group_size == 0
+            for group_size in scale_group_sizes
+        )
+        if num_ctas_per_sm == 1 and block_shape[2] >= warp_shape[2] * 2 and scale_groups_align:
+            smaller_block_shape = (*block_shape[:2], smaller_block_k)
+            smaller_warp_shape = (
+                *warp_shape[:2],
+                min(warp_shape[2], smaller_block_k),
+            )
+            smaller_num_ctas = cls._estimate_indexed_ctas_per_sm(
+                layer_config,
+                smaller_block_shape,
+                smaller_warp_shape,
+                num_stages,
+                num_output_tiles,
+                num_sms,
+            )
+            if smaller_num_ctas > num_ctas_per_sm:
+                block_shape = smaller_block_shape
+                warp_shape = smaller_warp_shape
+                num_ctas_per_sm = smaller_num_ctas
+
+        # Avoid Stream-K locks once direct output tiles fill an SM wave.
+        return config | {
+            "block_shape": block_shape,
+            "warp_shape": warp_shape,
+            "num_ctas_per_sm": num_ctas_per_sm,
+            "use_stream_k": config["use_stream_k"] and num_output_tiles < num_sms,
+        }
+
+    @classmethod
     def get_config1(
         cls,
         layer_config: LayerConfig,
@@ -28,6 +117,9 @@ class Sm90Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
+        tune_indexed_a16 = (
+            gemm_type == GemmType.INDEXED and layer_config.a_dtype.num_bits == 16 and not use_batch_invariant
+        )
         if layer_config.use_packed_k_layout:
             max_block_m = 128
         elif use_f16_accum:
@@ -35,12 +127,43 @@ class Sm90Heuristics(DeviceHeuristics):
         else:
             max_block_m = 176
 
-        num_blocks_list = cls.calc_num_block_list(layer_config, shape_m, max_block_m)
-        block_shape_m = np.argmin(num_blocks_list).item() * 8 + 8
+        if tune_indexed_a16:
+            # Bound padding when only a few routed rows land on each expert.
+            tokens_per_expert = shape_m / layer_config.num_experts
+            moe_block_size_configs = (
+                (8, 0.7),
+                (16, 0.7),
+                (24, 0.8),
+                (32, 0.9),
+                (48, 0.9),
+                (64, 0.9),
+            )
+            for block_shape_m, threshold in moe_block_size_configs:
+                if tokens_per_expert / block_shape_m < threshold:
+                    break
+        else:
+            num_blocks_list = cls.calc_num_block_list(
+                layer_config,
+                shape_m,
+                max_block_m,
+            )
+            block_shape_m = np.argmin(num_blocks_list).item() * 8 + 8
         warp_shape_n = 32
         warp_shape_k = 1024 // layer_config.a_dtype.num_bits
 
-        if layer_config.shape_n <= 4096 and not use_batch_invariant and block_shape_m <= 64:
+        # Long-K layers need more routed rows before wider N tiles pay off.
+        wide_tile_min_shape_m = 64 if layer_config.shape_k > 4096 else 16
+        use_wide_indexed_tile = tune_indexed_a16 and block_shape_m <= 64 and shape_m >= wide_tile_min_shape_m
+        if use_wide_indexed_tile:
+            warp_shape_n = 64
+            if layer_config.shape_k <= 512 and layer_config.shape_n >= 2048:
+                # Shallow K needs more N work per CTA to amortize scheduling.
+                block_shape_n = 512
+                block_shape_k = 64
+            else:
+                block_shape_n = 256
+                block_shape_k = 128
+        elif layer_config.shape_n <= 4096 and not use_batch_invariant and block_shape_m <= 64:
             block_shape_n = 128
             block_shape_k = warp_shape_k * 2
             if block_shape_m <= 32:
@@ -59,11 +182,16 @@ class Sm90Heuristics(DeviceHeuristics):
             elif block_shape_m <= 32:
                 warp_shape_k = warp_shape_k // 2
 
+        if tune_indexed_a16:
+            while layer_config.shape_n % block_shape_n != 0:
+                block_shape_n //= 2
+                assert block_shape_n >= warp_shape_n
+            warp_shape_n = min(warp_shape_n, block_shape_n // 4)
+
         while layer_config.shape_k % block_shape_k != 0:
             warp_shape_k = 512 // layer_config.a_dtype.num_bits
             block_shape_k = block_shape_k // 2
             assert block_shape_k >= warp_shape_k
-
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (block_shape_m, warp_shape_n, warp_shape_k),
@@ -175,7 +303,19 @@ class Sm90Heuristics(DeviceHeuristics):
         else:
             func = cls.get_config2
 
-        config = func(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+        config = func(
+            layer_config,
+            shape_m,
+            use_f16_accum,
+            use_batch_invariant,
+            gemm_type,
+        )
+        if gemm_type == GemmType.INDEXED and layer_config.a_dtype.num_bits == 16 and not use_batch_invariant:
+            config = cls._fit_indexed_a16_config(
+                layer_config,
+                shape_m,
+                config,
+            )
 
         while config["num_stages"] > 3:
             smem_size = estimate_smem_size_layer(
