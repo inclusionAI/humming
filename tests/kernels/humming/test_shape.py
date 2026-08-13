@@ -1,7 +1,7 @@
 import pytest
 
 from humming import dtypes
-from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -22,6 +22,9 @@ def _case(
     pad_shape_k: int = 0,
     a_dtype=dtypes.bfloat16,
     b_dtype=dtypes.uint4,
+    weight_scale_group_size: int = 0,
+    weight_scale_group_size_n: int = 0,
+    mma_type: MmaType | None = None,
 ) -> KernelTestCase:
     return KernelTestCase(
         name=name,
@@ -34,6 +37,9 @@ def _case(
             b_dtype=b_dtype,
             c_dtype=dtypes.bfloat16,
             bs_dtype=dtypes.bfloat16,
+            weight_scale_group_size=weight_scale_group_size,
+            weight_scale_group_size_n=weight_scale_group_size_n,
+            mma_type=mma_type,
         ),
         compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
         seed=2026,
@@ -69,6 +75,16 @@ PROBLEM_SHAPE_CASES = (
         "large-rectangular",
         shape_n=4096,
         shape_k=8192,
+    ),
+    _case(
+        "w6a8-group128",
+        shape_n=6144,
+        shape_k=4096,
+        a_dtype=dtypes.int8,
+        b_dtype=dtypes.uint6,
+        weight_scale_group_size=128,
+        weight_scale_group_size_n=1,
+        mma_type=MmaType.WGMMA,
     ),
 )
 

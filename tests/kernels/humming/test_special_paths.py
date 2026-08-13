@@ -70,6 +70,18 @@ SPECIAL_WEIGHT_CASES = (
         ),
     ),
     _kernel_case(
+        required_features=("use_int_weight_scale",),
+        name="odd-bit-packed-k-fallback",
+        layer_config=_layer_config(
+            a_dtype=dtypes.int8,
+            b_dtype=dtypes.uint5,
+            bs_dtype=dtypes.bfloat16,
+            weight_scale_group_size=128,
+            weight_scale_group_size_n=1,
+            mma_type=MmaType.WGMMA,
+        ),
+    ),
+    _kernel_case(
         required_features=("use_fused_e8m0_scale",),
         name="fused-e8m0-tensor-secondary-grouped-input",
         layer_config=_layer_config(
@@ -165,3 +177,7 @@ def test_special_weight_path_coverage():
     assert {config.weight_scale_2_type.name for config in fused_configs} == {"CHANNEL", "TENSOR"}
     assert {config.a_dtype for config in packed_k_configs} == {dtypes.float8e4m3, dtypes.int8}
     assert any(config.use_int_weight_scale for config in packed_k_configs)
+
+    odd_bit_fallback = next(case.layer_config for _, case in SPECIAL_WEIGHT_CASES if "odd-bit" in case.name)
+    assert odd_bit_fallback.b_dtype.num_bits % 2 == 1
+    assert odd_bit_fallback.use_packed_k_layout is False

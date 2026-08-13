@@ -28,7 +28,7 @@ public:
   typename MmaOpClass::ARegisters regs_a[2][WarpShape::M / MmaShape::M][kPartMmaShapeK / MmaShape::K];
   uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
   typename MmaOpClass::BRegisters regs_b[2][WarpShape::N / MmaShape::N][kPartMmaShapeK / MmaShape::K];
-  CRegistersArrayType regs_c[2];
+  alignas(16) CRegistersArrayType regs_c[2];
 
   CUDA_INLINE
   WMMA(Ctx &ctx, ArithClass &arith)

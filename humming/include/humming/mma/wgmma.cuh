@@ -49,7 +49,7 @@ public:
   ArithClass &arith;
   uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
   typename MmaOpClass::BRegisters regs_b[2][kUsePackedKLayout ? 1 : (WarpShape::N * 4 / MmaShape::N / kPackedKFactor)][kRegsBKDim];
-  CRegistersArrayType regs_c[2];
+  alignas(16) CRegistersArrayType regs_c[2];
   uint32_t smem_offset = 0;
 
   CUDA_INLINE

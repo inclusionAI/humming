@@ -5,6 +5,7 @@ import numpy as np
 from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.tune.base import DeviceHeuristics
+from humming.utils.smem import estimate_smem_size_layer
 
 
 class Sm90Heuristics(DeviceHeuristics):
@@ -174,4 +175,23 @@ class Sm90Heuristics(DeviceHeuristics):
         else:
             func = cls.get_config2
 
-        return func(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+        config = func(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+
+        while config["num_stages"] > 3:
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                config["block_shape"],
+                gemm_type,
+                config["num_stages"],
+                warp_shape=config["warp_shape"],
+                reduce_overlap_last_stage_only=config.get("reduce_overlap_last_stage_only", False),
+                use_mbarrier=config.get("use_mbarrier", False),
+                use_warp_spec=config.get("use_warp_spec", False),
+                num_write_splits=config.get("num_write_splits", 1),
+                mma_accum_bits=16 if use_f16_accum else 32,
+            )
+            if smem_size <= cls.max_smem_size:
+                break
+            config["num_stages"] -= 1
+
+        return config

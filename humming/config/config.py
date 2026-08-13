@@ -49,7 +49,7 @@ class LayerConfig(BaseHummingConfig):
     # mma config
     mma_type: MmaType | None = None
 
-    # packed-K layout (wgmma + 8-bit activation only)
+    # packed-K layout (wgmma + 8-bit activation + even-bit weight only)
     use_packed_k_layout: bool | None = None
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
@@ -243,12 +243,14 @@ class LayerConfig(BaseHummingConfig):
             self.use_packed_k_layout = (
                 self.mma_type == MmaType.WGMMA
                 and self.a_dtype.num_bits == 8
+                and self.b_dtype.num_bits % 2 == 0
                 and not self.use_fused_e8m0_scale
                 and self.weight_scale_group_size == 128
             )
         elif self.use_packed_k_layout:
             assert self.mma_type == MmaType.WGMMA, "use_packed_k_layout requires wgmma"
             assert self.a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit activation"
+            assert self.b_dtype.num_bits % 2 == 0, "use_packed_k_layout requires even-bit weight"
             assert not self.use_fused_e8m0_scale, "packed_k_layout is incompatible with fused-e8m0"
 
         if type(self) is LayerConfig:

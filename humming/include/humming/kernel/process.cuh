@@ -283,6 +283,7 @@ __global__ void weight_repack_nk(
 
   if constexpr (kUsePackedKLayout) {
     static_assert(kNumBitsA == 8);
+    static_assert(kNumBitsB % 2 == 0, "packed-K layout requires even-bit weight");
     constexpr uint32_t hb = kNumBitsB / 2;
     uint32_t packed_out_stride = 64 * padded_shape_n * kNumBitsB / 32;
     uint32_t packed_max_row = gridDim.z * padded_shape_k / 64;

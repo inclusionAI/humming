@@ -32,6 +32,8 @@ class RepackWeightKernel(KernelRuntime):
     def init_kernel(self):
         if self.should_preprocess_with_zp:
             assert self.should_preprocess_for_int2fp
+        if self.use_packed_k_layout:
+            assert self.weight_bits % 2 == 0, "use_packed_k_layout requires even-bit weight"
 
         should_transpose_mini_block = self.use_wgmma and not self.use_fused_e8m0_scale
 
