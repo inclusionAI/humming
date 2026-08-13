@@ -28,8 +28,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
         shape_n, shape_k = layer_config.shape_n, layer_config.shape_k
         if shape_m > block_shape_m or a_bits not in (8, 16) or shape_n % 128:
             return None
-        # The FP8 path is only profitable here when dequantizing a narrow
-        # integer weight.  A16 supports all H20 weight formats.
         if a_bits == 8 and (not layer_config.b_dtype.is_integer_type or b_bits > 4):
             return None
 
@@ -55,8 +53,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
                 config["reduce_overlap_last_stage_only"] = True
             return config
 
-        # Keep the accumulator/epilogue footprint bounded.  Within that budget,
-        # use wide-N only if there are enough work tiles and K pipeline turns.
         max_output_values = 6 * 1024
         wide_k = 2 * reference_k if a_bits == 16 or b_bits >= 4 else reference_k
         wide_num_iters = math.ceil(shape_m / block_shape_m) * (shape_n // 256) * (shape_k // wide_k)
@@ -84,9 +80,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
 
         if a_bits != 16 or block_shape_m * 128 > max_output_values:
             return None
-        # For low-work grids, smaller N/K tiles expose more CTAs.  TMA starts
-        # paying off once K is long enough; short K keeps the compact cp.async
-        # producer instead.
         k_pipeline_turns = shape_k // warp_k
         if k_pipeline_turns <= 32:
             return None
@@ -109,17 +102,13 @@ class Sm90H20Heuristics(DeviceHeuristics):
         num_n_tiles = layer_config.shape_n // block_n
         current_m_tiles = math.ceil(shape_m / block_m)
 
-        # Stream-K can turn one output tile into several independently scheduled
-        # slices.  Discount that contribution because the slices later meet at
-        # the reduction/lock path and are not as cheap as distinct output tiles.
+        # Stream-K slices provide less useful parallelism than distinct output tiles.
         stream_k_grid_gain = 1.0
         current_output_tiles = current_m_tiles * num_n_tiles
         if layer_config.shape_k <= 1024:
             if current_output_tiles >= math.ceil(cls.get_num_sms() * 0.5):
                 return block_m
         else:
-            # Once distinct output tiles cover a useful fraction of the GPU,
-            # Stream-K is cheaper than reducing M reuse just to create more.
             if current_output_tiles >= math.ceil(cls.get_num_sms() * 0.2):
                 return block_m
             stream_k_grid_gain = min(4.5, layer_config.shape_k / (12 * block_k))
@@ -132,17 +121,30 @@ class Sm90H20Heuristics(DeviceHeuristics):
 
         current_padded_rows = current_m_tiles * block_m
         candidates = []
+        padding_safe_candidates = []
+        min_stream_k_block_m = 16 if layer_config.shape_k > 1024 and block_m >= 32 else 8
         for candidate_m in range(8, block_m, 8):
             if layer_config.a_dtype == dtypes.int8 and candidate_m > 32 and candidate_m % 16:
                 continue
             candidate_m_tiles = math.ceil(shape_m / candidate_m)
-            if candidate_m_tiles * num_n_tiles < target_output_tiles:
-                continue
             padded_rows = candidate_m_tiles * candidate_m
             if padded_rows > current_padded_rows * 1.05:
                 continue
+            padding_safe_candidates.append(candidate_m)
+            if candidate_m_tiles * num_n_tiles < target_output_tiles:
+                continue
+            if candidate_m < min_stream_k_block_m:
+                continue
             candidates.append(candidate_m)
-        return max(candidates, default=block_m)
+        if candidates:
+            return max(candidates)
+        if layer_config.shape_k <= 1024 and padding_safe_candidates:
+            return min(padding_safe_candidates)
+        if layer_config.shape_k > 1024 and block_m >= 32:
+            reuse_candidates = [candidate_m for candidate_m in padding_safe_candidates if candidate_m >= 16]
+            if reuse_candidates:
+                return max(reuse_candidates)
+        return block_m
 
     @classmethod
     def _tune_long_k_moe_residency(
@@ -168,8 +170,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
             mma_accum_bits=16 if config["use_f16_accum"] else 32,
         )
         num_threads = math.prod(config["block_shape"]) // math.prod(warp_shape) * 32
-        # Three resident CTAs leave enough register headroom for every H20
-        # WGMMA geometry emitted by this heuristic (up to 512 threads/CTA).
+        # Cap residency at three CTAs to preserve register headroom.
         num_experts = layer_config.num_experts
         if shape_m < num_experts:
             estimated_m_blocks = shape_m
@@ -178,34 +179,37 @@ class Sm90H20Heuristics(DeviceHeuristics):
             estimated_m_blocks = num_experts * blocks_per_expert
         num_sms_physical = cls.get_num_sms()
 
-        # A wider N tile amortizes indexed/grouped scheduling and activation
-        # loads without adding threads.  It is profitable when the resulting
-        # output grid is still broad, or when a long K dimension lets Stream-K
-        # supply the missing parallelism.  Require under-filled expert M tiles:
-        # once those tiles fill up, the narrower N grid is already efficient.
-        wide_block_n = 512
+        if layer_config.shape_n >= 1024 and layer_config.shape_n % 512 == 0:
+            wide_block_n = 512
+        elif layer_config.shape_n >= 512 and layer_config.shape_n % 256 == 0:
+            wide_block_n = 256
+        else:
+            wide_block_n = 0
         wide_block_k = 64
         wide_warp_n = 64
         wide_num_stages = 3
-        wide_output_tiles = estimated_m_blocks * (layer_config.shape_n // wide_block_n)
+        wide_output_tiles = 0
+        if wide_block_n:
+            wide_output_tiles = estimated_m_blocks * (layer_config.shape_n // wide_block_n)
         expert_tile_fill = shape_m / (estimated_m_blocks * block_m)
         has_wide_grid = wide_output_tiles >= 2 * num_sms_physical
         underfilled_expert_tiles = expert_tile_fill < 0.5 or (
-            expert_tile_fill <= 0.5
-            and (has_wide_grid or layer_config.b_dtype.num_bits < 4)
+            expert_tile_fill <= 0.5 and (has_wide_grid or layer_config.b_dtype.num_bits < 4)
         )
+        wide_k_tiles = layer_config.shape_k // wide_block_k
+        stream_k_grid_gain = min(16, max(4, wide_k_tiles // (2 * wide_num_stages)))
         stream_k_can_fill_grid = (
             layer_config.b_dtype.num_bits <= 4
-            and wide_output_tiles * 4 >= 3 * num_sms_physical
-            and layer_config.shape_k // wide_block_k >= 64
+            and wide_output_tiles * stream_k_grid_gain >= 3 * num_sms_physical
+            and wide_k_tiles >= 64
         )
-        if (
-            block_m * wide_block_n <= 8 * 1024
-            and layer_config.shape_n % wide_block_n == 0
-            and layer_config.shape_k % wide_block_k == 0
-            and underfilled_expert_tiles
-            and (has_wide_grid or stream_k_can_fill_grid)
-        ):
+        has_wide_tile = wide_block_n > 0 and block_m * wide_block_n <= 8 * 1024
+        wide_n_aligned = wide_block_n > 0 and layer_config.shape_n % wide_block_n == 0
+        wide_k_aligned = layer_config.shape_k % wide_block_k == 0
+        has_wide_parallelism = has_wide_grid or stream_k_can_fill_grid
+        is_wide_tile_legal = has_wide_tile and wide_n_aligned and wide_k_aligned
+        use_wide_moe_tile = is_wide_tile_legal and underfilled_expert_tiles and has_wide_parallelism
+        if use_wide_moe_tile:
             wide_block_shape = (block_m, wide_block_n, wide_block_k)
             wide_warp_shape = (block_m, wide_warp_n, wide_block_k)
             wide_smem_size = estimate_smem_size_layer(
@@ -236,8 +240,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
             return
 
         k_tiles = layer_config.shape_k // block_k
-        # Do not launch more CTAs than full stage-aligned K slices.  This keeps
-        # very sparse expert batches from paying for idle or reduction-only CTAs.
         useful_ctas = num_output_tiles * math.ceil(k_tiles / num_stages)
         num_sms = min(num_sms_physical, math.ceil(useful_ctas / num_ctas_per_sm))
         config.update(num_stages=num_stages, num_ctas_per_sm=num_ctas_per_sm, num_sms=max(1, num_sms))
@@ -306,7 +308,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        # 1. base config
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
         a_dtype = layer_config.a_dtype
@@ -331,7 +332,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
             warp_shape_n = min(warp_shape_n, block_shape_n // 4)
         assert warp_shape_n >= min_warp_shape_n
 
-        # 2. block_shape_m and warp_shape_m
         if not layer_config.num_experts:
             if shape_m <= block_shape_m:
                 block_shape_m = math.ceil(shape_m / 8) * 8
@@ -432,6 +432,9 @@ class Sm90H20Heuristics(DeviceHeuristics):
 
         if num_ctas_per_sm == 1:
             factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
+            if layer_config.shape_k > 1024:
+                # Keep at least two stage-4 turns per Stream-K slice.
+                factor = min(9, max(factor, layer_config.shape_k / (8 * block_shape_k)))
             num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
 
         while layer_config.shape_k % block_shape_k != 0:
@@ -464,9 +467,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
                 config["use_tma_a"] = False
                 config["use_tma_c"] = False
 
-            # Small-K MoE down-gemm: size the persistent grid for ~5 output tiles
-            # per CTA — here num_sms is the grid factor (a launch param, GEMM
-            # bit-identical) and is intentionally set above the physical SM count.
+            # num_sms is a launch grid factor here and may exceed the physical SM count.
             if config["num_ctas_per_sm"] > 1 and shape_m >= 24576:
                 tiles_per_cta = 5
                 block_m, block_n, _ = config["block_shape"]
@@ -474,7 +475,11 @@ class Sm90H20Heuristics(DeviceHeuristics):
                 sms_target = num_tiles / (config["num_ctas_per_sm"] * tiles_per_cta)
                 config["num_sms"] = max(config["num_sms"], 1 << round(math.log2(sms_target)))
 
-        if block_shape_m >= 48 and num_ctas_per_sm <= 2 and num_warps <= 8 and not is_moe:
+        has_tma_tile = block_shape_m >= 48
+        has_tma_resources = num_ctas_per_sm <= 2 and num_warps <= 8
+        has_tma_pipeline = layer_config.shape_k // block_shape_k >= 24
+        use_dense_tma = not is_moe and has_tma_tile and has_tma_resources and has_tma_pipeline
+        if use_dense_tma:
             config["use_tma"] = True
             config["use_warp_spec"] = True
             config["use_mbarrier"] = True
@@ -482,7 +487,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         elif config["num_stages"] == 4 and block_shape_m <= 32:
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
             smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, 5)
-            if smem_size * num_ctas_per_sm < cls.max_smem_size:
+            if smem_size * num_ctas_per_sm < cls.max_smem_size and not config["use_stream_k"]:
                 config["num_stages"] = 5
 
         if not is_moe and not use_batch_invariant:
