@@ -1,13 +1,14 @@
 import pytest
 
 from humming import dtypes
-from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
     assert_kernel_test_shape_coverage,
     skip_if_unsupported,
 )
+from humming.tune.sm90 import Sm90Heuristics
 
 SHAPE_N = 1024
 SHAPE_K = 1024
@@ -116,8 +117,36 @@ def test_grouped_masked_m_major_rejects_unaligned_expert_m():
         KernelTestRunner(test_case).run((1,))
 
 
-def test_moe_case_coverage():
+def test_sm90_indexed_a16_fits_ctas_to_resources_and_grid(monkeypatch):
+    layer_config = LayerConfig(
+        shape_n=2688,
+        shape_k=2048,
+        num_experts=128,
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.uint4,
+        c_dtype=dtypes.bfloat16,
+        bs_dtype=dtypes.bfloat16,
+        weight_scale_group_size=128,
+        mma_type=MmaType.WGMMA,
+    )
+    monkeypatch.setattr(
+        Sm90Heuristics,
+        "get_num_sms",
+        classmethod(lambda cls: 132),
+    )
 
+    config = Sm90Heuristics.get_config(
+        layer_config,
+        shape_m=8,
+        gemm_type=GemmType.INDEXED,
+    )
+
+    assert config["block_shape"][2] == 128
+    assert config["num_ctas_per_sm"] == 2
+    assert not config["use_stream_k"]
+
+
+def test_moe_case_coverage():
     assert {case.compute_config.gemm_type for case in MOE_CASES} == {
         GemmType.INDEXED,
         GemmType.GROUPED_CONTIGUOUS,
