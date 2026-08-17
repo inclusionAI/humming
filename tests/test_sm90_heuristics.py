@@ -44,7 +44,7 @@ def _layer(
 
 @pytest.mark.parametrize(
     ("input_scale_group_size", "as_dtype"),
-    [(128, dtypes.float32), (32, dtypes.float8e8m0)],
+    [(128, dtypes.float32), (32, dtypes.float32)],
 )
 def test_grouped_fp8_moe_avoids_512_thread_tiles(
     input_scale_group_size,
@@ -70,13 +70,20 @@ def test_grouped_fp8_moe_avoids_512_thread_tiles(
 
 def test_grouped_fp8_uses_legal_n_tile_for_non_128_multiple():
     config = Sm90Heuristics.get_config(
-        _layer(2880, 2880),
+        _layer(
+            2880,
+            2880,
+            input_scale_group_size=32,
+            as_dtype=dtypes.float32,
+        ),
         shape_m=16,
         gemm_type=GemmType.DENSE,
     )
 
     assert config["block_shape"][1] == 64
     assert config["warp_shape"][1] == 16
+    assert config["block_shape"][2] == 64
+    assert config["warp_shape"][2] == 64
 
 
 def test_dense_a16_uses_legal_n_tile_for_non_256_multiple():
