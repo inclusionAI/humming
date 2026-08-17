@@ -102,7 +102,7 @@ def test_analysis_reports_resources_grid_and_selected_config():
 
     assert analysis.legal
     assert analysis.num_math_threads == 256
-    assert analysis.num_load_threads == 0
+    assert analysis.num_load_threads == 256
     assert analysis.num_threads == 256
     assert analysis.smem_size > 0
     assert analysis.num_output_tiles == 16

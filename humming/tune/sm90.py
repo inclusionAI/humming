@@ -62,27 +62,6 @@ class Sm90Heuristics(DeviceHeuristics):
         )
 
     @classmethod
-    def _fit_indexed_a16_config(
-        cls,
-        layer_config: LayerConfig,
-        shape_m: int,
-        config: dict,
-    ) -> dict:
-        problem = cls._make_problem(
-            layer_config,
-            shape_m,
-            bool(config.get("use_f16_accum", False)),
-            False,
-            GemmType.INDEXED,
-            include_grid_size=True,
-        )
-        return select_indexed_a16(
-            problem,
-            config,
-            cls.candidate_policy,
-        ).to_config()
-
-    @classmethod
     def get_config1(
         cls,
         layer_config: LayerConfig,
