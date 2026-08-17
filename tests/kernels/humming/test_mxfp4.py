@@ -20,16 +20,20 @@ NUM_EXPERTS = 8
 
 def _layer_config(
     *,
+    shape_n: int = SHAPE_N,
+    shape_k: int = SHAPE_K,
     num_experts: int = 0,
     use_fused_e8m0_scale: bool | None = None,
     a_dtype=dtypes.float8e4m3,
+    as_dtype=None,
     input_scale_group_size: int = INPUT_GROUP_SIZE,
 ) -> LayerConfig:
     return LayerConfig(
-        shape_n=SHAPE_N,
-        shape_k=SHAPE_K,
+        shape_n=shape_n,
+        shape_k=shape_k,
         num_experts=num_experts,
         a_dtype=a_dtype,
+        as_dtype=as_dtype,
         b_dtype=dtypes.float4e2m1,
         c_dtype=dtypes.bfloat16,
         bs_dtype=dtypes.float8e8m0,
@@ -43,18 +47,24 @@ def _layer_config(
 def _case(
     name: str,
     *,
+    shape_n: int = SHAPE_N,
+    shape_k: int = SHAPE_K,
     gemm_type: GemmType = GemmType.DENSE,
     use_fused_e8m0_scale: bool | None = None,
     a_dtype=dtypes.float8e4m3,
+    as_dtype=None,
     input_scale_group_size: int = INPUT_GROUP_SIZE,
 ) -> KernelTestCase:
     is_dense = gemm_type == GemmType.DENSE
     return KernelTestCase(
         name=name,
         layer_config=_layer_config(
+            shape_n=shape_n,
+            shape_k=shape_k,
             num_experts=0 if is_dense else NUM_EXPERTS,
             use_fused_e8m0_scale=use_fused_e8m0_scale,
             a_dtype=a_dtype,
+            as_dtype=as_dtype,
             input_scale_group_size=input_scale_group_size,
         ),
         compute_config=ComputeConfig(gemm_type=gemm_type),
@@ -82,6 +92,16 @@ MXFP4_CASES = (
         ),
     ),
     (True, _case("mxfp4-grouped-fp8-dense-auto")),
+    (
+        True,
+        _case(
+            "mxfp4-grouped-fp8-g32-dense-n64-k64",
+            shape_n=2880,
+            shape_k=2880,
+            as_dtype=dtypes.float32,
+            input_scale_group_size=32,
+        ),
+    ),
     (False, _case("mxfp4-grouped-fp8-dense-nonfused", use_fused_e8m0_scale=False)),
     (True, _case("mxfp4-grouped-fp8-indexed-auto", gemm_type=GemmType.INDEXED)),
     (
