@@ -12,6 +12,7 @@ class Sm90Heuristics(DeviceHeuristics):
     max_smem_size: int = 227 * 1024
     # Keep two-CTA configs at 256 threads; 512 would force a 64-register limit.
     max_indexed_threads_for_two_ctas: int = 256
+    max_indexed_threads_for_three_ctas: int = 256
     b16_allowed_dtypes: list[dtypes.DataType] = [dtypes.float16, dtypes.bfloat16]
     b8_allowed_dtypes: list[dtypes.DataType] = [
         dtypes.int8,
@@ -39,9 +40,18 @@ class Sm90Heuristics(DeviceHeuristics):
             num_stages,
             warp_shape=warp_shape,
         )
-        resource_limit = 1 + int(
-            num_threads <= cls.max_indexed_threads_for_two_ctas and smem_size * 2 <= cls.max_smem_size
-        )
+        resource_limit = 1
+        if num_threads <= cls.max_indexed_threads_for_two_ctas and smem_size * 2 <= cls.max_smem_size:
+            resource_limit = 2
+        # The measured A16/B4 M8 kernels tolerate the 85-register 3-CTA bound.
+        if (
+            layer_config.a_dtype.num_bits == 16
+            and layer_config.b_dtype.num_bits == 4
+            and block_shape[0] == 8
+            and num_threads <= cls.max_indexed_threads_for_three_ctas
+            and smem_size * 3 <= cls.max_smem_size
+        ):
+            resource_limit = 3
         grid_limit = math.ceil(num_output_tiles / num_sms)
         return max(1, min(resource_limit, grid_limit))
 
@@ -100,6 +110,41 @@ class Sm90Heuristics(DeviceHeuristics):
                 warp_shape = smaller_warp_shape
                 num_ctas_per_sm = smaller_num_ctas
 
+        if (
+            layer_config.a_dtype.num_bits == 16
+            and layer_config.b_dtype.num_bits == 4
+            and block_shape[1] >= 256
+            and block_shape[2] == 64
+        ):
+            candidate_block_shape = (
+                block_shape[0],
+                block_shape[1] // 2,
+                block_shape[2] * 2,
+            )
+            candidate_warp_shape = warp_shape
+            candidate_legal = (
+                layer_config.shape_n % candidate_block_shape[1] == 0
+                and layer_config.shape_k % candidate_block_shape[2] == 0
+            )
+            if candidate_legal:
+                candidate_tiles = num_output_tiles * 2
+                candidate_ctas = cls._estimate_indexed_ctas_per_sm(
+                    layer_config,
+                    candidate_block_shape,
+                    candidate_warp_shape,
+                    num_stages,
+                    candidate_tiles,
+                    num_sms,
+                )
+                current_waves = math.ceil(num_output_tiles / (num_sms * num_ctas_per_sm))
+                candidate_waves = math.ceil(candidate_tiles / (num_sms * candidate_ctas))
+                # Trade a wider K tile for more N tiles only within the same grid wave.
+                if candidate_ctas > num_ctas_per_sm and candidate_waves <= current_waves:
+                    block_shape = candidate_block_shape
+                    warp_shape = candidate_warp_shape
+                    num_ctas_per_sm = candidate_ctas
+                    num_output_tiles = candidate_tiles
+
         # Avoid Stream-K locks once direct output tiles fill an SM wave.
         return config | {
             "block_shape": block_shape,
@@ -130,8 +175,9 @@ class Sm90Heuristics(DeviceHeuristics):
         if tune_indexed_a16:
             # Bound padding when only a few routed rows land on each expert.
             tokens_per_expert = shape_m / layer_config.num_experts
+            first_threshold = 1.01 if layer_config.b_dtype.num_bits == 4 else 0.7
             moe_block_size_configs = (
-                (8, 0.7),
+                (8, first_threshold),
                 (16, 0.7),
                 (24, 0.8),
                 (32, 0.9),
@@ -182,16 +228,33 @@ class Sm90Heuristics(DeviceHeuristics):
             elif block_shape_m <= 32:
                 warp_shape_k = warp_shape_k // 2
 
-        if tune_indexed_a16:
-            while layer_config.shape_n % block_shape_n != 0:
-                block_shape_n //= 2
-                assert block_shape_n >= warp_shape_n
-            warp_shape_n = min(warp_shape_n, block_shape_n // 4)
+        min_warp_shape_n = 32 if layer_config.a_dtype.num_bits == 16 else 16
+        # Keep a complete four-warp WGMMA group while fitting output width.
+        while layer_config.shape_n % block_shape_n != 0:
+            block_shape_n //= 2
+            assert block_shape_n >= min_warp_shape_n * 4
+        warp_shape_n = min(warp_shape_n, block_shape_n // 4)
 
+        # Earlier shape fitting can reduce block K below the initial warp K.
+        warp_shape_k = min(warp_shape_k, block_shape_k)
         while layer_config.shape_k % block_shape_k != 0:
-            warp_shape_k = 512 // layer_config.a_dtype.num_bits
             block_shape_k = block_shape_k // 2
+            warp_shape_k = min(warp_shape_k, block_shape_k)
             assert block_shape_k >= warp_shape_k
+
+        dense_small_fp4 = (
+            gemm_type == GemmType.DENSE
+            and layer_config.a_dtype.num_bits == 16
+            and layer_config.b_dtype.num_bits == 4
+            and shape_m <= 128
+            and layer_config.shape_n % 128 == 0
+            and layer_config.shape_k % 64 == 0
+        )
+        if dense_small_fp4:
+            block_shape_n = 128
+            block_shape_k = 64
+            warp_shape_n = 32
+            warp_shape_k = 64
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (block_shape_m, warp_shape_n, warp_shape_k),
@@ -204,6 +267,8 @@ class Sm90Heuristics(DeviceHeuristics):
             config["use_warp_spec"] = True
             config["use_tma"] = True
             config["use_mbarrier"] = True
+            if dense_small_fp4:
+                config["num_ctas_per_sm"] = 2
 
             if layer_config.shape_n % (block_shape_n * 2) == 0 and shape_m / block_shape_m >= 4:
                 if gemm_type == GemmType.DENSE:
@@ -236,9 +301,17 @@ class Sm90Heuristics(DeviceHeuristics):
         if layer_config.shape_k % 256 != 0:
             block_shape_k = 128
 
+        # N32 avoids the 512-thread grouped-scale CTA when an N128 tile fits.
+        block_shape_n = 128
+        warp_shape_n = 32
+        while layer_config.shape_n % block_shape_n != 0:
+            block_shape_n //= 2
+            warp_shape_n = min(warp_shape_n, block_shape_n // 4)
+            assert warp_shape_n >= 16
+
         config = {
-            "block_shape": (block_shape_m, 128, block_shape_k),
-            "warp_shape": (block_shape_m, 16, 128),
+            "block_shape": (block_shape_m, block_shape_n, block_shape_k),
+            "warp_shape": (block_shape_m, warp_shape_n, 128),
             "use_stream_k": not use_batch_invariant,
             "use_f16_accum": use_f16_accum,
             "num_stages": 4,
