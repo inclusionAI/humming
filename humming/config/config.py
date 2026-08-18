@@ -40,10 +40,8 @@ class LayerConfig(BaseHummingConfig):
     weight_scale_2_type: WeightScale2Type | None = None
     use_int_weight_scale: bool | None = None
     use_fused_e8m0_scale: bool | None = None
-    # Experimental V1: keep one fused-friendly MXFP4/E8M0 representation that
-    # can also be consumed by explicit accumulator scaling.  The explicit path
-    # performs an in-register mode-2 -> mode-3 repack and is correctness-first,
-    # not yet performance-equivalent to the native explicit layout.  The
+    # Keep one group-friendly MXFP4/E8M0 representation that supports either
+    # explicit accumulator scaling or fused register-side dequantization.  The
     # runtime execution choice is carried by ComputeConfig.fuse_e8m0_scale.
     use_shared_e8m0_scale_storage: bool = False
     has_zero_point: bool = False
@@ -231,7 +229,9 @@ class LayerConfig(BaseHummingConfig):
             )
             assert self.bs_dtype == dtypes.float8e8m0, "shared E8M0 scale storage requires E8M0 weight scales"
             assert self.weight_scale_type == WeightScaleType.GROUP
-            assert self.weight_scale_group_size > 0
+            assert self.weight_scale_group_size == 32, (
+                "shared E8M0 scale storage currently requires weight scale group size 32"
+            )
             assert self.input_scale_group_size == 0, (
                 "shared E8M0 scale storage currently requires per-token input scales"
             )

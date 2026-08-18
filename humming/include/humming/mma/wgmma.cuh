@@ -77,27 +77,37 @@ public:
   };
 
   CUDA_INLINE
+  void fused_dequant_shared_e8m0_scale(uint32_t buffer_id) {
+    static_assert(std::is_same<ElementA, Float8E4M3>::value);
+    constexpr uint32_t kNumBGroups = WarpShape::N * 4 / MmaShape::N / kPackedKFactor;
+    uint8_t *scale_bytes = reinterpret_cast<uint8_t *>(arith.bs[buffer_id]);
+    PRAGMA_UNROLL
+    for (uint32_t group = 0; group < kNumBGroups; group++) {
+      fused_dequant_group_interleaved_mxfp4_e4m3<127>(
+          regs_qb[buffer_id] + group * 2,
+          reinterpret_cast<uint32_t *>(regs_b[buffer_id][group]),
+          scale_bytes[group * 2],
+          scale_bytes[group * 2 + 1]);
+    }
+  }
+
+  CUDA_INLINE
   void transform_b(uint32_t buffer_id, uint32_t iter_id) {
     if constexpr (std::is_same<ElementA, ElementB>::value) return;
 
-    if constexpr (kUseFusedE8m0Scale) {
+    if constexpr (
+        kUseFusedE8m0Scale
+        && Ctx::LayerConfig::kUseSharedE8m0ScaleStorage) {
+      fused_dequant_shared_e8m0_scale(buffer_id);
+    } else if constexpr (kUseFusedE8m0Scale) {
       uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
-      constexpr uint32_t kStoredExpBias = Ctx::LayerConfig::kUseSharedE8m0ScaleStorage ? 127 : 0;
       fused_dequant_for_mxfp4<
           ElementA,
           WarpShape::N / 16,
           true,
-          kStoredExpBias>(
+          0>(
           regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
     } else {
-      if constexpr (Ctx::LayerConfig::kUseSharedE8m0ScaleStorage) {
-        constexpr uint32_t kPackedWords = WarpShape::N / 16 * 2;
-        PRAGMA_UNROLL
-        for (uint32_t index = 0; index < kPackedWords; index++) {
-          regs_qb[buffer_id][index] =
-              mxfp4_fused_to_group_interleave(regs_qb[buffer_id][index]);
-        }
-      }
       if constexpr (ElementB::kBits == 1 && kNumWarpShapeNSplits == 2) {
         regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (ctx.warp_id() % 2 * (ElementA::kBits / 2));
       }
@@ -117,10 +127,6 @@ public:
         dequant<ElementB, ElementA, kHasZeroPoint, kIsFpZeroPoint, kNumWarpShapeNSplits>(regs_qb[buffer_id], regs_b_ptr, i, zp_vals_ptr);
         arith.may_apply_bs_and_zp_on_b(regs_b_ptr, i, buffer_id);
       };
-      if constexpr (Ctx::LayerConfig::kUseSharedE8m0ScaleStorage) {
-        uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
-        swap_mxfp4_wgmma_register_words<WarpShape::N / 16>(regs_b_ptr);
-      }
     }
   };
 

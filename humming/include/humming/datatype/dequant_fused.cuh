@@ -53,6 +53,45 @@ CUDA_INLINE uint2 fused_dequant_single_for_mxfp4_e4m3(const uint32_t qb, const u
 }
 
 
+template <uint32_t kStoredExpBias>
+CUDA_INLINE void fused_dequant_group_interleaved_mxfp4_e4m3(
+    const uint32_t *qb,
+    uint32_t *res,
+    const uint32_t stored_exp0,
+    const uint32_t stored_exp1) {
+  // Group-friendly mode-3 storage interleaves two WGMMA rows in each packed
+  // FP4 word.  The low nibbles map to registers 0/2 and use scale 0, while
+  // the high nibbles map to registers 1/3 and use scale 1.  Build one LUT per
+  // row and emit the four WGMMA A-fragment registers directly.
+  constexpr uint32_t kMul1 = 0x08080800;
+  constexpr uint32_t kMul2 = 0x08080808;
+  constexpr uint32_t kAdd1 = (0x03020100 << 2) - 0x00000400 - kStoredExpBias * kMul1;
+  constexpr uint32_t kAdd2 = (0x07060504 << 2) - kStoredExpBias * kMul2;
+  uint32_t exp_buffer10 = stored_exp0 * kMul1 + kAdd1;
+  uint32_t exp_buffer20 = stored_exp0 * kMul2 + kAdd2;
+  uint32_t exp_buffer11 = stored_exp1 * kMul1 + kAdd1;
+  uint32_t exp_buffer21 = stored_exp1 * kMul2 + kAdd2;
+
+  PRAGMA_UNROLL
+  for (uint32_t index = 0; index < 2; index++) {
+    uint32_t packed = qb[index];
+    uint32_t aligned[2] = {packed << 4, packed};
+    PRAGMA_UNROLL
+    for (uint32_t half = 0; half < 2; half++) {
+      uint32_t magnitudes = (aligned[half] & 0x70707070) >> 4;
+      uint32_t even = __byte_perm(magnitudes, 0, 0x4420);
+      uint32_t odd = __byte_perm(magnitudes, 0, 0x4431);
+      uint32_t selectors = even | (odd << 4);
+      uint32_t exp = half == 0
+                         ? __byte_perm(exp_buffer10, exp_buffer20, selectors)
+                         : __byte_perm(exp_buffer11, exp_buffer21, selectors);
+      res[index * 2 + half] =
+          lop3_and_or(aligned[half], 0x80808080, exp);
+    }
+  }
+}
+
+
 template <>
 CUDA_INLINE uint2 fused_dequant_single_for_mxfp4<Int8>(const uint32_t qb, const uint32_t exp_offset) {
   uint32_t buffer1 = 0x03020100 << exp_offset;
@@ -74,20 +113,6 @@ CUDA_INLINE uint2 fused_dequant_single_for_mxfp4<Int8>(const uint32_t qb, const 
 
   return *reinterpret_cast<uint2 *>(res);
 }
-
-CUDA_INLINE uint32_t mxfp4_fused_to_group_interleave(uint32_t qb) {
-  // Mode 2 keeps magnitudes in [0,1,2,3,4,5,6,7] order while signs are
-  // already in WGMMA order.  Mode 3 needs magnitudes in
-  // [0,4,1,5,2,6,3,7].  Transpose the two nibble rows with two PRMTs and
-  // preserve the already-correct sign bitplane.
-  constexpr uint32_t kMagnitudeMask = 0x07070707;
-  uint32_t even_magnitudes = qb & kMagnitudeMask;
-  uint32_t odd_magnitudes = (qb >> 4) & kMagnitudeMask;
-  uint32_t lower = __byte_perm(even_magnitudes, odd_magnitudes, 0x5140);
-  uint32_t upper = __byte_perm(even_magnitudes, odd_magnitudes, 0x7362);
-  return lower | (upper << 4) | (qb & 0x88888888);
-}
-
 
 template <uint32_t kCount>
 CUDA_INLINE void swap_mxfp4_wgmma_register_words(uint32_t *values) {

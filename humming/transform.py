@@ -444,11 +444,9 @@ def transform_humming_tensors(
 
     interleave_mode = 3
     use_legacy_fused_weight_layout = config.use_fused_e8m0_scale and not config.use_shared_e8m0_scale_storage
-    if (
-        use_legacy_fused_weight_layout or config.use_shared_e8m0_scale_storage
-    ) and config.a_dtype == dtypes.float8e4m3:
+    if use_legacy_fused_weight_layout and config.a_dtype == dtypes.float8e4m3:
         interleave_mode = 2
-    skip_mini_block_transpose = use_legacy_fused_weight_layout or config.use_shared_e8m0_scale_storage
+    skip_mini_block_transpose = use_legacy_fused_weight_layout
 
     weight = transform_humming_weight(
         weight=weight,
