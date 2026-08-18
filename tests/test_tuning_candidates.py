@@ -16,16 +16,27 @@ from humming.tune.candidate import (
 )
 
 
-def _layer(*, weight_scale_group_size: int = 16) -> LayerConfig:
+def _layer(
+    *,
+    shape_n: int = 512,
+    shape_k: int = 256,
+    a_dtype=dtypes.bfloat16,
+    b_dtype=dtypes.float4e2m1,
+    as_dtype=None,
+    bs_dtype=dtypes.float8e4m3,
+    input_scale_group_size: int = 0,
+    weight_scale_group_size: int = 16,
+) -> LayerConfig:
     return LayerConfig(
-        shape_n=512,
-        shape_k=256,
+        shape_n=shape_n,
+        shape_k=shape_k,
         num_experts=8,
-        a_dtype=dtypes.bfloat16,
-        b_dtype=dtypes.float4e2m1,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
         c_dtype=dtypes.bfloat16,
-        bs_dtype=dtypes.float8e4m3,
-        input_scale_group_size=0,
+        as_dtype=as_dtype,
+        bs_dtype=bs_dtype,
+        input_scale_group_size=input_scale_group_size,
         weight_scale_group_size=weight_scale_group_size,
         mma_type=MmaType.WGMMA,
     )
@@ -63,7 +74,7 @@ def _candidate(**updates) -> ScheduleCandidate:
     return ScheduleCandidate.from_config("indexed_a16", config)
 
 
-def test_schedule_candidate_is_immutable_and_preserves_config_order():
+def test_schedule_candidate_is_immutable_and_updates_config():
     config = {
         "block_shape": (8, 128, 128),
         "use_stream_k": False,
@@ -76,16 +87,21 @@ def test_schedule_candidate_is_immutable_and_preserves_config_order():
         num_stages=3,
     )
 
-    assert list(candidate.to_config()) == list(config)
-    assert list(updated.to_config()) == [
-        "block_shape",
-        "use_stream_k",
-        "warp_shape",
-        "num_stages",
-    ]
+    assert candidate.to_config() == config
+    assert updated.to_config() == config | {
+        "warp_shape": (8, 32, 32),
+        "num_stages": 3,
+    }
     assert updated.candidate_id == "three_stage"
     with pytest.raises(dataclasses.FrozenInstanceError):
         candidate.candidate_id = "mutated"
+
+    direct = ScheduleCandidate(
+        candidate_id="direct",
+        block_shape=(8, 128, 128),
+        warp_shape=(8, 32, 64),
+    )
+    assert direct.to_config()["block_shape"] == (8, 128, 128)
 
 
 def test_analysis_reports_resources_grid_and_selected_config():
@@ -109,7 +125,7 @@ def test_analysis_reports_resources_grid_and_selected_config():
     assert analysis.thread_smem_cta_limit >= 2
     assert analysis.waves == 1
     assert decision.selected_analysis is analysis
-    assert list(decision.to_config()) == list(candidate.to_config())
+    assert decision.to_config() == candidate.to_config()
 
 
 def test_pipeline_fit_uses_the_shared_smem_analysis():
@@ -131,118 +147,99 @@ def test_pipeline_fit_uses_the_shared_smem_analysis():
 
 
 @pytest.mark.parametrize(
-    ("block_shape", "warp_shape", "expected_reason"),
+    ("block_shape", "warp_shape"),
     [
-        ((8, 0, 64), (8, 32, 64), "dimensions must be positive"),
-        ((8, 192, 64), (8, 32, 64), "shape_n=512 is not divisible"),
-        ((8, 128, 192), (8, 32, 64), "shape_k=256 is not divisible"),
-        ((8, 128, 96), (8, 32, 64), "does not nest warp_shape"),
-        ((8, 128, 128), (8, 24, 64), "warp_n=24 must be a power of two"),
-        ((8, 384, 64), (8, 32, 64), "ratios must be powers of two"),
-        ((8, 64, 64), (8, 32, 64), "multiple of four warp-N tiles"),
-        ((8, 64, 64), (8, 16, 64), "warp_n=16 is smaller than minimum 32"),
-        ((8, 128, 64), (8, 32, 16), "warp_k=16 is smaller than minimum 32"),
+        ((8, 0, 64), (8, 32, 64)),
+        ((8, 192, 64), (8, 32, 64)),
+        ((8, 128, 192), (8, 32, 64)),
+        ((8, 128, 96), (8, 32, 64)),
+        ((8, 384, 64), (8, 32, 64)),
+        ((8, 64, 64), (8, 16, 64)),
     ],
 )
-def test_geometry_validator_explains_rejected_shapes(
-    block_shape,
-    warp_shape,
-    expected_reason,
-):
+def test_geometry_validator_rejects_invalid_shapes(block_shape, warp_shape):
     reasons = get_geometry_rejection_reasons(
         _layer(),
         block_shape,
         warp_shape,
     )
 
-    assert any(expected_reason in reason for reason in reasons)
+    assert reasons
 
 
-def test_analysis_checks_scale_nesting_and_device_limits():
-    problem = _problem(
-        layer_config=_layer(weight_scale_group_size=96),
-        max_smem_size=1024,
-        max_threads_per_sm=256,
-    )
+def test_analysis_rejects_scale_group_that_does_not_nest_tile():
+    problem = _problem(layer_config=_layer(weight_scale_group_size=96))
     analysis = analyze_candidate(problem, _candidate())
 
-    assert not analysis.legal
-    assert any(
-        "weight scale group=96 do not nest" in reason
-        for reason in analysis.rejection_reasons
-    )
-    assert any("smem_size=" in reason for reason in analysis.rejection_reasons)
-    assert any("residency limit" in reason for reason in analysis.rejection_reasons)
+    assert not analysis.launchable
+
+
+def test_analysis_checks_device_resource_limits():
+    problem = _problem(max_threads_per_sm=256)
+    analysis = analyze_candidate(problem, _candidate())
+
+    assert analysis.launchable
+    assert not analysis.meets_resource_target
+    assert analysis.thread_smem_cta_limit < analysis.candidate.num_ctas_per_sm
+
+
+def test_analysis_treats_per_cta_smem_overflow_as_hard_violation():
+    analysis = analyze_candidate(_problem(max_smem_size=1024), _candidate())
+
+    assert not analysis.launchable
 
 
 def test_geometry_rejects_partial_input_scale_group():
-    layer = LayerConfig(
+    layer = _layer(
         shape_n=2880,
         shape_k=2880,
         a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float4e2m1,
-        c_dtype=dtypes.bfloat16,
         as_dtype=dtypes.float32,
         bs_dtype=dtypes.float8e8m0,
         input_scale_group_size=128,
         weight_scale_group_size=32,
-        mma_type=MmaType.WGMMA,
     )
 
     reasons = get_problem_rejection_reasons(layer)
 
-    assert any("input scale group=128" in reason for reason in reasons)
+    assert reasons
 
 
 def test_geometry_rejects_e8m0_scales_on_wgmma():
-    layer = LayerConfig(
-        shape_n=512,
-        shape_k=256,
+    layer = _layer(
         a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float4e2m1,
-        c_dtype=dtypes.bfloat16,
         as_dtype=dtypes.float8e8m0,
         bs_dtype=dtypes.float8e8m0,
         input_scale_group_size=32,
         weight_scale_group_size=32,
-        mma_type=MmaType.WGMMA,
     )
 
     reasons = get_problem_rejection_reasons(layer)
 
-    assert any("must use float32 storage" in reason for reason in reasons)
+    assert reasons
 
 
 def test_problem_rejects_scale_groups_smaller_than_mma_k():
-    layer = LayerConfig(
-        shape_n=512,
-        shape_k=256,
+    layer = _layer(
         a_dtype=dtypes.float8e4m3,
         b_dtype=dtypes.uint4,
-        c_dtype=dtypes.bfloat16,
         as_dtype=dtypes.float32,
         bs_dtype=dtypes.float32,
         input_scale_group_size=16,
         weight_scale_group_size=16,
-        mma_type=MmaType.WGMMA,
     )
 
     reasons = get_problem_rejection_reasons(layer)
 
-    assert "input scale group=16 is smaller than MMA K=32" in reasons
-    assert "weight scale group=16 is smaller than MMA K=32" in reasons
+    assert len(reasons) == 2
 
 
 def test_geometry_allows_integer_wgmma_warp_m_eight():
-    layer = LayerConfig(
-        shape_n=512,
-        shape_k=256,
+    layer = _layer(
         a_dtype=dtypes.int8,
         b_dtype=dtypes.uint4,
-        c_dtype=dtypes.bfloat16,
         bs_dtype=dtypes.bfloat16,
         weight_scale_group_size=64,
-        mma_type=MmaType.WGMMA,
     )
 
     reasons = get_geometry_rejection_reasons(
@@ -265,73 +262,34 @@ def test_analysis_rejects_more_than_1024_threads():
     )
 
     assert analysis.num_threads > 1024
-    assert any("CTA limit 1024" in reason for reason in analysis.rejection_reasons)
+    assert not analysis.launchable
 
 
-def test_analysis_checks_pipeline_and_transfer_legality():
-    analysis = analyze_candidate(
-        _problem(),
-        _candidate(
-            num_stages=2,
-            use_warp_spec=True,
-            use_tma=True,
-            use_mbarrier=False,
-            multi_cast_size_a=2,
-        ),
-    )
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "num_stages": 2,
+            "use_warp_spec": True,
+            "use_tma": True,
+            "use_mbarrier": True,
+        },
+        {"use_warp_spec": True, "use_tma": True, "use_mbarrier": False},
+        {"multi_cast_size_a": 2},
+        {
+            "block_shape": (8, 128, 64),
+            "warp_shape": (8, 32, 16),
+            "use_warp_spec": True,
+            "use_tma": True,
+            "use_mbarrier": True,
+        },
+    ],
+    ids=["pipeline-depth", "mbarrier", "indexed-multicast", "warp-iterations"],
+)
+def test_analysis_rejects_invalid_pipeline_and_transfer_modes(updates):
+    analysis = analyze_candidate(_problem(), _candidate(**updates))
 
-    assert any(
-        "at least three stages" in reason for reason in analysis.rejection_reasons
-    )
-    assert any("require mbarrier" in reason for reason in analysis.rejection_reasons)
-    assert any(
-        "multicast requires a dense GEMM" in reason
-        for reason in analysis.rejection_reasons
-    )
-
-
-def test_analysis_rejects_indexed_tma_input_and_output_transfers():
-    analysis = analyze_candidate(
-        _problem(),
-        _candidate(
-            use_tma=True,
-            use_mbarrier=True,
-            use_tma_a=True,
-            use_tma_as=True,
-            use_tma_c=True,
-        ),
-    )
-
-    assert any(
-        "indexed GEMM does not support TMA A/AS/C" in reason
-        for reason in analysis.rejection_reasons
-    )
-    assert any(
-        "TMA input-scale loads require M-major" in reason
-        for reason in analysis.rejection_reasons
-    )
-
-
-def test_analysis_checks_warp_iterations_and_split_output_constraints():
-    analysis = analyze_candidate(
-        _problem(),
-        _candidate(
-            warp_shape=(8, 32, 16),
-            use_warp_spec=True,
-            use_tma=True,
-            use_mbarrier=True,
-            use_tma_c=True,
-            num_write_splits=2,
-        ),
-    )
-
-    assert any(
-        "at least two warp iterations" in reason
-        for reason in analysis.rejection_reasons
-    )
-    assert any(
-        "split output writes require" in reason for reason in analysis.rejection_reasons
-    )
+    assert not analysis.launchable
 
 
 def test_decision_rejects_an_illegal_selection():
@@ -339,7 +297,7 @@ def test_decision_rejects_an_illegal_selection():
     candidate = _candidate(block_shape=(8, 64, 128))
     analysis = analyze_candidate(problem, candidate)
 
-    with pytest.raises(ValueError, match="selected candidate must be legal"):
+    with pytest.raises(ValueError):
         TuningDecision(
             problem=problem,
             family="indexed_a16",

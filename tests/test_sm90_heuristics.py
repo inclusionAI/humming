@@ -42,6 +42,38 @@ def _layer(
     )
 
 
+def test_grouped_and_legacy_selection_work_without_a_live_device(monkeypatch):
+    def fail_device_query(cls):
+        raise AssertionError("unexpected live device query")
+
+    monkeypatch.setattr(
+        Sm90Heuristics,
+        "get_num_sms",
+        classmethod(fail_device_query),
+    )
+
+    grouped = Sm90Heuristics.get_config(
+        _layer(6144, 3584, num_experts=0),
+        shape_m=32,
+        gemm_type=GemmType.DENSE,
+    )
+    legacy_a16 = Sm90Heuristics.get_config(
+        _layer(
+            5760,
+            2880,
+            num_experts=0,
+            a_dtype=dtypes.bfloat16,
+            as_dtype=None,
+            input_scale_group_size=0,
+        ),
+        shape_m=32,
+        gemm_type=GemmType.DENSE,
+    )
+
+    assert grouped["block_shape"] == (32, 128, 256)
+    assert legacy_a16["block_shape"][1:] == (128, 64)
+
+
 @pytest.mark.parametrize(
     ("input_scale_group_size", "as_dtype"),
     [(128, dtypes.float32), (32, dtypes.float32)],
@@ -69,21 +101,42 @@ def test_grouped_fp8_moe_avoids_512_thread_tiles(
 
 
 def test_grouped_fp8_uses_legal_n_tile_for_non_128_multiple():
-    config = Sm90Heuristics.get_config(
+    decision = Sm90Heuristics.get_tuning_decision(
         _layer(
             2880,
             2880,
             input_scale_group_size=32,
             as_dtype=dtypes.float32,
         ),
-        shape_m=16,
+        shape_m=32,
         gemm_type=GemmType.DENSE,
     )
+    config = decision.to_config()
 
+    assert decision.selected_analysis.legal
+    assert "multi_cast_size_a" not in config
     assert config["block_shape"][1] == 64
     assert config["warp_shape"][1] == 16
     assert config["block_shape"][2] == 64
     assert config["warp_shape"][2] == 64
+
+
+def test_grouped_fp8_enables_multicast_at_the_dense_threshold():
+    layer = _layer(6144, 3584, num_experts=0)
+
+    below_threshold = Sm90Heuristics.get_config(
+        layer,
+        shape_m=504,
+        gemm_type=GemmType.DENSE,
+    )
+    at_threshold = Sm90Heuristics.get_config(
+        layer,
+        shape_m=512,
+        gemm_type=GemmType.DENSE,
+    )
+
+    assert "multi_cast_size_a" not in below_threshold
+    assert at_threshold["multi_cast_size_a"] == 2
 
 
 def test_dense_a16_uses_legal_n_tile_for_non_256_multiple():
@@ -154,8 +207,15 @@ def test_short_k_does_not_leave_warp_k_larger_than_block_k():
     assert config["warp_shape"][2] == 64
 
 
-@pytest.mark.parametrize(("routed_m", "expected_ctas"), [(4, 2), (8, 3), (256, 3)])
-def test_mxfp4_a16_indexed_preserves_warp_k_and_fits_grid(routed_m, expected_ctas):
+@pytest.mark.parametrize(
+    ("routed_m", "expected_ctas", "expected_stream_k"),
+    [(2, 1, True), (4, 2, False), (8, 3, False), (256, 3, False)],
+)
+def test_mxfp4_a16_indexed_preserves_warp_k_and_fits_grid(
+    routed_m,
+    expected_ctas,
+    expected_stream_k,
+):
     config = Sm90Heuristics.get_config(
         _layer(
             5760,
@@ -172,7 +232,7 @@ def test_mxfp4_a16_indexed_preserves_warp_k_and_fits_grid(routed_m, expected_cta
     assert config["block_shape"] == (8, 128, 64)
     assert config["warp_shape"] == (8, 32, 64)
     assert config["num_ctas_per_sm"] == expected_ctas
-    assert config["use_stream_k"] is False
+    assert config["use_stream_k"] is expected_stream_k
 
 
 def test_nvfp4_a16_uses_narrow_first_wave_only():
@@ -186,6 +246,11 @@ def test_nvfp4_a16_uses_narrow_first_wave_only():
         input_scale_group_size=0,
         weight_scale_group_size=16,
     )
+    below_first_wave = Sm90Heuristics.get_config(
+        layer,
+        shape_m=4,
+        gemm_type=GemmType.INDEXED,
+    )
     first_wave = Sm90Heuristics.get_config(
         layer,
         shape_m=8,
@@ -197,6 +262,10 @@ def test_nvfp4_a16_uses_narrow_first_wave_only():
         gemm_type=GemmType.INDEXED,
     )
 
+    assert below_first_wave["block_shape"] == (8, 256, 128)
+    assert below_first_wave["warp_shape"] == (8, 32, 64)
+    assert below_first_wave["num_ctas_per_sm"] == 1
+    assert below_first_wave["use_stream_k"] is True
     assert first_wave["block_shape"] == (8, 128, 128)
     assert first_wave["warp_shape"] == (8, 32, 64)
     assert first_wave["num_ctas_per_sm"] == 3

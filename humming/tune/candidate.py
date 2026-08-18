@@ -17,6 +17,15 @@ class DeviceProfile:
     max_smem_per_sm: int | None = None
     max_threads_per_sm: int = 2048
 
+    def __post_init__(self) -> None:
+        if self.num_sms is not None and self.num_sms <= 0:
+            raise ValueError("num_sms must be positive")
+        for name in ("max_smem_size", "max_threads_per_sm"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.max_smem_per_sm is not None and self.max_smem_per_sm <= 0:
+            raise ValueError("max_smem_per_sm must be positive")
+
     @property
     def resident_smem_size(self) -> int:
         if self.max_smem_per_sm is None:
@@ -32,7 +41,12 @@ class TuningProblem:
     device: DeviceProfile
     use_f16_accum: bool = False
     use_batch_invariant: bool = False
-    use_m_major_input_scale: bool = False
+
+    def __post_init__(self) -> None:
+        if self.shape_m <= 0:
+            raise ValueError("shape_m must be positive")
+        if self.layer_config.shape_n <= 0 or self.layer_config.shape_k <= 0:
+            raise ValueError("layer N and K dimensions must be positive")
 
     def estimate_num_blocks_m(self, block_shape_m: int) -> int:
         if self.gemm_type == GemmType.DENSE or not self.layer_config.num_experts:
@@ -43,14 +57,30 @@ class TuningProblem:
 @dataclasses.dataclass(frozen=True, slots=True)
 class ScheduleCandidate:
     candidate_id: str
-    config_items: tuple[tuple[str, Any], ...]
+    block_shape: tuple[int, int, int]
+    warp_shape: tuple[int, int, int]
+    use_stream_k: bool = True
+    use_f16_accum: bool = False
+    num_stages: int = 2
+    num_ctas_per_sm: int = 1
+    multi_cast_size_a: int = 1
+    use_warp_spec: bool = False
+    use_tma: bool = False
+    use_mbarrier: bool = False
+    _explicit_fields: frozenset[str] = dataclasses.field(
+        default_factory=frozenset, repr=False
+    )
 
     def __post_init__(self) -> None:
         if not self.candidate_id:
             raise ValueError("candidate_id must not be empty")
-        names = tuple(name for name, _ in self.config_items)
-        if len(names) != len(set(names)):
-            raise ValueError("config_items contains duplicate keys")
+        if not self._explicit_fields:
+            fields = (
+                field.name
+                for field in dataclasses.fields(self)
+                if not field.name.startswith("_") and field.name != "candidate_id"
+            )
+            object.__setattr__(self, "_explicit_fields", frozenset(fields))
 
     @classmethod
     def from_config(
@@ -58,15 +88,51 @@ class ScheduleCandidate:
         candidate_id: str,
         config: Mapping[str, Any],
     ) -> "ScheduleCandidate":
-        return cls(candidate_id=candidate_id, config_items=tuple(config.items()))
+        if not candidate_id:
+            raise ValueError("candidate_id must not be empty")
+        if "block_shape" not in config or "warp_shape" not in config:
+            raise ValueError("block_shape and warp_shape are required")
+
+        known_fields = {
+            field.name
+            for field in dataclasses.fields(cls)
+            if not field.name.startswith("_") and field.name != "candidate_id"
+        }
+        unknown_fields = set(config) - known_fields
+        if unknown_fields:
+            raise ValueError(f"unsupported candidate fields: {sorted(unknown_fields)}")
+        use_tma = _config_bool(config, "use_tma", False)
+        use_warp_spec = _config_bool(config, "use_warp_spec", False)
+        return cls(
+            candidate_id=candidate_id,
+            block_shape=_positive_shape(config["block_shape"], "block_shape"),
+            warp_shape=_positive_shape(config["warp_shape"], "warp_shape"),
+            use_stream_k=_config_bool(config, "use_stream_k", True),
+            use_f16_accum=_config_bool(config, "use_f16_accum", False),
+            num_stages=_config_positive_int(config, "num_stages", 2),
+            num_ctas_per_sm=_config_positive_int(config, "num_ctas_per_sm", 1),
+            multi_cast_size_a=_config_positive_int(config, "multi_cast_size_a", 1),
+            use_warp_spec=use_warp_spec,
+            use_tma=use_tma,
+            use_mbarrier=_config_bool(
+                config,
+                "use_mbarrier",
+                use_tma or use_warp_spec,
+                allow_none=True,
+            ),
+            _explicit_fields=frozenset(config),
+        )
 
     def to_config(self) -> dict[str, Any]:
-        return dict(self.config_items)
+        return {
+            field.name: getattr(self, field.name)
+            for field in dataclasses.fields(self)
+            if field.name in self._explicit_fields
+        }
 
     def get(self, name: str, default: Any = None) -> Any:
-        for item_name, value in self.config_items:
-            if item_name == name:
-                return value
+        if name in self._explicit_fields:
+            return getattr(self, name)
         return default
 
     def with_updates(
@@ -78,27 +144,12 @@ class ScheduleCandidate:
         config.update(updates)
         return type(self).from_config(candidate_id or self.candidate_id, config)
 
-    @property
-    def block_shape(self) -> tuple[int, int, int]:
-        return _require_shape(self.get("block_shape"), "block_shape")
-
-    @property
-    def warp_shape(self) -> tuple[int, int, int]:
-        return _require_shape(self.get("warp_shape"), "warp_shape")
-
-    @property
-    def num_stages(self) -> int:
-        return _require_int(self.get("num_stages", 2), "num_stages")
-
-    @property
-    def num_ctas_per_sm(self) -> int:
-        return _require_int(self.get("num_ctas_per_sm", 1), "num_ctas_per_sm")
-
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class CandidateAnalysis:
     candidate: ScheduleCandidate
-    rejection_reasons: tuple[str, ...]
+    hard_violations: tuple[str, ...]
+    resource_violations: tuple[str, ...]
     num_math_threads: int
     num_load_threads: int
     num_threads: int
@@ -108,8 +159,21 @@ class CandidateAnalysis:
     waves: int | None
 
     @property
+    def rejection_reasons(self) -> tuple[str, ...]:
+        return self.hard_violations + self.resource_violations
+
+    @property
+    def launchable(self) -> bool:
+        return not self.hard_violations
+
+    @property
+    def meets_resource_target(self) -> bool:
+        return not self.resource_violations
+
+    @property
     def legal(self) -> bool:
-        return not self.rejection_reasons
+        """Compatibility alias for a launchable candidate at requested residency."""
+        return self.launchable and self.meets_resource_target
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -162,119 +226,37 @@ def _require_shape(value: Any, name: str) -> tuple[int, int, int]:
     return value
 
 
+def _positive_shape(value: Any, name: str) -> tuple[int, int, int]:
+    shape = _require_shape(value, name)
+    if any(size <= 0 for size in shape):
+        raise ValueError(f"{name} dimensions must be positive")
+    return shape
+
+
+def _config_positive_int(config: Mapping[str, Any], name: str, default: int) -> int:
+    value = _require_int(config.get(name, default), name)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _config_bool(
+    config: Mapping[str, Any],
+    name: str,
+    default: bool,
+    *,
+    allow_none: bool = False,
+) -> bool:
+    value = config.get(name, default)
+    if value is None and allow_none:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
 def _is_power_of_two(value: int) -> bool:
     return value > 0 and value & (value - 1) == 0
-
-
-_TMA_FIELD_NAMES = (
-    "use_tma_a",
-    "use_tma_as",
-    "use_tma_b",
-    "use_tma_c",
-    "use_tma_bs",
-    "use_tma_bs2",
-    "use_tma_bzp",
-    "use_tma_bias",
-)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _ResolvedSchedule:
-    block_shape: tuple[int, int, int]
-    warp_shape: tuple[int, int, int]
-    num_stages: int
-    num_ctas_per_sm: int
-    num_write_splits: int
-    multi_cast_size_a: int
-    multi_cast_size_b: int
-    use_stream_k: bool
-    use_warp_spec: bool
-    use_tma: bool
-    use_mbarrier: bool
-    use_cp_async: bool
-    reduce_overlap_last_stage_only: bool
-    tma_fields: tuple[tuple[str, bool], ...]
-
-    @classmethod
-    def from_candidate(
-        cls,
-        candidate: ScheduleCandidate,
-    ) -> tuple["_ResolvedSchedule", tuple[str, ...]]:
-        reasons: list[str] = []
-        block_shape = _resolve_shape(candidate, "block_shape", reasons)
-        warp_shape = _resolve_shape(candidate, "warp_shape", reasons)
-        num_stages = _resolve_int(candidate, "num_stages", 2, reasons)
-        num_ctas_per_sm = _resolve_int(
-            candidate,
-            "num_ctas_per_sm",
-            1,
-            reasons,
-        )
-        num_write_splits = _resolve_int(
-            candidate,
-            "num_write_splits",
-            1,
-            reasons,
-        )
-        multi_cast_size_a = _resolve_int(
-            candidate,
-            "multi_cast_size_a",
-            1,
-            reasons,
-        )
-        multi_cast_size_b = _resolve_int(
-            candidate,
-            "multi_cast_size_b",
-            1,
-            reasons,
-        )
-
-        use_warp_spec = bool(candidate.get("use_warp_spec", False))
-        use_tma = bool(candidate.get("use_tma", False))
-        tma_fields = tuple(
-            (
-                name,
-                bool(
-                    candidate.get(
-                        name,
-                        False if name == "use_tma_as" else use_tma,
-                    )
-                ),
-            )
-            for name in _TMA_FIELD_NAMES
-        )
-        use_mbarrier_value = candidate.get("use_mbarrier")
-        use_mbarrier = (
-            use_tma or use_warp_spec
-            if use_mbarrier_value is None
-            else bool(use_mbarrier_value)
-        )
-        schedule = cls(
-            block_shape=block_shape,
-            warp_shape=warp_shape,
-            num_stages=num_stages,
-            num_ctas_per_sm=num_ctas_per_sm,
-            num_write_splits=num_write_splits,
-            multi_cast_size_a=multi_cast_size_a,
-            multi_cast_size_b=multi_cast_size_b,
-            use_stream_k=bool(candidate.get("use_stream_k", True)),
-            use_warp_spec=use_warp_spec,
-            use_tma=use_tma,
-            use_mbarrier=use_mbarrier,
-            use_cp_async=bool(candidate.get("use_cp_async", False)),
-            reduce_overlap_last_stage_only=bool(
-                candidate.get("reduce_overlap_last_stage_only", False)
-            ),
-            tma_fields=tma_fields,
-        )
-        return schedule, tuple(reasons)
-
-    @property
-    def shapes_positive(self) -> bool:
-        return all(size > 0 for size in self.block_shape + self.warp_shape)
-
-    def tma_enabled(self, name: str) -> bool:
-        return next(enabled for field, enabled in self.tma_fields if field == name)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -293,39 +275,15 @@ class _ExecutionAnalysis:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _ResourceAnalysis:
-    rejection_reasons: tuple[str, ...]
+    hard_violations: tuple[str, ...]
+    residency_violations: tuple[str, ...]
     smem_size: int
     num_output_tiles: int
     thread_smem_cta_limit: int
     waves: int | None
 
 
-def _resolve_shape(
-    candidate: ScheduleCandidate,
-    name: str,
-    reasons: list[str],
-) -> tuple[int, int, int]:
-    try:
-        return _require_shape(candidate.get(name), name)
-    except ValueError as error:
-        reasons.append(str(error))
-        return (0, 0, 0)
-
-
-def _resolve_int(
-    candidate: ScheduleCandidate,
-    name: str,
-    default: int,
-    reasons: list[str],
-) -> int:
-    try:
-        return _require_int(candidate.get(name, default), name)
-    except ValueError as error:
-        reasons.append(str(error))
-        return 0
-
-
-# Keep capability checks aligned with HummingKernel.check_shape/check_scale/check_config.
+# Validate only invariants exercised by the migrated SM90 WGMMA policies.
 def get_problem_rejection_reasons(
     layer_config: LayerConfig,
 ) -> tuple[str, ...]:
@@ -341,52 +299,31 @@ def get_problem_rejection_reasons(
             f"unpadded shape_k={unpadded_shape_k} is not divisible by "
             f"input scale group={input_group_size}"
         )
-    if (
-        layer_config.a_dtype.num_bits != 16
-        and layer_config.mma_type != MmaType.MXMMA
-        and layer_config.as_dtype != dtypes.float32
-    ):
+    if layer_config.mma_type != MmaType.WGMMA:
+        return tuple(reasons)
+    if layer_config.a_dtype.num_bits != 16 and layer_config.as_dtype != dtypes.float32:
         reasons.append(
-            "non-MXMMA input scales must use float32 storage, got "
-            f"{layer_config.as_dtype}"
+            f"WGMMA input scales must use float32 storage, got {layer_config.as_dtype}"
         )
     mma_k = 256 // layer_config.a_dtype.num_bits
     scale_groups = (
         ("input scale group", layer_config.input_scale_group_size),
         ("weight scale group", layer_config.weight_scale_group_size),
     )
-    if layer_config.mma_type == MmaType.MXMMA:
-        for name, group_size in scale_groups:
-            if group_size and (
-                mma_k % group_size or mma_k // group_size not in (1, 2, 4)
-            ):
-                reasons.append(
-                    f"{name}={group_size} does not divide MXMMA K={mma_k} "
-                    "into one, two, or four groups"
-                )
-        if (
-            layer_config.input_scale_group_size
-            and layer_config.weight_scale_group_size
-            and layer_config.input_scale_group_size
-            != layer_config.weight_scale_group_size
-        ):
-            reasons.append("MXMMA input and weight scale groups must match")
-    else:
-        for name, group_size in scale_groups:
-            if group_size and group_size < mma_k:
-                reasons.append(f"{name}={group_size} is smaller than MMA K={mma_k}")
-        if 1 < layer_config.weight_scale_group_size_n < 64:
-            reasons.append(
-                "weight scale N group="
-                f"{layer_config.weight_scale_group_size_n} is smaller than 64"
-            )
-        if (
-            layer_config.is_block_weight_scale
-            and layer_config.input_scale_group_size
-            and layer_config.input_scale_group_size
-            != layer_config.weight_scale_group_size
-        ):
-            reasons.append("block input and weight scale groups must match")
+    for name, group_size in scale_groups:
+        if group_size and group_size < mma_k:
+            reasons.append(f"{name}={group_size} is smaller than MMA K={mma_k}")
+    if 1 < layer_config.weight_scale_group_size_n < 64:
+        reasons.append(
+            "weight scale N group="
+            f"{layer_config.weight_scale_group_size_n} is smaller than 64"
+        )
+    if (
+        layer_config.is_block_weight_scale
+        and layer_config.input_scale_group_size
+        and layer_config.input_scale_group_size != layer_config.weight_scale_group_size
+    ):
+        reasons.append("block input and weight scale groups must match")
     return tuple(reasons)
 
 
@@ -402,8 +339,6 @@ def _analyze_geometry(
     if reasons:
         return _GeometryAnalysis(tuple(reasons), None)
 
-    if block_shape[0] > 256:
-        reasons.append(f"block_m={block_shape[0]} exceeds 256")
     if layer_config.shape_n % block_shape[1]:
         reasons.append(
             f"shape_n={layer_config.shape_n} is not divisible by "
@@ -414,6 +349,8 @@ def _analyze_geometry(
             f"shape_k={layer_config.shape_k} is not divisible by "
             f"block_k={block_shape[2]}"
         )
+    if block_shape[0] > 256:
+        reasons.append(f"block_m={block_shape[0]} exceeds 256")
     for name, size in (
         ("block_n", block_shape[1]),
         ("block_k", block_shape[2]),
@@ -422,6 +359,10 @@ def _analyze_geometry(
     ):
         if not _is_power_of_two(size):
             reasons.append(f"{name}={size} must be a power of two")
+    if warp_shape[0] % 8:
+        reasons.append(f"warp_m={warp_shape[0]} must be divisible by 8")
+    if warp_shape[1] > 64:
+        reasons.append(f"warp_n={warp_shape[1]} exceeds 64")
     if any(block % warp for block, warp in zip(block_shape, warp_shape, strict=True)):
         reasons.append(
             f"block_shape={block_shape} does not nest warp_shape={warp_shape}"
@@ -434,32 +375,11 @@ def _analyze_geometry(
         if not all(_is_power_of_two(ratio) for ratio in ratios):
             reasons.append(f"block-to-warp ratios must be powers of two: {ratios}")
 
-    if warp_shape[1] > 64:
-        reasons.append(f"warp_n={warp_shape[1]} exceeds 64")
-    if warp_shape[1] % 16:
-        reasons.append(f"warp_n={warp_shape[1]} must be divisible by 16")
-    if warp_shape[0] % 8:
-        reasons.append(f"warp_m={warp_shape[0]} must be divisible by 8")
-    if layer_config.mma_type in (MmaType.MMA, MmaType.MXMMA) and warp_shape[0] % 16:
-        reasons.append(
-            f"warp_m={warp_shape[0]} must be divisible by 16 for "
-            f"{layer_config.mma_type.value}"
-        )
-    min_warp_n = (
-        32
-        if layer_config.a_dtype.num_bits == 16 or layer_config.use_packed_k_layout
-        else 16
-    )
-    min_warp_k_by_bits = {16: 32, 8: 64, 4: 128}
-    min_warp_k = min_warp_k_by_bits.get(layer_config.a_dtype.num_bits)
+    min_warp_n = 32 if layer_config.a_dtype.num_bits == 16 else 16
     if warp_shape[1] < min_warp_n:
         reasons.append(f"warp_n={warp_shape[1]} is smaller than minimum {min_warp_n}")
-    if min_warp_k is None:
-        reasons.append(
-            f"unsupported activation width {layer_config.a_dtype.num_bits} "
-            "for warp-K analysis"
-        )
-    elif warp_shape[2] < min_warp_k:
+    min_warp_k = {16: 32, 8: 64, 4: 128}[layer_config.a_dtype.num_bits]
+    if warp_shape[2] < min_warp_k:
         reasons.append(f"warp_k={warp_shape[2]} is smaller than minimum {min_warp_k}")
 
     if layer_config.mma_type == MmaType.WGMMA and ratios is not None:
@@ -476,17 +396,6 @@ def _analyze_geometry(
             reasons.append(
                 f"warp_k={warp_shape[2]} exceeds WGMMA swizzle limit {max_warp_k}"
             )
-
-    if layer_config.use_packed_k_layout:
-        for scale_name, group_size in (
-            ("input scale group", layer_config.input_scale_group_size),
-            ("weight scale group", layer_config.weight_scale_group_size),
-        ):
-            if group_size and warp_shape[2] > group_size:
-                reasons.append(
-                    f"packed-K warp_k={warp_shape[2]} exceeds {scale_name}={group_size}"
-                )
-
     return _GeometryAnalysis(tuple(reasons), ratios)
 
 
@@ -502,52 +411,10 @@ def get_geometry_rejection_reasons(
     ).rejection_reasons
 
 
-def _get_schedule_rejection_reasons(
-    problem: TuningProblem,
-    schedule: _ResolvedSchedule,
-) -> tuple[str, ...]:
-    reasons: list[str] = []
-    if problem.shape_m <= 0:
-        reasons.append(f"shape_m={problem.shape_m} must be positive")
-    if problem.layer_config.shape_n <= 0:
-        reasons.append(f"shape_n={problem.layer_config.shape_n} must be positive")
-    if problem.layer_config.shape_k <= 0:
-        reasons.append(f"shape_k={problem.layer_config.shape_k} must be positive")
-    if problem.device.num_sms is not None and problem.device.num_sms <= 0:
-        reasons.append(f"device num_sms={problem.device.num_sms} must be positive")
-    if problem.device.max_smem_size <= 0:
-        reasons.append(
-            f"device max_smem_size={problem.device.max_smem_size} must be positive"
-        )
-    if problem.device.resident_smem_size <= 0:
-        reasons.append(
-            "device resident shared memory="
-            f"{problem.device.resident_smem_size} must be positive"
-        )
-    if problem.device.max_threads_per_sm <= 0:
-        reasons.append(
-            "device max_threads_per_sm="
-            f"{problem.device.max_threads_per_sm} must be positive"
-        )
-    for name, value in (
-        ("num_stages", schedule.num_stages),
-        ("num_ctas_per_sm", schedule.num_ctas_per_sm),
-        ("num_write_splits", schedule.num_write_splits),
-        ("multi_cast_size_a", schedule.multi_cast_size_a),
-        ("multi_cast_size_b", schedule.multi_cast_size_b),
-    ):
-        if value <= 0:
-            reasons.append(f"{name}={value} must be positive")
-    return tuple(reasons)
-
-
 def _get_tile_rejection_reasons(
     problem: TuningProblem,
-    schedule: _ResolvedSchedule,
+    schedule: ScheduleCandidate,
 ) -> tuple[str, ...]:
-    if not schedule.shapes_positive:
-        return ()
-
     reasons: list[str] = []
     for scale_name, group_size in (
         ("input scale group", problem.layer_config.input_scale_group_size),
@@ -581,7 +448,7 @@ def _get_tile_rejection_reasons(
 
 def _analyze_execution(
     problem: TuningProblem,
-    schedule: _ResolvedSchedule,
+    schedule: ScheduleCandidate,
     geometry: _GeometryAnalysis,
 ) -> _ExecutionAnalysis:
     reasons: list[str] = []
@@ -601,87 +468,20 @@ def _analyze_execution(
             "warp specialization requires a multiple of 128 math threads, "
             f"got {num_math_threads}"
         )
-    if schedule.shapes_positive:
-        mma_k = 256 // problem.layer_config.a_dtype.num_bits
-        warp_iters = (
-            schedule.warp_shape[1] // 16
-            if problem.layer_config.use_packed_k_layout
-            else schedule.warp_shape[2] // mma_k
-        )
-        if schedule.use_warp_spec and warp_iters < 2:
-            reasons.append(
-                "warp specialization requires at least two warp iterations, "
-                f"got {warp_iters}"
-            )
     if (schedule.use_warp_spec or schedule.use_tma) and not schedule.use_mbarrier:
         reasons.append("warp specialization and TMA require mbarrier synchronization")
-    if (schedule.use_warp_spec or schedule.use_tma) and problem.device.sm_version < 90:
-        reasons.append(
-            "warp specialization and TMA require SM90, got "
-            f"SM{problem.device.sm_version}"
-        )
-    if schedule.use_mbarrier and problem.device.sm_version < 80:
-        reasons.append(f"mbarrier requires SM80, got SM{problem.device.sm_version}")
-    if schedule.use_cp_async and problem.device.sm_version < 80:
-        reasons.append(f"cp.async requires SM80, got SM{problem.device.sm_version}")
-    if not schedule.use_tma:
-        enabled_tma_fields = [name for name, enabled in schedule.tma_fields if enabled]
-        if enabled_tma_fields:
-            reasons.append(
-                f"TMA transfer fields require use_tma=True: {enabled_tma_fields}"
-            )
-    if problem.gemm_type == GemmType.INDEXED:
-        indexed_tma_fields = [
-            name
-            for name in ("use_tma_a", "use_tma_as", "use_tma_c")
-            if schedule.tma_enabled(name)
-        ]
-        if indexed_tma_fields:
-            reasons.append(
-                "indexed GEMM does not support TMA A/AS/C transfers: "
-                f"{indexed_tma_fields}"
-            )
-        if schedule.reduce_overlap_last_stage_only:
-            reasons.append("indexed GEMM does not support overlap-last-stage reduction")
-    if schedule.tma_enabled("use_tma_as") and not problem.use_m_major_input_scale:
-        reasons.append("TMA input-scale loads require M-major input scales")
-    if schedule.num_write_splits > 1 and schedule.shapes_positive:
-        if (
-            schedule.block_shape[0] != schedule.warp_shape[0]
-            or schedule.block_shape[0] % 32
-            or schedule.tma_enabled("use_tma_c")
-        ):
-            reasons.append(
-                "split output writes require block_m=warp_m, block_m divisible "
-                "by 32, and direct output stores"
-            )
-    if (
-        problem.layer_config.has_zero_point
-        and problem.layer_config.is_fp_zero_point
-        and schedule.tma_enabled("use_tma_bzp")
-        and schedule.shapes_positive
-        and schedule.block_shape[1] > 256
-    ):
-        reasons.append("TMA float zero-point loads require block_n <= 256")
     if problem.layer_config.mma_type == MmaType.WGMMA and schedule.num_stages < 3:
         reasons.append(
             f"WGMMA requires at least three stages, got {schedule.num_stages}"
         )
 
-    has_multicast = schedule.multi_cast_size_a > 1 or schedule.multi_cast_size_b > 1
-    if has_multicast:
-        if problem.device.sm_version not in (90, 100, 103):
-            reasons.append(f"multicast is unsupported on SM{problem.device.sm_version}")
+    if schedule.multi_cast_size_a > 1:
         if problem.gemm_type != GemmType.DENSE:
             reasons.append("multicast requires a dense GEMM")
         if not schedule.use_warp_spec:
             reasons.append("multicast requires warp specialization")
-        if schedule.multi_cast_size_a > 1 and schedule.multi_cast_size_b > 1:
-            reasons.append("simultaneous A and B multicast is unsupported")
-        if schedule.multi_cast_size_a > 1 and not schedule.tma_enabled("use_tma_a"):
-            reasons.append("A multicast requires TMA-A")
-        if schedule.multi_cast_size_b > 1 and not schedule.tma_enabled("use_tma_b"):
-            reasons.append("B multicast requires TMA-B")
+        if not schedule.use_tma:
+            reasons.append("multicast requires TMA")
     return _ExecutionAnalysis(
         rejection_reasons=tuple(reasons),
         num_math_threads=num_math_threads,
@@ -692,36 +492,27 @@ def _analyze_execution(
 
 def _analyze_resources(
     problem: TuningProblem,
-    schedule: _ResolvedSchedule,
+    schedule: ScheduleCandidate,
     execution: _ExecutionAnalysis,
 ) -> _ResourceAnalysis:
-    reasons: list[str] = []
-    smem_size = 0
-    if (
-        schedule.shapes_positive
-        and schedule.num_stages > 0
-        and schedule.num_write_splits > 0
-    ):
-        smem_size = estimate_smem_size_layer(
-            problem.layer_config,
-            schedule.block_shape,
-            problem.gemm_type,
-            schedule.num_stages,
-            warp_shape=schedule.warp_shape,
-            reduce_overlap_last_stage_only=(schedule.reduce_overlap_last_stage_only),
-            use_mbarrier=schedule.use_mbarrier,
-            use_warp_spec=schedule.use_warp_spec,
-            num_write_splits=schedule.num_write_splits,
-            mma_accum_bits=16 if problem.use_f16_accum else 32,
+    hard_violations: list[str] = []
+    residency_violations: list[str] = []
+    smem_size = estimate_smem_size_layer(
+        problem.layer_config,
+        schedule.block_shape,
+        problem.gemm_type,
+        schedule.num_stages,
+        warp_shape=schedule.warp_shape,
+        reduce_overlap_last_stage_only=False,
+        use_mbarrier=schedule.use_mbarrier,
+        use_warp_spec=schedule.use_warp_spec,
+        num_write_splits=1,
+        mma_accum_bits=16 if problem.use_f16_accum else 32,
+    )
+    if smem_size > problem.device.max_smem_size:
+        hard_violations.append(
+            f"smem_size={smem_size} exceeds device limit {problem.device.max_smem_size}"
         )
-        if (
-            problem.device.max_smem_size > 0
-            and smem_size > problem.device.max_smem_size
-        ):
-            reasons.append(
-                f"smem_size={smem_size} exceeds device limit "
-                f"{problem.device.max_smem_size}"
-            )
 
     num_output_tiles = 0
     if (
@@ -738,36 +529,29 @@ def _analyze_resources(
         )
 
     residency_limits: list[int] = []
-    if execution.num_threads > 0 and problem.device.max_threads_per_sm > 0:
+    if execution.num_threads > 0:
         residency_limits.append(
             problem.device.max_threads_per_sm // execution.num_threads
         )
-    if smem_size > 0 and problem.device.resident_smem_size > 0:
+    if smem_size > 0:
         residency_limits.append(problem.device.resident_smem_size // smem_size)
     thread_smem_cta_limit = min(residency_limits, default=0)
-    if (
-        schedule.num_ctas_per_sm > 0
-        and thread_smem_cta_limit < schedule.num_ctas_per_sm
-    ):
-        reasons.append(
+    if thread_smem_cta_limit < schedule.num_ctas_per_sm:
+        residency_violations.append(
             f"num_ctas_per_sm={schedule.num_ctas_per_sm} exceeds "
             "thread/SMEM residency "
             f"limit {thread_smem_cta_limit}"
         )
 
     waves = None
-    if (
-        num_output_tiles > 0
-        and problem.device.num_sms is not None
-        and problem.device.num_sms > 0
-        and schedule.num_ctas_per_sm > 0
-    ):
+    if num_output_tiles > 0 and problem.device.num_sms is not None:
         waves = math.ceil(
             num_output_tiles / (problem.device.num_sms * schedule.num_ctas_per_sm)
         )
 
     return _ResourceAnalysis(
-        rejection_reasons=tuple(reasons),
+        hard_violations=tuple(hard_violations),
+        residency_violations=tuple(residency_violations),
         smem_size=smem_size,
         num_output_tiles=num_output_tiles,
         thread_smem_cta_limit=thread_smem_cta_limit,
@@ -779,27 +563,25 @@ def analyze_candidate(
     problem: TuningProblem,
     candidate: ScheduleCandidate,
 ) -> CandidateAnalysis:
-    schedule, resolution_reasons = _ResolvedSchedule.from_candidate(candidate)
     geometry = _analyze_geometry(
         problem.layer_config,
-        schedule.block_shape,
-        schedule.warp_shape,
+        candidate.block_shape,
+        candidate.warp_shape,
     )
-    execution = _analyze_execution(problem, schedule, geometry)
-    resources = _analyze_resources(problem, schedule, execution)
-    rejection_reasons = (
-        resolution_reasons
-        + _get_schedule_rejection_reasons(problem, schedule)
-        + get_problem_rejection_reasons(problem.layer_config)
+    execution = _analyze_execution(problem, candidate, geometry)
+    resources = _analyze_resources(problem, candidate, execution)
+    hard_violations = (
+        get_problem_rejection_reasons(problem.layer_config)
         + geometry.rejection_reasons
-        + _get_tile_rejection_reasons(problem, schedule)
+        + _get_tile_rejection_reasons(problem, candidate)
         + execution.rejection_reasons
-        + resources.rejection_reasons
+        + resources.hard_violations
     )
 
     return CandidateAnalysis(
         candidate=candidate,
-        rejection_reasons=rejection_reasons,
+        hard_violations=hard_violations,
+        resource_violations=resources.residency_violations,
         num_math_threads=execution.num_math_threads,
         num_load_threads=execution.num_load_threads,
         num_threads=execution.num_threads,
