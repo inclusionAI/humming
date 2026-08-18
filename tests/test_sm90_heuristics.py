@@ -42,6 +42,59 @@ def _layer(
     )
 
 
+@pytest.mark.parametrize(
+    ("layer", "gemm_type"),
+    [
+        (
+            _layer(
+                2880,
+                2880,
+                input_scale_group_size=32,
+                as_dtype=dtypes.float32,
+            ),
+            GemmType.DENSE,
+        ),
+        (
+            _layer(
+                5760,
+                2880,
+                num_experts=32,
+                a_dtype=dtypes.bfloat16,
+                as_dtype=None,
+                input_scale_group_size=0,
+            ),
+            GemmType.INDEXED,
+        ),
+    ],
+)
+def test_migrated_policies_own_proposal_generation(
+    monkeypatch,
+    layer,
+    gemm_type,
+):
+    def fail_legacy_helper(cls, *args, **kwargs):
+        raise AssertionError("migrated policy called a legacy proposal helper")
+
+    monkeypatch.setattr(
+        Sm90Heuristics,
+        "get_config1",
+        classmethod(fail_legacy_helper),
+    )
+    monkeypatch.setattr(
+        Sm90Heuristics,
+        "calc_num_block_list",
+        classmethod(fail_legacy_helper),
+    )
+
+    decision = Sm90Heuristics.get_tuning_decision(
+        layer,
+        shape_m=32,
+        gemm_type=gemm_type,
+    )
+
+    assert decision.selected_analysis.legal
+
+
 def test_grouped_and_legacy_selection_work_without_a_live_device(monkeypatch):
     def fail_device_query(cls):
         raise AssertionError("unexpected live device query")
