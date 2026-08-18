@@ -11,15 +11,7 @@ import torch
 
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
 from humming.tune import get_heuristics_config
-from humming.tune.candidate import (
-    DeviceProfile,
-    ScheduleCandidate,
-    TuningProblem,
-    analyze_candidate,
-    get_geometry_rejection_reasons,
-    get_problem_rejection_reasons,
-)
-from humming.utils.device import get_device_num_sms, get_device_smem_limits
+from humming.utils.device import fits_device_smem, get_device_num_sms
 
 NUM_SAMPLED_TUNING_CONFIGS = 100
 TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
@@ -57,8 +49,7 @@ TUNING_FIELDS = frozenset(field.name for field in dataclasses.fields(TuningConfi
 
 
 def create_tuning_config(values: dict) -> TuningConfig:
-    fields = {key: value for key, value in values.items() if key in TUNING_FIELDS}
-    return TuningConfig(**fields)
+    return TuningConfig(**{key: value for key, value in values.items() if key in TUNING_FIELDS})
 
 
 def _generate_cartesian(*names: str):
@@ -69,10 +60,7 @@ def _generate_cartesian(*names: str):
 @functools.lru_cache
 def _get_device_resource_limits(device_index: int) -> tuple[int, int]:
     properties = torch.cuda.get_device_properties(device_index)
-    return (
-        properties.max_threads_per_multi_processor,
-        properties.regs_per_multiprocessor,
-    )
+    return properties.max_threads_per_multi_processor, properties.regs_per_multiprocessor
 
 
 def _get_base_config(compute_config: ComputeConfig) -> dict:
@@ -87,14 +75,40 @@ def _is_legal_geometry(
     block_shape: tuple[int, int, int],
     warp_shape: tuple[int, int, int],
 ) -> bool:
-    return not (
-        get_problem_rejection_reasons(layer_config)
-        or get_geometry_rejection_reasons(
-            layer_config,
-            block_shape,
-            warp_shape,
-        )
+    if block_shape[0] > 256:
+        return False
+    if layer_config.shape_n % block_shape[1] or layer_config.shape_k % block_shape[2]:
+        return False
+    if any(block % warp for block, warp in zip(block_shape, warp_shape, strict=True)):
+        return False
+    if warp_shape[1] > 64:
+        return False
+    if warp_shape[0] % 8:
+        return False
+    if layer_config.mma_type == MmaType.MMA and warp_shape[0] % 16:
+        return False
+    if layer_config.mma_type == MmaType.MXMMA and warp_shape[0] % 16:
+        return False
+    if layer_config.mma_type == MmaType.WGMMA and layer_config.a_dtype.is_integer_type and warp_shape[0] % 16:
+        return False
+    min_warp_n = 32 if layer_config.a_dtype.num_bits == 16 or layer_config.use_packed_k_layout else 16
+    min_warp_k = {16: 32, 8: 64, 4: 128}[layer_config.a_dtype.num_bits]
+    if warp_shape[1] < min_warp_n or warp_shape[2] < min_warp_k:
+        return False
+    if layer_config.mma_type == MmaType.WGMMA:
+        if block_shape[1] // warp_shape[1] % 4:
+            return False
+        swizzle_bytes = 128 if layer_config.a_dtype.num_bits * block_shape[2] >= 1024 else 64
+        if warp_shape[2] > swizzle_bytes * 8 // layer_config.a_dtype.num_bits:
+            return False
+    is_warp_k_gt_groupsize = any(
+        group_size and group_size < warp_shape[2]
+        for group_size in (layer_config.input_scale_group_size, layer_config.weight_scale_group_size)
     )
+    if layer_config.use_packed_k_layout and is_warp_k_gt_groupsize:
+        return False
+    ratios = tuple(block // warp for block, warp in zip(block_shape, warp_shape, strict=True))
+    return all(ratio > 0 and ratio & (ratio - 1) == 0 for ratio in ratios)
 
 
 def _generate_geometry_candidates(
@@ -206,12 +220,7 @@ def _generate_transfer_candidates(
             and compute_config.use_m_major_input_scale
         ):
             tma_values["use_tma_as"] = False
-        if not _is_legal_multicast_transfer(
-            compute_config,
-            sm_version,
-            signature,
-            tma_values,
-        ):
+        if not _is_legal_multicast_transfer(compute_config, sm_version, signature, tma_values):
             continue
         config = base | signature | tma_values | {"use_tma": use_tma}
         candidates.append((config, signature | tma_values))
@@ -233,10 +242,7 @@ def _generate_scheduling_candidates(
         "num_write_splits",
     )
     for signature in _generate_cartesian(*names):
-        if (
-            signature["reduce_overlap_last_stage_only"]
-            and compute_config.gemm_type.value == "indexed"
-        ):
+        if signature["reduce_overlap_last_stage_only"] and compute_config.gemm_type.value == "indexed":
             continue
         candidates.append((base | signature, signature))
     return candidates
@@ -259,20 +265,14 @@ def _get_seed(layer_config: LayerConfig, compute_config: ComputeConfig) -> int:
     return int.from_bytes(hashlib.sha256(content).digest()[:8], "little")
 
 
-def _select_pairwise(
-    candidates: list[tuple[dict, dict]],
-    rng: random.Random,
-) -> list[tuple[dict, dict]]:
+def _select_pairwise(candidates: list[tuple[dict, dict]], rng: random.Random) -> list[tuple[dict, dict]]:
     pair_sets = [frozenset(_get_covered_pairs(candidate)) for candidate in candidates]
     uncovered = set().union(*pair_sets)
     remaining = list(range(len(candidates)))
     rng.shuffle(remaining)
     selected = []
     while uncovered and remaining:
-        candidate_index = max(
-            remaining,
-            key=lambda index: len(pair_sets[index] & uncovered),
-        )
+        candidate_index = max(remaining, key=lambda index: len(pair_sets[index] & uncovered))
         covered = pair_sets[candidate_index] & uncovered
         if not covered:
             break
@@ -288,51 +288,22 @@ def _fits_device_resources(
     candidate: tuple[dict, dict],
 ) -> bool:
     config = candidate[0]
-    device_index = torch.cuda.current_device()
-    max_threads, registers_per_sm = _get_device_resource_limits(device_index)
-    max_smem_size, max_smem_per_sm = get_device_smem_limits(device_index)
-    major, minor = torch.cuda.get_device_capability(device_index)
-    gemm_type = compute_config.gemm_type
-    if gemm_type is None:
-        if layer_config.num_experts:
-            raise ValueError("gemm_type must be specified for MoE GEMM")
-        gemm_type = GemmType.DENSE
-    problem = TuningProblem(
-        layer_config=layer_config,
-        shape_m=config["block_shape"][0],
-        gemm_type=gemm_type,
-        device=DeviceProfile(
-            name=torch.cuda.get_device_name(device_index),
-            sm_version=major * 10 + minor,
-            num_sms=get_device_num_sms(device_index),
-            max_smem_size=max_smem_size,
-            max_smem_per_sm=max_smem_per_sm,
-            max_threads_per_sm=max_threads,
-        ),
-        use_f16_accum=compute_config.use_f16_accum,
-        use_batch_invariant=compute_config.use_batch_invariant,
-        use_m_major_input_scale=compute_config.use_m_major_input_scale,
-    )
-    analysis = analyze_candidate(
-        problem,
-        ScheduleCandidate.from_config("test_tuning", config),
-    )
-    if not analysis.legal:
-        return False
-
-    num_math_threads = analysis.num_math_threads
-    num_threads = analysis.num_threads
+    block_shape = config["block_shape"]
+    warp_shape = config["warp_shape"]
+    m_warps = block_shape[0] // warp_shape[0]
+    n_warps = block_shape[1] // warp_shape[1]
+    k_warps = block_shape[2] // warp_shape[2]
+    num_math_threads = m_warps * n_warps * k_warps * 32
+    num_threads = num_math_threads + (128 if config["use_warp_spec"] else 0)
     num_ctas_per_sm = config["num_ctas_per_sm"]
-    warp_shape = analysis.candidate.warp_shape
+    max_threads, registers_per_sm = _get_device_resource_limits(torch.cuda.current_device())
+    if num_threads * num_ctas_per_sm > max_threads:
+        return False
 
     if layer_config.mma_type == MmaType.WGMMA:
         register_overhead = 38
-        math_thread_registers = (
-            math.ceil((warp_shape[0] / 2 + register_overhead) / 8) * 8
-        )
-        launch_bound_registers = (
-            registers_per_sm // (num_threads * num_ctas_per_sm) // 8 * 8
-        )
+        math_thread_registers = math.ceil((warp_shape[0] / 2 + register_overhead) / 8) * 8
+        launch_bound_registers = registers_per_sm // (num_threads * num_ctas_per_sm) // 8 * 8
         if math_thread_registers > launch_bound_registers:
             return False
 
@@ -344,7 +315,8 @@ def _fits_device_resources(
         if registers_per_cta * num_ctas_per_sm > registers_per_sm:
             return False
 
-    return True
+    tuning_config = create_tuning_config(config)
+    return fits_device_smem(layer_config, compute_config, tuning_config)
 
 
 def _try_combine_candidate(
@@ -357,12 +329,45 @@ def _try_combine_candidate(
     transfer_config, transfer_signature = transfer_item
     scheduling_config, scheduling_signature = scheduling_item
     config = geometry_config | transfer_config | scheduling_config
+    block_shape = config["block_shape"]
+    warp_shape = config["warp_shape"]
+    m_warps = block_shape[0] // warp_shape[0]
+    n_warps = block_shape[1] // warp_shape[1]
+    k_warps = block_shape[2] // warp_shape[2]
+    num_math_threads = m_warps * n_warps * k_warps * 32
+    num_threads = num_math_threads + (128 if config["use_warp_spec"] else 0)
+    if num_threads > 1024:
+        return None
+    if (config["use_warp_spec"] or layer_config.mma_type == MmaType.WGMMA) and num_math_threads % 128:
+        return None
+    if layer_config.mma_type == MmaType.WGMMA and config["num_stages"] < 3:
+        return None
+    if layer_config.shape_n % (block_shape[1] * config["multi_cast_size_a"]):
+        return None
+    if compute_config.use_batch_invariant and (config["use_stream_k"] or block_shape[2] != warp_shape[2]):
+        return None
+    actual_warp_iters = (
+        config["warp_shape"][1] // 16
+        if layer_config.use_packed_k_layout
+        else geometry_signature["warp_iters"]
+    )
+    if config["use_warp_spec"] and actual_warp_iters < 2:
+        return None
+    block_m = config["block_shape"][0]
+    warp_m = config["warp_shape"][0]
+    if config["num_write_splits"] > 1 and (block_m != warp_m or block_m % 32 or config["use_tma_c"]):
+        return None
+    if (
+        layer_config.has_zero_point
+        and layer_config.is_fp_zero_point
+        and config["use_tma_bzp"]
+        and block_shape[1] > 256
+    ):
+        return None
 
     signature = geometry_signature | transfer_signature | scheduling_signature
     candidate = (config, signature)
-    if _fits_device_resources(layer_config, compute_config, candidate):
-        return candidate
-    return None
+    return candidate if _fits_device_resources(layer_config, compute_config, candidate) else None
 
 
 def enumerate_test_tuning_configs(
@@ -402,14 +407,7 @@ def enumerate_test_tuning_configs(
         for group in reversed(groups):
             flat_index, index = divmod(flat_index, len(group))
             indices.append(index)
-        items = tuple(
-            group[index]
-            for group, index in zip(
-                groups,
-                reversed(indices),
-                strict=True,
-            )
-        )
+        items = tuple(group[index] for group, index in zip(groups, reversed(indices), strict=True))
         add(items)
         if len(candidates) >= target_pool_size:
             break
@@ -425,9 +423,7 @@ def sample_test_tuning_configs(
     rng = random.Random(_get_seed(layer_config, compute_config))
     selected = _select_pairwise(candidates, rng)
     selected_ids = {id(candidate) for candidate in selected}
-    remaining = [
-        candidate for candidate in candidates if id(candidate) not in selected_ids
-    ]
+    remaining = [candidate for candidate in candidates if id(candidate) not in selected_ids]
     rng.shuffle(remaining)
     target_size = min(max(sample_size, len(selected)), len(candidates))
     selected.extend(remaining[: target_size - len(selected)])

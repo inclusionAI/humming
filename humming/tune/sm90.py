@@ -7,17 +7,15 @@ from humming.config import GemmType, LayerConfig
 from humming.tune.base import DeviceHeuristics
 from humming.tune.candidate import (
     DeviceProfile,
-    ScheduleCandidate,
     TuningDecision,
     TuningProblem,
-    analyze_candidate,
-    fit_pipeline_stages,
 )
-from humming.tune.sm90_families import (
+from humming.tune.sm90_policies import (
     Sm90CandidatePolicy,
     select_grouped_scale,
     select_indexed_a16,
 )
+from humming.utils.smem import estimate_smem_size_layer
 
 
 class Sm90Heuristics(DeviceHeuristics):
@@ -62,6 +60,19 @@ class Sm90Heuristics(DeviceHeuristics):
         )
 
     @classmethod
+    def _uses_indexed_a16_policy(
+        cls,
+        layer_config: LayerConfig,
+        use_batch_invariant: bool,
+        gemm_type: GemmType,
+    ) -> bool:
+        return (
+            gemm_type == GemmType.INDEXED
+            and layer_config.a_dtype.num_bits == 16
+            and not use_batch_invariant
+        )
+
+    @classmethod
     def get_config1(
         cls,
         layer_config: LayerConfig,
@@ -70,10 +81,10 @@ class Sm90Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        tune_indexed_a16 = (
-            gemm_type == GemmType.INDEXED
-            and layer_config.a_dtype.num_bits == 16
-            and not use_batch_invariant
+        tune_indexed_a16 = cls._uses_indexed_a16_policy(
+            layer_config,
+            use_batch_invariant,
+            gemm_type,
         )
         if layer_config.use_packed_k_layout:
             max_block_m = 128
@@ -299,58 +310,37 @@ class Sm90Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ) -> TuningDecision:
+        tune_indexed_a16 = cls._uses_indexed_a16_policy(
+            layer_config,
+            use_batch_invariant,
+            gemm_type,
+        )
         problem = cls._make_problem(
             layer_config,
             shape_m,
             use_f16_accum,
             use_batch_invariant,
             gemm_type,
-            include_grid_size=(
-                gemm_type == GemmType.INDEXED
-                and layer_config.a_dtype.num_bits == 16
-                and not use_batch_invariant
-            ),
+            include_grid_size=tune_indexed_a16,
         )
         if cls._uses_grouped_scale_candidates(layer_config):
-            decision = cls._get_grouped_scale_decision(problem)
-        else:
-            config = cls.get_config1(
-                layer_config,
-                shape_m,
-                use_f16_accum,
-                use_batch_invariant,
-                gemm_type,
+            return cls._get_grouped_scale_decision(problem)
+        if not tune_indexed_a16:
+            raise ValueError(
+                "decision traces are only available for migrated SM90 policies"
             )
-            tune_indexed_a16 = (
-                gemm_type == GemmType.INDEXED
-                and layer_config.a_dtype.num_bits == 16
-                and not use_batch_invariant
-            )
-            if tune_indexed_a16:
-                decision = select_indexed_a16(
-                    problem,
-                    config,
-                    cls.candidate_policy,
-                )
-            else:
-                candidate = fit_pipeline_stages(
-                    problem,
-                    ScheduleCandidate.from_config(
-                        "legacy_sm90",
-                        config,
-                    ),
-                )
-                analysis = analyze_candidate(problem, candidate)
-                if not analysis.legal:
-                    raise AssertionError(analysis.rejection_reasons)
-                decision = TuningDecision(
-                    problem=problem,
-                    family="legacy_sm90",
-                    selected=candidate,
-                    considered=(analysis,),
-                    reason="wrapped the existing SM90 heuristic output",
-                )
-        return decision
+        config = cls.get_config1(
+            layer_config,
+            shape_m,
+            use_f16_accum,
+            use_batch_invariant,
+            gemm_type,
+        )
+        return select_indexed_a16(
+            problem,
+            config,
+            cls.candidate_policy,
+        )
 
     @classmethod
     def get_config(
@@ -361,11 +351,9 @@ class Sm90Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        use_candidates = cls._uses_grouped_scale_candidates(layer_config) or (
-            gemm_type == GemmType.INDEXED
-            and layer_config.a_dtype.num_bits == 16
-            and not use_batch_invariant
-        )
+        use_candidates = cls._uses_grouped_scale_candidates(
+            layer_config
+        ) or cls._uses_indexed_a16_policy(layer_config, use_batch_invariant, gemm_type)
         if use_candidates:
             return cls.get_tuning_decision(
                 layer_config,
@@ -375,13 +363,6 @@ class Sm90Heuristics(DeviceHeuristics):
                 gemm_type,
             ).to_config()
 
-        problem = cls._make_problem(
-            layer_config,
-            shape_m,
-            use_f16_accum,
-            use_batch_invariant,
-            gemm_type,
-        )
         config = cls.get_config1(
             layer_config,
             shape_m,
@@ -389,7 +370,22 @@ class Sm90Heuristics(DeviceHeuristics):
             use_batch_invariant,
             gemm_type,
         )
-        return fit_pipeline_stages(
-            problem,
-            ScheduleCandidate.from_config("legacy_sm90", config),
-        ).to_config()
+        while config["num_stages"] > 3:
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                config["block_shape"],
+                gemm_type,
+                config["num_stages"],
+                warp_shape=config["warp_shape"],
+                reduce_overlap_last_stage_only=config.get(
+                    "reduce_overlap_last_stage_only", False
+                ),
+                use_mbarrier=config.get("use_mbarrier", False),
+                use_warp_spec=config.get("use_warp_spec", False),
+                num_write_splits=config.get("num_write_splits", 1),
+                mma_accum_bits=16 if use_f16_accum else 32,
+            )
+            if smem_size <= cls.max_smem_size:
+                break
+            config["num_stages"] -= 1
+        return config

@@ -19,30 +19,12 @@ class Sm90CandidatePolicy:
     max_indexed_threads_for_three_ctas: int = 256
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True, eq=False)
 class _IndexedOption:
     candidate: ScheduleCandidate
     transform: Literal["base", "half_k", "split_n_widen_k"]
     priority: int
     parent: "_IndexedOption | None" = None
-
-
-@dataclasses.dataclass(slots=True)
-class _IndexedEvaluation:
-    option: _IndexedOption
-    analysis: CandidateAnalysis
-    reason: str | None = None
-
-    @property
-    def eligible(self) -> bool:
-        return self.reason is not None
-
-
-def _evaluation_for(
-    evaluations: list[_IndexedEvaluation],
-    option: _IndexedOption,
-) -> _IndexedEvaluation:
-    return next(evaluation for evaluation in evaluations if evaluation.option is option)
 
 
 def select_grouped_scale(
@@ -248,67 +230,73 @@ def select_indexed_a16(
         if split is not None:
             options.append(_IndexedOption(split, "split_n_widen_k", 2, source))
 
-    evaluations = [
-        _IndexedEvaluation(
-            option,
-            _analyze_indexed_a16_candidate(problem, option.candidate, policy),
+    analyses = {
+        option: _analyze_indexed_a16_candidate(
+            problem,
+            option.candidate,
+            policy,
         )
         for option in options
-    ]
-    base_evaluation = _evaluation_for(evaluations, base_option)
-    if not base_evaluation.analysis.legal:
-        raise AssertionError(base_evaluation.analysis.rejection_reasons)
-    base_evaluation.reason = "selected the base indexed-A16 schedule"
+    }
+    base_analysis = analyses[base_option]
+    if not base_analysis.legal:
+        raise AssertionError(base_analysis.rejection_reasons)
+    eligible_reasons = {
+        base_option: "selected the base indexed-A16 schedule",
+    }
 
     if half_option is not None:
-        half_evaluation = _evaluation_for(evaluations, half_option)
+        half_analysis = analyses[half_option]
         if (
-            base_evaluation.analysis.candidate.num_ctas_per_sm == 1
-            and half_evaluation.analysis.legal
-            and half_evaluation.analysis.candidate.num_ctas_per_sm
-            > base_evaluation.analysis.candidate.num_ctas_per_sm
+            base_analysis.candidate.num_ctas_per_sm == 1
+            and half_analysis.legal
+            and half_analysis.candidate.num_ctas_per_sm
+            > base_analysis.candidate.num_ctas_per_sm
         ):
-            half_evaluation.reason = "halved K because it increased CTA residency"
+            eligible_reasons[half_option] = (
+                "halved K because it increased CTA residency"
+            )
 
-    for evaluation in evaluations:
-        option = evaluation.option
+    for option in options:
         if option.transform != "split_n_widen_k":
             continue
         assert option.parent is not None
-        parent = _evaluation_for(evaluations, option.parent)
-        parent_reason = parent.reason
+        parent_reason = eligible_reasons.get(option.parent)
+        analysis = analyses[option]
+        parent_analysis = analyses[option.parent]
         if (
             parent_reason is not None
-            and evaluation.analysis.legal
-            and evaluation.analysis.candidate.num_ctas_per_sm
-            > parent.analysis.candidate.num_ctas_per_sm
-            and evaluation.analysis.waves is not None
-            and parent.analysis.waves is not None
-            and evaluation.analysis.waves <= parent.analysis.waves
+            and analysis.legal
+            and analysis.candidate.num_ctas_per_sm
+            > parent_analysis.candidate.num_ctas_per_sm
+            and analysis.waves is not None
+            and parent_analysis.waves is not None
+            and analysis.waves <= parent_analysis.waves
         ):
-            evaluation.reason = (
+            eligible_reasons[option] = (
                 f"{parent_reason}; split N and widened K without adding a grid wave"
             )
     selected = max(
-        (evaluation for evaluation in evaluations if evaluation.eligible),
-        key=lambda evaluation: evaluation.option.priority,
+        eligible_reasons,
+        key=lambda option: option.priority,
     )
 
-    final_candidate = selected.analysis.candidate.with_updates(
+    final_candidate = analyses[selected].candidate.with_updates(
         use_stream_k=(
-            bool(selected.analysis.candidate.get("use_stream_k", True))
-            and selected.analysis.num_output_tiles < problem.device.num_sms
+            bool(analyses[selected].candidate.get("use_stream_k", True))
+            and analyses[selected].num_output_tiles < problem.device.num_sms
         )
     )
     final_analysis = analyze_candidate(problem, final_candidate)
     if not final_analysis.legal:
         raise AssertionError(final_analysis.rejection_reasons)
-    selected.analysis = final_analysis
-    assert selected.reason is not None
     return TuningDecision(
         problem=problem,
         family="indexed_a16",
         selected=final_candidate,
-        considered=tuple(evaluation.analysis for evaluation in evaluations),
-        reason=selected.reason,
+        considered=tuple(
+            final_analysis if option is selected else analyses[option]
+            for option in options
+        ),
+        reason=eligible_reasons[selected],
     )
