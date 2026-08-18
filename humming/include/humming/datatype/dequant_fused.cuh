@@ -79,9 +79,11 @@ CUDA_INLINE void fused_dequant_group_interleaved_mxfp4_e4m3(
     PRAGMA_UNROLL
     for (uint32_t half = 0; half < 2; half++) {
       uint32_t magnitudes = (aligned[half] & 0x70707070) >> 4;
-      uint32_t even = __byte_perm(magnitudes, 0, 0x4420);
-      uint32_t odd = __byte_perm(magnitudes, 0, 0x4431);
-      uint32_t selectors = even | (odd << 4);
+      // Pack four byte-wide [0, 7] magnitudes into the four selector nibbles.
+      // DP4A keeps this work off the PRMT pipe used by the following LUT.
+      uint32_t selectors_low = __dp4a(magnitudes, 0x00001001u, 0u);
+      uint32_t selectors_high = __dp4a(magnitudes, 0x10010000u, 0u);
+      uint32_t selectors = selectors_low | (selectors_high << 8);
       uint32_t exp = half == 0
                          ? __byte_perm(exp_buffer10, exp_buffer20, selectors)
                          : __byte_perm(exp_buffer11, exp_buffer21, selectors);
