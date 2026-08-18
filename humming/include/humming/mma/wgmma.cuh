@@ -82,8 +82,22 @@ public:
 
     if constexpr (kUseFusedE8m0Scale) {
       uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
-      fused_dequant_for_mxfp4<ElementA, WarpShape::N / 16, true>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
+      constexpr uint32_t kStoredExpBias = Ctx::LayerConfig::kUseSharedE8m0ScaleStorage ? 127 : 0;
+      fused_dequant_for_mxfp4<
+          ElementA,
+          WarpShape::N / 16,
+          true,
+          kStoredExpBias>(
+          regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
     } else {
+      if constexpr (Ctx::LayerConfig::kUseSharedE8m0ScaleStorage) {
+        constexpr uint32_t kPackedWords = WarpShape::N / 16 * 2;
+        PRAGMA_UNROLL
+        for (uint32_t index = 0; index < kPackedWords; index++) {
+          regs_qb[buffer_id][index] =
+              mxfp4_fused_to_group_interleave(regs_qb[buffer_id][index]);
+        }
+      }
       if constexpr (ElementB::kBits == 1 && kNumWarpShapeNSplits == 2) {
         regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (ctx.warp_id() % 2 * (ElementA::kBits / 2));
       }
@@ -103,6 +117,10 @@ public:
         dequant<ElementB, ElementA, kHasZeroPoint, kIsFpZeroPoint, kNumWarpShapeNSplits>(regs_qb[buffer_id], regs_b_ptr, i, zp_vals_ptr);
         arith.may_apply_bs_and_zp_on_b(regs_b_ptr, i, buffer_id);
       };
+      if constexpr (Ctx::LayerConfig::kUseSharedE8m0ScaleStorage) {
+        uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
+        swap_mxfp4_wgmma_register_words<WarpShape::N / 16>(regs_b_ptr);
+      }
     }
   };
 

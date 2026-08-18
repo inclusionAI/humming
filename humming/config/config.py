@@ -40,6 +40,12 @@ class LayerConfig(BaseHummingConfig):
     weight_scale_2_type: WeightScale2Type | None = None
     use_int_weight_scale: bool | None = None
     use_fused_e8m0_scale: bool | None = None
+    # Experimental V1: keep one fused-friendly MXFP4/E8M0 representation that
+    # can also be consumed by explicit accumulator scaling.  The explicit path
+    # performs an in-register mode-2 -> mode-3 repack and is correctness-first,
+    # not yet performance-equivalent to the native explicit layout.  The
+    # runtime execution choice is carried by ComputeConfig.fuse_e8m0_scale.
+    use_shared_e8m0_scale_storage: bool = False
     has_zero_point: bool = False
     is_fp_zero_point: bool = False
 
@@ -216,6 +222,25 @@ class LayerConfig(BaseHummingConfig):
                 and self.weight_scale_group_size > 0
             )
 
+        if self.use_shared_e8m0_scale_storage:
+            assert self.a_dtype == dtypes.float8e4m3, (
+                "shared E8M0 scale storage currently requires FP8 E4M3 activation"
+            )
+            assert self.b_dtype == dtypes.float4e2m1, (
+                "shared E8M0 scale storage currently requires MXFP4 E2M1 weight"
+            )
+            assert self.bs_dtype == dtypes.float8e8m0, "shared E8M0 scale storage requires E8M0 weight scales"
+            assert self.weight_scale_type == WeightScaleType.GROUP
+            assert self.weight_scale_group_size > 0
+            assert self.input_scale_group_size == 0, (
+                "shared E8M0 scale storage currently requires per-token input scales"
+            )
+            assert self.mma_type == MmaType.WGMMA, "shared E8M0 scale storage currently requires WGMMA"
+            assert not self.has_zero_point
+            # The canonical scale is relative to one per-expert FP32 base.  It
+            # must be present for both runtime execution paths.
+            self.weight_scale_2_type = WeightScale2Type.TENSOR
+
         if self.use_int_weight_scale is None:
             self.use_int_weight_scale = (
                 not self.use_fused_e8m0_scale
@@ -231,7 +256,7 @@ class LayerConfig(BaseHummingConfig):
             assert self.input_scale_group_size == 0, "use_int_weight_scale requires input_scale_group_size=0"
             self.bs_dtype = self.c_dtype
 
-        if self.use_int_weight_scale or self.use_fused_e8m0_scale:
+        if self.use_int_weight_scale or self.use_fused_e8m0_scale or self.use_shared_e8m0_scale_storage:
             self.weight_scale_type = WeightScaleType.GROUP
             # the extracted min-exponent factor becomes the secondary scale:
             # per-channel when channel2 is requested, per-tensor otherwise
@@ -252,6 +277,9 @@ class LayerConfig(BaseHummingConfig):
             assert self.a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit activation"
             assert self.b_dtype.num_bits % 2 == 0, "use_packed_k_layout requires even-bit weight"
             assert not self.use_fused_e8m0_scale, "packed_k_layout is incompatible with fused-e8m0"
+
+        if self.use_shared_e8m0_scale_storage:
+            assert not self.use_packed_k_layout, "shared E8M0 scale storage does not support packed-K layout"
 
         if type(self) is LayerConfig:
             self._config_str = self.to_str()
@@ -343,6 +371,9 @@ class ComputeConfig(BaseHummingConfig):
     use_f16_accum: bool = False
     use_batch_invariant: bool = False
     use_m_major_input_scale: bool = False
+    # None preserves the LayerConfig default.  A bool selects the compiled
+    # scale-application path without changing the resident weight tensors.
+    fuse_e8m0_scale: bool | None = None
     gemm_type: GemmType | None = None
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (

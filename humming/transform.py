@@ -426,7 +426,7 @@ def transform_humming_tensors(
     if config.weight_scale_2_type != WeightScale2Type.NONE:
         weight_scale_2 = tensors.get("weight_scale_2", None)
 
-    if config.use_fused_e8m0_scale:
+    if config.use_fused_e8m0_scale or config.use_shared_e8m0_scale_storage:
         assert weight_scale is not None
         weight, weight_scale, weight_scale_2 = process_fused_e8m0_scale(
             config,
@@ -435,9 +435,20 @@ def transform_humming_tensors(
             weight_scale_2=weight_scale_2,
         )
 
+    if config.use_shared_e8m0_scale_storage:
+        # process_fused_e8m0_scale stores a small relative exponent s in [1, 12]
+        # and a per-expert tensor base.  Rebiasing s into the native E8M0 range
+        # makes the same scale tensor directly consumable by the explicit path:
+        #   2^((s + 127) - 127) * scale_2 == 2^s * scale_2.
+        weight_scale = (weight_scale.view(torch.uint8) + 127).view(weight_scale.dtype)
+
     interleave_mode = 3
-    if config.use_fused_e8m0_scale and config.a_dtype == dtypes.float8e4m3:
+    use_legacy_fused_weight_layout = config.use_fused_e8m0_scale and not config.use_shared_e8m0_scale_storage
+    if (
+        use_legacy_fused_weight_layout or config.use_shared_e8m0_scale_storage
+    ) and config.a_dtype == dtypes.float8e4m3:
         interleave_mode = 2
+    skip_mini_block_transpose = use_legacy_fused_weight_layout or config.use_shared_e8m0_scale_storage
 
     weight = transform_humming_weight(
         weight=weight,
@@ -445,7 +456,7 @@ def transform_humming_tensors(
         a_dtype=config.a_dtype,
         zero_point=zero_point,
         use_wgmma=config.mma_type == MmaType.WGMMA,
-        use_fused_e8m0_scale=config.use_fused_e8m0_scale,
+        use_fused_e8m0_scale=skip_mini_block_transpose,
         packed=True,
         interleave_mode=interleave_mode,
         use_packed_k_layout=config.use_packed_k_layout,

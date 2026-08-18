@@ -1,3 +1,4 @@
+import dataclasses
 import functools
 
 import torch
@@ -84,6 +85,7 @@ def get_heuristics_config(
     use_f16_accum: bool = False,
     use_batch_invariant: bool = False,
     use_m_major_input_scale: bool = False,
+    fuse_e8m0_scale: bool | None = None,
     gemm_type: str | GemmType = "dense",
 ):
     if isinstance(gemm_type, str):
@@ -91,6 +93,15 @@ def get_heuristics_config(
 
     if isinstance(layer_config, dict):
         layer_config = LayerConfig(**layer_config)
+    if fuse_e8m0_scale is not None:
+        if not layer_config.use_shared_e8m0_scale_storage and (
+            fuse_e8m0_scale != layer_config.use_fused_e8m0_scale
+        ):
+            raise ValueError("runtime E8M0 scale switching requires use_shared_e8m0_scale_storage=True")
+        layer_config = dataclasses.replace(
+            layer_config,
+            use_fused_e8m0_scale=fuse_e8m0_scale,
+        )
     heuristics_cls = get_heuristics_class()
     if isinstance(shape_m, int):
         config = heuristics_cls.get_config(

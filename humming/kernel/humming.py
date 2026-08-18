@@ -110,6 +110,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     def __post_init__(self):
         LayerConfig.__post_init__(self)
         ComputeConfig.__post_init__(self)
+        if self.fuse_e8m0_scale is not None:
+            requested = self.fuse_e8m0_scale
+            if not self.use_shared_e8m0_scale_storage and requested != self.use_fused_e8m0_scale:
+                raise ValueError("runtime E8M0 scale switching requires use_shared_e8m0_scale_storage=True")
+            self.use_fused_e8m0_scale = requested
         TuningConfig.__post_init__(self)
         KernelRuntime.__post_init__(self)
 
