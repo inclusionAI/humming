@@ -16,6 +16,7 @@ class DeviceProfile:
     max_smem_size: int
     max_smem_per_sm: int | None = None
     max_threads_per_sm: int = 2048
+    registers_per_sm: int = 64 * 1024
 
     def __post_init__(self) -> None:
         if self.num_sms is not None and self.num_sms <= 0:
@@ -63,6 +64,7 @@ class ScheduleCandidate:
     use_f16_accum: bool = False
     num_stages: int = 2
     num_ctas_per_sm: int = 1
+    num_sms: int | None = None
     multi_cast_size_a: int = 1
     use_warp_spec: bool = False
     use_tma: bool = False
@@ -74,6 +76,8 @@ class ScheduleCandidate:
     def __post_init__(self) -> None:
         if not self.candidate_id:
             raise ValueError("candidate_id must not be empty")
+        if self.num_sms is not None and self.num_sms <= 0:
+            raise ValueError("num_sms must be positive when provided")
         if not self._explicit_fields:
             fields = (
                 field.name
@@ -111,6 +115,11 @@ class ScheduleCandidate:
             use_f16_accum=_config_bool(config, "use_f16_accum", False),
             num_stages=_config_positive_int(config, "num_stages", 2),
             num_ctas_per_sm=_config_positive_int(config, "num_ctas_per_sm", 1),
+            num_sms=(
+                _config_positive_int(config, "num_sms", 1)
+                if config.get("num_sms") is not None
+                else None
+            ),
             multi_cast_size_a=_config_positive_int(config, "multi_cast_size_a", 1),
             use_warp_spec=use_warp_spec,
             use_tma=use_tma,
@@ -157,6 +166,8 @@ class CandidateAnalysis:
     num_output_tiles: int
     thread_smem_cta_limit: int
     waves: int | None
+    register_budget_per_thread: int = 0
+    register_pressured: bool = False
 
     @property
     def rejection_reasons(self) -> tuple[str, ...]:
@@ -281,6 +292,7 @@ class _ResourceAnalysis:
     num_output_tiles: int
     thread_smem_cta_limit: int
     waves: int | None
+    register_budget_per_thread: int
 
 
 # Validate only invariants exercised by the migrated SM90 WGMMA policies.
@@ -549,6 +561,23 @@ def _analyze_resources(
             num_output_tiles / (problem.device.num_sms * schedule.num_ctas_per_sm)
         )
 
+    register_budget_per_thread = 0
+    if (
+        execution.num_threads > 0
+        and schedule.num_ctas_per_sm > 0
+        and problem.device.registers_per_sm > 0
+    ):
+        # __launch_bounds__(num_threads, num_ctas_per_sm) caps the allocation;
+        # registers are granted in units of 8 and each thread can address at
+        # most 255.
+        register_budget_per_thread = min(
+            problem.device.registers_per_sm
+            // (execution.num_threads * schedule.num_ctas_per_sm)
+            // 8
+            * 8,
+            255,
+        )
+
     return _ResourceAnalysis(
         hard_violations=tuple(hard_violations),
         residency_violations=tuple(residency_violations),
@@ -556,13 +585,21 @@ def _analyze_resources(
         num_output_tiles=num_output_tiles,
         thread_smem_cta_limit=thread_smem_cta_limit,
         waves=waves,
+        register_budget_per_thread=register_budget_per_thread,
     )
 
 
 def analyze_candidate(
     problem: TuningProblem,
     candidate: ScheduleCandidate,
+    register_demand: int | None = None,
 ) -> CandidateAnalysis:
+    """Analyze a candidate against the problem.
+
+    ``register_demand`` is an optional per-thread register requirement measured
+    by the calling policy for this construction; when provided, a candidate
+    whose launch-bounds budget falls below it is flagged register_pressured.
+    """
     geometry = _analyze_geometry(
         problem.layer_config,
         candidate.block_shape,
@@ -589,6 +626,11 @@ def analyze_candidate(
         num_output_tiles=resources.num_output_tiles,
         thread_smem_cta_limit=resources.thread_smem_cta_limit,
         waves=resources.waves,
+        register_budget_per_thread=resources.register_budget_per_thread,
+        register_pressured=(
+            register_demand is not None
+            and 0 < resources.register_budget_per_thread < register_demand
+        ),
     )
 
 

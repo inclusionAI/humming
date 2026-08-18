@@ -5,6 +5,12 @@ import numpy as np
 from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.tune.base import DeviceHeuristics
+from humming.tune.candidate import TuningProblem
+from humming.tune.sm90_h20_families import (
+    fused_e8m0_moe_in_scope,
+    make_h20_device_profile,
+    select_fused_e8m0_moe,
+)
 from humming.utils.smem import estimate_smem_size_layer
 
 
@@ -301,6 +307,36 @@ class Sm90H20Heuristics(DeviceHeuristics):
 
     @classmethod
     def get_config(
+        cls,
+        layer_config: LayerConfig,
+        shape_m: int,
+        use_f16_accum: bool = False,
+        use_batch_invariant: bool = False,
+        gemm_type: GemmType = GemmType.DENSE,
+    ):
+        if fused_e8m0_moe_in_scope(
+            layer_config, shape_m, gemm_type, use_batch_invariant
+        ):
+            problem = TuningProblem(
+                layer_config=layer_config,
+                shape_m=shape_m,
+                gemm_type=gemm_type,
+                device=make_h20_device_profile(cls.get_num_sms()),
+                use_f16_accum=use_f16_accum,
+                use_batch_invariant=use_batch_invariant,
+            )
+            return select_fused_e8m0_moe(problem).to_config()
+
+        return cls._get_config_legacy(
+            layer_config,
+            shape_m,
+            use_f16_accum=use_f16_accum,
+            use_batch_invariant=use_batch_invariant,
+            gemm_type=gemm_type,
+        )
+
+    @classmethod
+    def _get_config_legacy(
         cls,
         layer_config: LayerConfig,
         shape_m: int,
