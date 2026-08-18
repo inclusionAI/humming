@@ -135,6 +135,27 @@ def _load_valid_payload(
     return payload
 
 
+def load_table_with_meta(
+    meta: "LayerConfig",
+    gemm_type: "GemmType",
+    flags: dict,
+    fingerprint: dict,
+    cache_dir: str | None = None,
+) -> tuple[list, str] | None:
+    """Like load_table, but also returns the table's creation timestamp."""
+    payload = _load_valid_payload(meta, gemm_type, flags, fingerprint, cache_dir)
+    if payload is None:
+        return None
+
+    try:
+        table = _restore_table(payload["table"])
+    except (KeyError, TypeError, IndexError, ValueError, OverflowError):
+        filename = _make_cache_filename(meta, gemm_type, flags, cache_dir)
+        _LOGGER.debug("tune cache table restore failed: %s", filename)
+        return None
+    return table, str(payload.get("_created_at", ""))
+
+
 def load_table(
     meta: "LayerConfig",
     gemm_type: "GemmType",
@@ -143,16 +164,8 @@ def load_table(
     cache_dir: str | None = None,
 ) -> list | None:
     """Return a cache table only when metadata and fingerprint match exactly."""
-    payload = _load_valid_payload(meta, gemm_type, flags, fingerprint, cache_dir)
-    if payload is None:
-        return None
-
-    try:
-        return _restore_table(payload["table"])
-    except (KeyError, TypeError, IndexError, ValueError, OverflowError):
-        filename = _make_cache_filename(meta, gemm_type, flags, cache_dir)
-        _LOGGER.debug("tune cache table restore failed: %s", filename)
-        return None
+    loaded = load_table_with_meta(meta, gemm_type, flags, fingerprint, cache_dir)
+    return None if loaded is None else loaded[0]
 
 
 def load_saved_shape_m_list(

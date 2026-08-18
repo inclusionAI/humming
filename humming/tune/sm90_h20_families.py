@@ -80,9 +80,10 @@ def fused_e8m0_moe_in_scope(
 ) -> bool:
     """Scope of the migrated family; everything else stays on the legacy path.
 
-    Long-K fused-E8M0 MoE with block_m >= 48: the block_m gate keeps the
-    small-tile paths (long-K residency tuning, num_warps<=8 reshaping) on the
-    legacy heuristic until they are migrated with their own parity coverage.
+    Long-K fused-E8M0 8-bit MoE, all tile sizes: large tiles select a CTA
+    residency count, small tiles (block_m <= 32) additionally weigh the
+    wide-tile and pipeline-residency alternatives of the legacy long-K
+    residency tuner.
     """
     if use_batch_invariant:
         return False
@@ -103,8 +104,6 @@ def fused_e8m0_moe_in_scope(
         return False
     block_m, block_n, warp_n = _tile_shape(layer_config, shape_m)
     if warp_n < 16:
-        return False
-    if block_m < 48:
         return False
     return True
 
@@ -156,6 +155,22 @@ def _base_schedule(
         warp_k = 512 // layer_config.a_dtype.num_bits
         block_k = warp_k * 2
 
+    if num_warps <= 8 and block_m <= 32:
+        num_warps_k = block_k // warp_k
+        warp_k = 512 // layer_config.a_dtype.num_bits
+        block_k = warp_k * num_warps_k * 2
+
+    if warp_k == block_k and warp_k == 512 // layer_config.a_dtype.num_bits:
+        smem_size = estimate_smem_size_layer(
+            layer_config,
+            (block_m, block_n, block_k * 2),
+            problem.gemm_type,
+            3,
+        )
+        if smem_size * grid_ctas < _H20_MAX_SMEM_SIZE:
+            block_k *= 2
+            warp_k *= 2
+
     num_stages = 3
     for num_stages_new in (4,):
         smem_size = estimate_smem_size_layer(
@@ -197,8 +212,208 @@ def _register_preference_applies(problem: TuningProblem) -> bool:
     )
 
 
+def _select_small_tile(
+    problem: TuningProblem,
+    base_config: dict,
+    grid_ctas: int,
+) -> TuningDecision:
+    """Replicates the legacy long-K MoE residency tuner as a candidate choice:
+    wide-tile rewrite vs pipeline-residency retune vs the grid-fill schedule."""
+    layer_config = problem.layer_config
+    shape_m = problem.shape_m
+    num_sms_physical = problem.device.num_sms
+    block_m, block_n, block_k = base_config["block_shape"]
+    warp_shape = base_config["warp_shape"]
+    accum_bits = 16 if base_config["use_f16_accum"] else 32
+
+    base_ctas = grid_ctas
+    if _register_preference_applies(problem):
+        base_ctas = min(base_ctas, 2)
+
+    num_experts = layer_config.num_experts
+    if shape_m < num_experts:
+        estimated_m_blocks = shape_m
+    else:
+        estimated_m_blocks = num_experts * math.ceil(
+            shape_m / num_experts / block_m
+        )
+
+    shape_n = layer_config.shape_n
+    if shape_n >= 1024 and shape_n % 512 == 0:
+        wide_block_n = 512
+    elif shape_n >= 512 and shape_n % 256 == 0:
+        wide_block_n = 256
+    else:
+        wide_block_n = 0
+    wide_block_k = 64
+    wide_num_stages = 3
+    wide_output_tiles = (
+        estimated_m_blocks * (shape_n // wide_block_n) if wide_block_n else 0
+    )
+    expert_tile_fill = shape_m / (estimated_m_blocks * block_m)
+    has_wide_grid = wide_output_tiles >= 2 * num_sms_physical
+    underfilled_expert_tiles = expert_tile_fill < 0.5 or (
+        expert_tile_fill <= 0.5
+        and (has_wide_grid or layer_config.b_dtype.num_bits < 4)
+    )
+    wide_k_tiles = layer_config.shape_k // wide_block_k
+    stream_k_grid_gain = min(16, max(4, wide_k_tiles // (2 * wide_num_stages)))
+    stream_k_can_fill_grid = (
+        layer_config.b_dtype.num_bits <= 4
+        and wide_output_tiles * stream_k_grid_gain >= 3 * num_sms_physical
+        and wide_k_tiles >= 64
+    )
+    has_wide_tile = wide_block_n > 0 and block_m * wide_block_n <= 8 * 1024
+    wide_aligned = (
+        wide_block_n > 0
+        and shape_n % wide_block_n == 0
+        and layer_config.shape_k % wide_block_k == 0
+    )
+    use_wide_moe_tile = (
+        has_wide_tile
+        and wide_aligned
+        and underfilled_expert_tiles
+        and (has_wide_grid or stream_k_can_fill_grid)
+    )
+
+    candidates: list[ScheduleCandidate] = []
+    wide_candidate = None
+    if wide_block_n:
+        wide_block_shape = (block_m, wide_block_n, wide_block_k)
+        wide_warp_shape = (block_m, 64, wide_block_k)
+        wide_smem = estimate_smem_size_layer(
+            layer_config,
+            wide_block_shape,
+            problem.gemm_type,
+            wide_num_stages,
+            warp_shape=wide_warp_shape,
+            mma_accum_bits=accum_bits,
+        )
+        wide_threads = (
+            math.prod(wide_block_shape) // math.prod(wide_warp_shape) * 32
+        )
+        wide_ctas = min(
+            3, _H20_MAX_SMEM_SIZE // wide_smem, 1024 // wide_threads
+        )
+        if wide_ctas >= 1:
+            wide_candidate = ScheduleCandidate.from_config(
+                "small_tile_wide",
+                {
+                    **base_config,
+                    "block_shape": wide_block_shape,
+                    "warp_shape": wide_warp_shape,
+                    "num_stages": wide_num_stages,
+                    "num_ctas_per_sm": wide_ctas,
+                    "num_sms": num_sms_physical,
+                },
+            )
+            candidates.append(wide_candidate)
+
+    smem_size = estimate_smem_size_layer(
+        layer_config,
+        base_config["block_shape"],
+        problem.gemm_type,
+        4,
+        warp_shape=warp_shape,
+        mma_accum_bits=accum_bits,
+    )
+    num_threads = (
+        math.prod(base_config["block_shape"]) // math.prod(warp_shape) * 32
+    )
+    res_ctas = min(3, _H20_MAX_SMEM_SIZE // smem_size, 1024 // num_threads)
+    num_output_tiles = estimated_m_blocks * (shape_n // block_n)
+    if num_output_tiles < num_sms_physical:
+        res_ctas = min(res_ctas, 2)
+    residency_candidate = None
+    if res_ctas >= 1:
+        k_tiles = layer_config.shape_k // block_k
+        useful_ctas = num_output_tiles * math.ceil(k_tiles / 4)
+        res_sms = max(
+            1, min(num_sms_physical, math.ceil(useful_ctas / res_ctas))
+        )
+        residency_candidate = ScheduleCandidate.from_config(
+            "small_tile_residency",
+            {
+                **base_config,
+                "num_stages": 4,
+                "num_ctas_per_sm": res_ctas,
+                "num_sms": res_sms,
+            },
+        )
+        candidates.append(residency_candidate)
+
+    grid_fill_candidate = ScheduleCandidate.from_config(
+        "small_tile_grid_fill",
+        {**base_config, "num_ctas_per_sm": base_ctas},
+    )
+    candidates.append(grid_fill_candidate)
+
+    register_demand = (
+        _GROUPED_INPUT_SCALE_REGISTER_DEMAND
+        if (layer_config.input_scale_group_size or 0) > 0
+        else None
+    )
+    analyses = tuple(
+        analyze_candidate(problem, candidate, register_demand=register_demand)
+        for candidate in candidates
+    )
+    analysis_by_id = {
+        analysis.candidate.candidate_id: analysis for analysis in analyses
+    }
+
+    def _legal(candidate: ScheduleCandidate | None) -> bool:
+        return (
+            candidate is not None
+            and analysis_by_id[candidate.candidate_id].legal
+        )
+
+    arms = (
+        (
+            wide_candidate if use_wide_moe_tile else None,
+            "wide-tile preference: underfilled expert tiles with enough wide "
+            "output parallelism; a wider N tile amortizes the long-K pipeline",
+        ),
+        (
+            residency_candidate,
+            "residency preference: trade excess pipeline storage for more "
+            "resident CTAs on the long-K small-tile schedule",
+        ),
+        (
+            grid_fill_candidate,
+            "grid-fill fallback: neither the wide-tile nor the residency "
+            "alternative fits the resource limits",
+        ),
+    )
+    selected = None
+    reason = ""
+    for candidate, arm_reason in arms:
+        if _legal(candidate):
+            selected = candidate
+            reason = arm_reason
+            break
+    if selected is None:
+        rejected = {
+            analysis.candidate.candidate_id: analysis.rejection_reasons
+            for analysis in analyses
+        }
+        raise AssertionError(
+            f"no legal small-tile fused-E8M0 MoE schedule: {rejected}"
+        )
+
+    return TuningDecision(
+        problem=problem,
+        family="fused_e8m0_moe_small_tile",
+        selected=selected,
+        considered=analyses,
+        reason=reason,
+    )
+
+
 def select_fused_e8m0_moe(problem: TuningProblem) -> TuningDecision:
     base_config, grid_ctas = _base_schedule(problem)
+
+    if base_config["block_shape"][0] <= 32:
+        return _select_small_tile(problem, base_config, grid_ctas)
 
     register_demand = (
         _GROUPED_INPUT_SCALE_REGISTER_DEMAND

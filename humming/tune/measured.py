@@ -409,10 +409,18 @@ def _run_search(
                 use_f16_accum,
                 use_m_major_input_scale,
             )
+            shape_m_candidates = search_space.filter_with_analysis(
+                meta,
+                gemm_type,
+                fingerprint["num_sms"],
+                shape_m,
+                candidates,
+                use_batch_invariant=use_batch_invariant,
+            )
             timings = measurer.measure(
                 measure.MeasureRequest(
                     shape_m=shape_m,
-                    configs=candidates,
+                    configs=shape_m_candidates,
                     baseline_config=baseline,
                 )
             )

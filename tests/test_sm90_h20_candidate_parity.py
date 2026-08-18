@@ -221,3 +221,19 @@ def test_out_of_contract_k_fails_on_both_paths():
         )
     with pytest.raises(AssertionError, match="no legal fused-E8M0"):
         select_fused_e8m0_moe(_problem(layer, GemmType.INDEXED, 12288, False))
+
+
+def test_small_tile_family_covers_decode_shapes():
+    """block_m <= 32 (decode-sized m per expert) must dispatch through the
+    small-tile selector with the residency alternatives in the audit trail."""
+    layer = _fused_moe_layer(6144, 7168, 48, 128)
+    legacy = Sm90H20Heuristics._get_config_legacy(
+        layer, 96, gemm_type=GemmType.GROUPED_MASKED
+    )
+    decision = select_fused_e8m0_moe(
+        _problem(layer, GemmType.GROUPED_MASKED, 96, False)
+    )
+    assert decision.family == "fused_e8m0_moe_small_tile"
+    assert decision.to_config() == legacy
+    assert len(decision.considered) >= 2
+    assert decision.reason

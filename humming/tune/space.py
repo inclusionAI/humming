@@ -1,3 +1,5 @@
+import logging
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from humming.config import GemmType
@@ -5,6 +7,9 @@ from humming.utils.smem import estimate_smem_size_layer
 
 if TYPE_CHECKING:
     from humming.config import LayerConfig
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 _BLOCK_M_VALUES = (8, 16, 24, 32, 48, 64, 96, 128)
@@ -34,7 +39,9 @@ def _dtype_warp_shape_allowed(a_bits: int, warp_n: int, warp_k: int) -> bool:
     if a_bits == 16:
         return warp_n >= 32 and warp_k >= 32
     if a_bits == 8:
-        return warp_n >= 16 and warp_k >= 64
+        # warp_n=16 no longer compiles for 8-bit activations: the wgmma
+        # mainloop static_asserts warp iterations (warp_n/16) >= 2.
+        return warp_n >= 32 and warp_k >= 64
     if a_bits == 4:
         return warp_n >= 16 and warp_k >= 128
     return False
@@ -133,6 +140,23 @@ class DeviceSearchSpace:
 
     sm_version: int = 0
     max_smem_size: int = 0
+
+    @classmethod
+    def filter_with_analysis(
+        cls,
+        meta: "LayerConfig",
+        gemm_type: GemmType,
+        num_sms: int,
+        shape_m: int,
+        configs: list[dict],
+        use_batch_invariant: bool = False,
+    ) -> list[dict]:
+        """Drop candidates the shared candidate analysis proves illegal.
+
+        m-major input scale is a post-processing flag with no analysis rule,
+        so it is not part of the problem here. The base space has no analysis
+        wired up and returns the list as-is."""
+        return configs
 
     @classmethod
     def enumerate(
@@ -248,6 +272,53 @@ class DeviceSearchSpace:
 class Sm90H20SearchSpace(DeviceSearchSpace):
     sm_version = 90
     max_smem_size = 227 * 1024
+
+    @classmethod
+    def filter_with_analysis(
+        cls,
+        meta: "LayerConfig",
+        gemm_type: GemmType,
+        num_sms: int,
+        shape_m: int,
+        configs: list[dict],
+        use_batch_invariant: bool = False,
+    ) -> list[dict]:
+        from humming.tune.candidate import (
+            ScheduleCandidate,
+            TuningProblem,
+            analyze_candidate,
+        )
+        from humming.tune.sm90_h20_families import make_h20_device_profile
+
+        device = make_h20_device_profile(num_sms)
+        kept = []
+        rejected: Counter = Counter()
+        for config in configs:
+            problem = TuningProblem(
+                layer_config=meta,
+                shape_m=shape_m,
+                gemm_type=gemm_type,
+                device=device,
+                use_f16_accum=bool(config.get("use_f16_accum")),
+                use_batch_invariant=use_batch_invariant,
+            )
+            analysis = analyze_candidate(
+                problem, ScheduleCandidate.from_config("tune", config)
+            )
+            if analysis.legal:
+                kept.append(config)
+            else:
+                for reason in analysis.rejection_reasons:
+                    rejected[reason] += 1
+        if rejected:
+            _LOGGER.info(
+                "candidate analysis rejected %d/%d configs at shape_m=%s: %s",
+                len(configs) - len(kept),
+                len(configs),
+                shape_m,
+                dict(rejected.most_common(5)),
+            )
+        return kept
 
 
 search_space_map: dict[int, type[DeviceSearchSpace]] = {90: Sm90H20SearchSpace}

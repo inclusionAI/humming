@@ -179,8 +179,8 @@ def test_golden_counts():
     )
 
     # Update these golden counts when the search space intentionally changes.
-    assert len(dense_candidates) == 3548
-    assert len(masked_candidates) == 808
+    assert len(dense_candidates) == 1950
+    assert len(masked_candidates) == 451
 
 
 def test_get_search_space():
@@ -188,3 +188,50 @@ def test_get_search_space():
 
     with pytest.raises(NotImplementedError, match="register a new DeviceSearchSpace"):
         get_search_space(80, "NVIDIA A100")
+
+
+def test_filter_with_analysis_drops_illegal_configs():
+    meta = _w2_meta()
+    good = _base_config((64, 128, 128), (64, 32, 64))
+    bad_stage2 = dict(_base_config((64, 128, 128), (64, 32, 64)), num_stages=2)
+
+    kept = Sm90H20SearchSpace.filter_with_analysis(
+        meta, GemmType.DENSE, H20_NUM_SMS, 64, [good, bad_stage2]
+    )
+
+    assert kept == [good]  # WGMMA requires at least three stages
+
+
+def test_filter_with_analysis_base_class_passes_through():
+    from humming.tune.space import DeviceSearchSpace
+
+    configs = [{"num_stages": 2}]
+    assert (
+        DeviceSearchSpace.filter_with_analysis(
+            _w2_meta(), GemmType.DENSE, H20_NUM_SMS, 64, configs
+        )
+        == configs
+    )
+
+
+def test_filter_with_analysis_drops_bad_warp_tile_ratio():
+    """WGMMA needs block_n to hold a multiple of four warp tiles."""
+    meta = _w2_meta()
+    two_warp_tiles = _base_config((64, 128, 128), (64, 64, 64))
+
+    kept = Sm90H20SearchSpace.filter_with_analysis(
+        meta, GemmType.DENSE, H20_NUM_SMS, 64, [two_warp_tiles]
+    )
+
+    assert kept == []
+
+
+def test_filter_with_analysis_all_rejected_returns_empty():
+    meta = _w2_meta()
+    bad = dict(_base_config((64, 128, 128), (64, 32, 64)), num_stages=2)
+    assert (
+        Sm90H20SearchSpace.filter_with_analysis(
+            meta, GemmType.DENSE, H20_NUM_SMS, 64, [bad, dict(bad)]
+        )
+        == []
+    )

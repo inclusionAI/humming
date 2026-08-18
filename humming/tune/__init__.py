@@ -171,3 +171,82 @@ def get_tuning_config(
         use_m_major_input_scale,
         gemm_type,
     )
+
+
+def explain_tuning_config(
+    layer_config: LayerConfig | dict,
+    shape_m: int,
+    *,
+    use_f16_accum: bool = False,
+    use_batch_invariant: bool = False,
+    use_m_major_input_scale: bool = False,
+    gemm_type: str | GemmType = "dense",
+):
+    """Audit-trail counterpart of get_tuning_config.
+
+    Returns the TuningDecision behind the config the runtime would use: the
+    measured tune-cache winner when a valid table covers shape_m, the
+    candidate-family decision when the shape is in a migrated family's scope,
+    and None on paths still served by the legacy heuristic.
+    """
+    from humming.tune import cache
+    from humming.tune.candidate import (
+        ScheduleCandidate,
+        TuningDecision,
+        TuningProblem,
+        analyze_candidate,
+    )
+    from humming.tune.sm90_h20_families import (
+        fused_e8m0_moe_in_scope,
+        make_h20_device_profile,
+        select_fused_e8m0_moe,
+    )
+
+    if isinstance(gemm_type, str):
+        gemm_type = GemmType(gemm_type)
+    if isinstance(layer_config, dict):
+        layer_config = LayerConfig(**layer_config)
+
+    if get_heuristics_class() is not Sm90H20Heuristics:
+        return None
+
+    problem = TuningProblem(
+        layer_config=layer_config,
+        shape_m=shape_m,
+        gemm_type=gemm_type,
+        device=make_h20_device_profile(Sm90H20Heuristics.get_num_sms()),
+        use_f16_accum=use_f16_accum,
+        use_batch_invariant=use_batch_invariant,
+    )
+
+    flags = {
+        "use_f16_accum": use_f16_accum,
+        "use_batch_invariant": use_batch_invariant,
+        "use_m_major_input_scale": use_m_major_input_scale,
+    }
+    loaded = cache.load_table_with_meta(
+        layer_config, gemm_type, flags, cache.current_fingerprint()
+    )
+    if loaded is not None:
+        table, created_at = loaded
+        for min_shape_m, max_shape_m, config in table:
+            if min_shape_m < shape_m <= max_shape_m:
+                candidate = ScheduleCandidate.from_config("measured", config)
+                key = cache.make_cache_key(layer_config, gemm_type, flags)
+                return TuningDecision(
+                    problem=problem,
+                    family="measured",
+                    selected=candidate,
+                    considered=(analyze_candidate(problem, candidate),),
+                    reason=(
+                        f"measured winner from tune cache {key} "
+                        f"(created {created_at}) for shape_m bucket "
+                        f"({min_shape_m}, {max_shape_m}]"
+                    ),
+                )
+
+    if fused_e8m0_moe_in_scope(
+        layer_config, shape_m, gemm_type, use_batch_invariant
+    ):
+        return select_fused_e8m0_moe(problem)
+    return None

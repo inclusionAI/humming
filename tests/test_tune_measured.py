@@ -199,7 +199,11 @@ def _run_with_fake_measurer(monkeypatch, initial_timings, reverify_results):
         lambda sm_version, gpu_name: SimpleNamespace(
             enumerate=lambda meta, gemm_type, num_sms, fast: [
                 timing.config for timing in initial_timings
-            ]
+            ],
+            filter_with_analysis=(
+                lambda meta, gemm_type, num_sms, shape_m, configs,
+                use_batch_invariant=False: configs
+            ),
         ),
     )
     monkeypatch.setattr(measured, "_make_layer_args", lambda *args: {})
@@ -372,7 +376,11 @@ def _run_with_bucket_verification(
         lambda sm_version, gpu_name: SimpleNamespace(
             enumerate=lambda meta, gemm_type, num_sms, fast: [
                 {"name": name} for name in candidate_names
-            ]
+            ],
+            filter_with_analysis=(
+                lambda meta, gemm_type, num_sms, shape_m, configs,
+                use_batch_invariant=False: configs
+            ),
         ),
     )
     monkeypatch.setattr(measured, "_make_layer_args", lambda *args: {})
