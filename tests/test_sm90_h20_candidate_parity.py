@@ -237,3 +237,118 @@ def test_small_tile_family_covers_decode_shapes():
     assert decision.to_config() == legacy
     assert len(decision.considered) >= 2
     assert decision.reason
+
+
+def _fused_dense_layer(shape_n, shape_k, input_scale_group_size):
+    return LayerConfig(
+        shape_n=shape_n,
+        shape_k=shape_k,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        c_dtype=dtypes.bfloat16,
+        bs_dtype=dtypes.float8e8m0,
+        input_scale_group_size=input_scale_group_size,
+        weight_scale_group_size=32,
+        weight_scale_type="group",
+        mma_type=MmaType.WGMMA,
+    )
+
+
+_DENSE_SHAPES = (
+    (6144, 7168),
+    (4096, 4096),
+    (1536, 2048),
+    (896, 1024),  # short K: no stream-K, deep-pipeline arm reachable
+    (1344, 3072),  # 1344 % 128 != 0: block_n fit loop
+    (4096, 512),  # short K, wide N
+)
+_DENSE_M_VALUES = (8, 16, 24, 48, 64, 96, 128, 256, 1024, 4096, 12288, 49152)
+
+
+def test_dense_family_matches_legacy_across_grid():
+    from humming.tune.sm90_h20_families import (
+        fused_e8m0_dense_in_scope,
+        select_fused_e8m0_dense,
+    )
+
+    covered = 0
+    arms = set()
+    for (shape_n, shape_k), isg, shape_m, f16 in itertools.product(
+        _DENSE_SHAPES, (0, 128), _DENSE_M_VALUES, (False, True)
+    ):
+        layer = _fused_dense_layer(shape_n, shape_k, isg)
+        legacy = Sm90H20Heuristics._get_config_legacy(
+            layer, shape_m, use_f16_accum=f16, gemm_type=GemmType.DENSE
+        )
+        dispatched = Sm90H20Heuristics.get_config(
+            layer, shape_m, use_f16_accum=f16, gemm_type=GemmType.DENSE
+        )
+        if not fused_e8m0_dense_in_scope(layer, shape_m, GemmType.DENSE, False):
+            assert dispatched == legacy
+            continue
+        covered += 1
+        decision = select_fused_e8m0_dense(
+            _problem(layer, GemmType.DENSE, shape_m, f16)
+        )
+        arms.add(decision.selected.candidate_id)
+        assert decision.to_config() == legacy, (
+            f"dense family diverges for n={shape_n} k={shape_k} isg={isg} "
+            f"m={shape_m} f16={f16}:\n"
+            f"family: {decision.to_config()}\nlegacy: {legacy}"
+        )
+        assert dispatched == decision.to_config()
+    assert covered >= 100
+    # the grid must exercise all three selection arms
+    assert arms == {"dense_plain", "dense_tma_warp_spec", "dense_deep_pipeline"}
+
+
+def test_dense_scope_negative_boundaries():
+    """Constructions the dense family must NOT take (each makes a legacy-only
+    branch reachable or the problem illegal); dispatch must equal legacy."""
+    from humming.tune.sm90_h20_families import fused_e8m0_dense_in_scope
+
+    def _layer(**overrides):
+        fields = dict(
+            shape_n=6144,
+            shape_k=7168,
+            a_dtype=dtypes.float8e4m3,
+            b_dtype=dtypes.float4e2m1,
+            c_dtype=dtypes.bfloat16,
+            bs_dtype=dtypes.float8e8m0,
+            input_scale_group_size=128,
+            weight_scale_group_size=32,
+            weight_scale_type="group",
+            mma_type=MmaType.WGMMA,
+        )
+        fields.update(overrides)
+        return LayerConfig(**fields)
+
+    out_of_scope = (
+        # integer B <= 4 bits: _get_small_m_dense_override becomes reachable
+        _layer(b_dtype=dtypes.int4),
+        # integer activation: legacy int8 block_m alignment special cases
+        _layer(a_dtype=dtypes.int8, bs_dtype=dtypes.bfloat16),
+        # (packed-K is rejected by LayerConfig itself for fused-E8M0, so the
+        # scope check for it cannot be exercised with a real layer)
+        # grouped input scale does not divide shape_k
+        _layer(shape_k=1088),
+    )
+    for layer in out_of_scope:
+        assert not fused_e8m0_dense_in_scope(layer, 64, GemmType.DENSE, False), (
+            layer
+        )
+        legacy = Sm90H20Heuristics._get_config_legacy(
+            layer, 64, gemm_type=GemmType.DENSE
+        )
+        assert (
+            Sm90H20Heuristics.get_config(layer, 64, gemm_type=GemmType.DENSE)
+            == legacy
+        )
+
+    # fitted warp_n < 16 is outside the legacy contract too (its warp_n
+    # assert trips); the family must not claim it, and dispatch fails the
+    # same way legacy does.
+    tiny_n = _layer(shape_n=32)
+    assert not fused_e8m0_dense_in_scope(tiny_n, 64, GemmType.DENSE, False)
+    with pytest.raises(AssertionError):
+        Sm90H20Heuristics.get_config(tiny_n, 64, gemm_type=GemmType.DENSE)

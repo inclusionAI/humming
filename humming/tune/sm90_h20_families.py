@@ -118,6 +118,72 @@ def _grid_fill_ctas(
     return num_ctas_per_sm
 
 
+def _dense_block_shape_m(shape_m: int, base_block_m: int) -> int:
+    if shape_m <= base_block_m:
+        return math.ceil(shape_m / 8) * 8
+    blocks = [
+        math.ceil(shape_m / ((i + 1) * 8)) for i in range(base_block_m // 8)
+    ]
+    return min(range(len(blocks)), key=blocks.__getitem__) * 8 + 8
+
+
+def _fit_dense_block_m_to_output_grid(
+    layer_config: LayerConfig,
+    shape_m: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    num_sms: int,
+) -> int:
+    num_n_tiles = layer_config.shape_n // block_n
+    current_m_tiles = math.ceil(shape_m / block_m)
+
+    stream_k_grid_gain = 1.0
+    current_output_tiles = current_m_tiles * num_n_tiles
+    if layer_config.shape_k <= 1024:
+        if current_output_tiles >= math.ceil(num_sms * 0.5):
+            return block_m
+    else:
+        if current_output_tiles >= math.ceil(num_sms * 0.2):
+            return block_m
+        stream_k_grid_gain = min(4.5, layer_config.shape_k / (12 * block_k))
+    target_wave_fraction = 0.8
+    if layer_config.shape_k > 1024:
+        target_wave_fraction = max(0.5, 1 - layer_config.shape_k / (8 * 1024))
+    target_output_tiles = math.ceil(
+        num_sms * target_wave_fraction / stream_k_grid_gain
+    )
+    if current_output_tiles >= target_output_tiles:
+        return block_m
+
+    current_padded_rows = current_m_tiles * block_m
+    candidates = []
+    padding_safe_candidates = []
+    min_stream_k_block_m = (
+        16 if layer_config.shape_k > 1024 and block_m >= 32 else 8
+    )
+    for candidate_m in range(8, block_m, 8):
+        candidate_m_tiles = math.ceil(shape_m / candidate_m)
+        padded_rows = candidate_m_tiles * candidate_m
+        if padded_rows > current_padded_rows * 1.05:
+            continue
+        padding_safe_candidates.append(candidate_m)
+        if candidate_m_tiles * num_n_tiles < target_output_tiles:
+            continue
+        if candidate_m < min_stream_k_block_m:
+            continue
+        candidates.append(candidate_m)
+    if candidates:
+        return max(candidates)
+    if layer_config.shape_k <= 1024 and padding_safe_candidates:
+        return min(padding_safe_candidates)
+    if layer_config.shape_k > 1024 and block_m >= 32:
+        reuse_candidates = [c for c in padding_safe_candidates if c >= 16]
+        if reuse_candidates:
+            return max(reuse_candidates)
+    return block_m
+
+
 def _base_schedule(
     problem: TuningProblem,
 ) -> tuple[dict, int]:
@@ -202,6 +268,226 @@ def _base_schedule(
         "num_stages": num_stages,
     }
     return config, grid_ctas
+
+
+def fused_e8m0_dense_in_scope(
+    layer_config: LayerConfig,
+    shape_m: int,
+    gemm_type: GemmType,
+    use_batch_invariant: bool,
+) -> bool:
+    """Fused-E8M0 8-bit dense GEMMs; the small-M dense override is
+    unreachable here (it requires an integer B dtype), so the candidate set
+    is the plain schedule plus the TMA and deep-pipeline alternatives."""
+    if use_batch_invariant:
+        return False
+    if gemm_type != GemmType.DENSE:
+        return False
+    if layer_config.a_dtype.num_bits != 8 or layer_config.a_dtype.is_integer_type:
+        return False
+    if not layer_config.use_fused_e8m0_scale:
+        return False
+    if layer_config.num_experts:
+        return False
+    if layer_config.b_dtype.is_integer_type and layer_config.b_dtype.num_bits <= 4:
+        return False
+    input_scale_group_size = layer_config.input_scale_group_size or 0
+    if input_scale_group_size and layer_config.shape_k % input_scale_group_size:
+        return False
+    if layer_config.use_packed_k_layout:
+        return False
+    block_n, warp_n = _fit_block_n(layer_config.shape_n, 128, 32)
+    if warp_n < 16:
+        return False
+    return True
+
+
+def _dense_base_schedule(problem: TuningProblem) -> tuple[dict, int, int]:
+    """Replicate the legacy dense transform chain for the in-scope
+    construction; returns (config without num_stages/tma keys, cta count,
+    the pre-reshape warp count the TMA arm keys on)."""
+    layer_config = problem.layer_config
+    shape_m = problem.shape_m
+    num_sms_physical = problem.device.num_sms
+
+    block_n, warp_n = _fit_block_n(layer_config.shape_n, 128, 32)
+    block_m = _dense_block_shape_m(shape_m, 128)
+    block_k = 1024 // layer_config.a_dtype.num_bits
+    warp_k = block_k
+
+    num_blocks_n = layer_config.shape_n // block_n
+    num_blocks_m = math.ceil(shape_m / block_m)
+    num_ctas_per_sm = _grid_fill_ctas(
+        num_blocks_n * num_blocks_m, num_sms_physical, 2
+    )
+
+    num_warps = (block_n // warp_n) * (block_k // warp_k) * num_ctas_per_sm
+    if num_warps == 4:
+        warp_k = 512 // layer_config.a_dtype.num_bits
+        block_k = warp_k * 2
+
+    if num_warps <= 8 and block_m <= 32:
+        num_warps_k = block_k // warp_k
+        warp_k = 512 // layer_config.a_dtype.num_bits
+        block_k = warp_k * num_warps_k * 2
+
+    if warp_k == block_k and warp_k == 512 // layer_config.a_dtype.num_bits:
+        smem_size = estimate_smem_size_layer(
+            layer_config,
+            (block_m, block_n, block_k * 2),
+            problem.gemm_type,
+            3,
+        )
+        if smem_size * num_ctas_per_sm < _H20_MAX_SMEM_SIZE:
+            block_k *= 2
+            warp_k *= 2
+
+    num_stages = 3
+    for num_stages_new in (4,):
+        smem_size = estimate_smem_size_layer(
+            layer_config,
+            (block_m, block_n, block_k),
+            problem.gemm_type,
+            num_stages_new,
+        )
+        if smem_size * num_ctas_per_sm < _H20_MAX_SMEM_SIZE:
+            num_stages = num_stages_new
+
+    block_m = _fit_dense_block_m_to_output_grid(
+        layer_config, shape_m, block_m, block_n, block_k, num_sms_physical
+    )
+    num_blocks_m = math.ceil(shape_m / block_m)
+
+    num_sms = num_sms_physical
+    if num_ctas_per_sm == 1:
+        factor = min(4.5, layer_config.shape_k / (3 * block_k))
+        if layer_config.shape_k > 1024:
+            factor = min(9, max(factor, layer_config.shape_k / (8 * block_k)))
+        num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
+
+    while layer_config.shape_k % block_k != 0:
+        warp_k = 512 // layer_config.a_dtype.num_bits
+        block_k //= 2
+
+    if _register_preference_applies(problem):
+        num_ctas_per_sm = min(num_ctas_per_sm, 2)
+
+    config = {
+        "block_shape": (block_m, block_n, block_k),
+        "warp_shape": (block_m, warp_n, warp_k),
+        "use_stream_k": layer_config.shape_k > 1024,
+        "use_f16_accum": problem.use_f16_accum,
+        "num_sms": num_sms,
+        "num_stages": num_stages,
+        "num_ctas_per_sm": num_ctas_per_sm,
+    }
+    return config, num_ctas_per_sm, num_warps
+
+
+def select_fused_e8m0_dense(problem: TuningProblem) -> TuningDecision:
+    base_config, num_ctas_per_sm, num_warps = _dense_base_schedule(problem)
+    layer_config = problem.layer_config
+    block_m, block_n, block_k = base_config["block_shape"]
+
+    candidates: list[ScheduleCandidate] = []
+    tma_candidate = None
+    use_dense_tma = (
+        block_m >= 48
+        and num_ctas_per_sm <= 2
+        and num_warps <= 8
+        and layer_config.shape_k // block_k >= 24
+    )
+    if use_dense_tma:
+        tma_candidate = ScheduleCandidate.from_config(
+            "dense_tma_warp_spec",
+            {
+                **base_config,
+                "num_stages": 3,
+                "use_tma": True,
+                "use_warp_spec": True,
+                "use_mbarrier": True,
+            },
+        )
+        candidates.append(tma_candidate)
+
+    deep_candidate = None
+    if base_config["num_stages"] == 4 and block_m <= 32:
+        smem_size = estimate_smem_size_layer(
+            layer_config,
+            base_config["block_shape"],
+            problem.gemm_type,
+            5,
+        )
+        if (
+            smem_size * num_ctas_per_sm < _H20_MAX_SMEM_SIZE
+            and not base_config["use_stream_k"]
+        ):
+            deep_candidate = ScheduleCandidate.from_config(
+                "dense_deep_pipeline",
+                {**base_config, "num_stages": 5},
+            )
+            candidates.append(deep_candidate)
+
+    plain_candidate = ScheduleCandidate.from_config("dense_plain", base_config)
+    candidates.append(plain_candidate)
+
+    register_demand = (
+        _GROUPED_INPUT_SCALE_REGISTER_DEMAND
+        if (layer_config.input_scale_group_size or 0) > 0
+        else None
+    )
+    analyses = tuple(
+        analyze_candidate(problem, candidate, register_demand=register_demand)
+        for candidate in candidates
+    )
+    analysis_by_id = {
+        analysis.candidate.candidate_id: analysis for analysis in analyses
+    }
+
+    def _legal(candidate: ScheduleCandidate | None) -> bool:
+        return (
+            candidate is not None
+            and analysis_by_id[candidate.candidate_id].legal
+        )
+
+    arms = (
+        (
+            tma_candidate,
+            "TMA warp-spec preference: a large tile with few warps and a "
+            "deep K loop keeps the TMA pipeline fed at three stages",
+        ),
+        (
+            deep_candidate,
+            "deep-pipeline preference: a small non-stream-K tile with smem "
+            "headroom takes a fifth stage",
+        ),
+        (
+            plain_candidate,
+            "grid-fill schedule: neither the TMA nor the deep-pipeline "
+            "alternative applies",
+        ),
+    )
+    selected = None
+    reason = ""
+    for candidate, arm_reason in arms:
+        if _legal(candidate):
+            selected = candidate
+            reason = arm_reason
+            break
+    if selected is None:
+        rejected = {
+            analysis.candidate.candidate_id: analysis.rejection_reasons
+            for analysis in analyses
+        }
+        raise AssertionError(f"no legal fused-E8M0 dense schedule: {rejected}")
+
+    return TuningDecision(
+        problem=problem,
+        family="fused_e8m0_dense",
+        selected=selected,
+        considered=analyses,
+        reason=reason,
+    )
 
 
 def _register_preference_applies(problem: TuningProblem) -> bool:

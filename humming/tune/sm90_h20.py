@@ -7,8 +7,10 @@ from humming.config import GemmType, LayerConfig
 from humming.tune.base import DeviceHeuristics
 from humming.tune.candidate import TuningProblem
 from humming.tune.sm90_h20_families import (
+    fused_e8m0_dense_in_scope,
     fused_e8m0_moe_in_scope,
     make_h20_device_profile,
+    select_fused_e8m0_dense,
     select_fused_e8m0_moe,
 )
 from humming.utils.smem import estimate_smem_size_layer
@@ -314,9 +316,13 @@ class Sm90H20Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        if fused_e8m0_moe_in_scope(
+        moe_in_scope = fused_e8m0_moe_in_scope(
             layer_config, shape_m, gemm_type, use_batch_invariant
-        ):
+        )
+        dense_in_scope = fused_e8m0_dense_in_scope(
+            layer_config, shape_m, gemm_type, use_batch_invariant
+        )
+        if moe_in_scope or dense_in_scope:
             problem = TuningProblem(
                 layer_config=layer_config,
                 shape_m=shape_m,
@@ -325,7 +331,9 @@ class Sm90H20Heuristics(DeviceHeuristics):
                 use_f16_accum=use_f16_accum,
                 use_batch_invariant=use_batch_invariant,
             )
-            return select_fused_e8m0_moe(problem).to_config()
+            if moe_in_scope:
+                return select_fused_e8m0_moe(problem).to_config()
+            return select_fused_e8m0_dense(problem).to_config()
 
         return cls._get_config_legacy(
             layer_config,
