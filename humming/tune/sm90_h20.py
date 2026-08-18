@@ -16,6 +16,23 @@ class Sm90H20Heuristics(DeviceHeuristics):
     sm_version: int = 90
 
     @classmethod
+    def _apply_shared_e8m0_overrides(
+        cls,
+        layer_config: LayerConfig,
+        config: dict,
+    ) -> None:
+        """Apply measured large-M schedules for group-friendly shared storage."""
+        if not layer_config.use_shared_e8m0_scale_storage:
+            return
+        block_m = config["block_shape"][0]
+        if block_m < 48:
+            return
+        if layer_config.shape_k > 1024:
+            config["use_stream_k"] = False
+        elif layer_config.shape_k <= 512:
+            config["num_sms"] = max(3072, config["num_sms"])
+
+    @classmethod
     def _get_small_m_dense_override(
         cls,
         layer_config: LayerConfig,
@@ -505,5 +522,8 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config["use_warp_spec"] = False
             config["use_mbarrier"] = False
             config["use_stream_k"] = False
+
+        if not use_batch_invariant:
+            cls._apply_shared_e8m0_overrides(layer_config, config)
 
         return config

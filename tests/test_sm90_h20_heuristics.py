@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from humming import dtypes
@@ -21,6 +23,22 @@ def _layer(shape_n: int, shape_k: int, num_experts: int = 0) -> LayerConfig:
         bs_dtype=dtypes.bfloat16,
         weight_scale_group_size=0,
         mma_type=MmaType.WGMMA,
+    )
+
+
+def _shared_layer(shape_n: int, shape_k: int, num_experts: int) -> LayerConfig:
+    return LayerConfig(
+        shape_n=shape_n,
+        shape_k=shape_k,
+        num_experts=num_experts,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        c_dtype=dtypes.bfloat16,
+        bs_dtype=dtypes.float8e8m0,
+        input_scale_group_size=0,
+        weight_scale_group_size=32,
+        mma_type=MmaType.WGMMA,
+        use_shared_e8m0_scale_storage=True,
     )
 
 
@@ -69,3 +87,45 @@ def test_sparse_long_k_moe_keeps_two_n_tiles_per_expert(shape_n, block_n):
 
     assert config["block_shape"] == (8, block_n, 64)
     assert config["num_stages"] == 3
+
+
+def test_shared_e8m0_large_m_long_k_disables_stream_k():
+    shared = Sm90H20Heuristics.get_config(
+        _shared_layer(768, 3584, num_experts=896),
+        131072,
+        gemm_type=GemmType.INDEXED,
+    )
+    native = Sm90H20Heuristics.get_config(
+        dataclasses.replace(
+            _shared_layer(768, 3584, num_experts=896),
+            use_shared_e8m0_scale_storage=False,
+        ),
+        131072,
+        gemm_type=GemmType.INDEXED,
+    )
+
+    assert shared["block_shape"][0] >= 48
+    assert not shared["use_stream_k"]
+    assert native["use_stream_k"]
+
+
+def test_shared_e8m0_large_m_short_k_uses_larger_grid():
+    shared = Sm90H20Heuristics.get_config(
+        _shared_layer(3584, 384, num_experts=896),
+        131072,
+        gemm_type=GemmType.INDEXED,
+    )
+
+    assert shared["block_shape"][0] >= 48
+    assert shared["num_sms"] >= 3072
+
+
+def test_shared_e8m0_small_m_keeps_existing_schedule():
+    config = Sm90H20Heuristics.get_config(
+        _shared_layer(768, 3584, num_experts=896),
+        2048,
+        gemm_type=GemmType.INDEXED,
+    )
+
+    assert config["block_shape"][0] == 8
+    assert config["use_stream_k"]
