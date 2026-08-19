@@ -85,7 +85,14 @@ def generate_random_weight(
     has_zero_point=False,
     is_fp_zero_point=False,
     allow_negative_scale=True,
+    expert_chunk=8,
 ):
+    """Generates expert weights in chunks so large-E MoE layers (e.g. TP-only
+    E=384) fit in device memory: fp32 intermediates only ever exist for
+    ``expert_chunk`` experts, and the dequantized reference is kept on the
+    host (the golden check moves it to the device on demand). Returns
+    (None, weight_ref_cpu, quanted_weight, weight_scale, zero_point,
+    weight_scale_2); the original fp32 weight is not materialized."""
     e = 1 if num_experts is None else num_experts
     dtype_orig = dtype
     group_size = group_size if group_size > 0 else k
@@ -97,56 +104,85 @@ def generate_random_weight(
     if dtype.is_integer_type and dtype.is_signed:
         dtype = dtypes.IntegerType(is_signed=False, num_bits=dtype.num_bits)
 
-    weight_orig = torch.randn((e, n, k), dtype=torch.float32, device="cuda:0")
-    init_weight_scale = torch.rand((e, n, k // group_size), dtype=torch.float32, device="cuda:0")
-    init_weight_scale = init_weight_scale + 0.01
-    init_weight_bias = torch.randn((e, n, k // group_size), dtype=torch.float32, device="cuda:0")
-
-    weight_orig = weight_orig + init_weight_bias.repeat_interleave(group_size, -1)
-    weight_orig = weight_orig * init_weight_scale.repeat_interleave(group_size, -1)
-    weight_orig = weight_orig / weight_orig.std()
-
-    quanted_weight, weight_scale, zero_point, weight_scale_2 = quantize_weight(
-        weight_orig,
-        dtype=dtype,
-        scale_dtype=scale_dtype,
-        group_size=group_size,
-        group_size_n=group_size_n,
-        has_zero_point=has_zero_point,
-        weight_scale_2_type="tensor" if has_weight_scale_2 else None,
-        is_fp_zero_point=is_fp_zero_point,
-        allow_negative_scale=allow_negative_scale,
-    )
-
-    if dtype.is_integer_type and has_zero_point:
-        assert zero_point is not None
-        weight_ref = quanted_weight.to(zero_point.dtype)
-        weight_ref = weight_ref - zero_point.repeat_interleave(group_size, -1)
-        weight_ref = weight_ref.float()
-    elif dtype.is_integer_type and not has_zero_point:
-        weight_ref = quanted_weight.float() - 2 ** (dtype.num_bits - 1)
-    else:
-        weight_ref = ops.dequant_weight(
-            quanted_weight,
-            exponent_bits=dtype.exponent_bits,
-            mantissa_bits=dtype.mantissa_bits,
-            is_signed=dtype.is_signed,
+    weight_ref = torch.empty((e, n, k), dtype=torch.float32, device="cpu")
+    quanted_chunks = []
+    scale_chunks = []
+    zp_chunks = []
+    ws2_chunks = []
+    for start in range(0, e, expert_chunk):
+        stop = min(e, start + expert_chunk)
+        chunk_e = stop - start
+        weight_orig = torch.randn((chunk_e, n, k), dtype=torch.float32, device="cuda:0")
+        init_weight_scale = torch.rand(
+            (chunk_e, n, k // group_size), dtype=torch.float32, device="cuda:0"
+        )
+        init_weight_scale = init_weight_scale + 0.01
+        init_weight_bias = torch.randn(
+            (chunk_e, n, k // group_size), dtype=torch.float32, device="cuda:0"
         )
 
-    if weight_scale is not None:
-        weight_scale_tmp = weight_scale.float().repeat_interleave(group_size, -1)
-        if group_size_n is not None:
-            weight_scale_tmp = weight_scale_tmp.repeat_interleave(group_size_n, -2)
-        weight_ref = weight_ref * weight_scale_tmp
+        weight_orig = weight_orig + init_weight_bias.repeat_interleave(group_size, -1)
+        weight_orig = weight_orig * init_weight_scale.repeat_interleave(group_size, -1)
+        weight_orig = weight_orig / weight_orig.std()
+        del init_weight_scale, init_weight_bias
 
-    if has_weight_scale_2:
-        weight_ref = weight_ref * weight_scale_2.view(-1, 1, 1)
+        quanted, scale, zero_point, weight_scale_2 = quantize_weight(
+            weight_orig,
+            dtype=dtype,
+            scale_dtype=scale_dtype,
+            group_size=group_size,
+            group_size_n=group_size_n,
+            has_zero_point=has_zero_point,
+            weight_scale_2_type="tensor" if has_weight_scale_2 else None,
+            is_fp_zero_point=is_fp_zero_point,
+            allow_negative_scale=allow_negative_scale,
+        )
+        del weight_orig
 
-    if dtype_orig.is_integer_type and dtype_orig.is_signed:
-        quanted_weight = quanted_weight - 2 ** (dtype.num_bits - 1)
+        if dtype.is_integer_type and has_zero_point:
+            assert zero_point is not None
+            chunk_ref = quanted.to(zero_point.dtype)
+            chunk_ref = chunk_ref - zero_point.repeat_interleave(group_size, -1)
+            chunk_ref = chunk_ref.float()
+        elif dtype.is_integer_type and not has_zero_point:
+            chunk_ref = quanted.float() - 2 ** (dtype.num_bits - 1)
+        else:
+            chunk_ref = ops.dequant_weight(
+                quanted,
+                exponent_bits=dtype.exponent_bits,
+                mantissa_bits=dtype.mantissa_bits,
+                is_signed=dtype.is_signed,
+            )
+
+        if scale is not None:
+            weight_scale_tmp = scale.float().repeat_interleave(group_size, -1)
+            if group_size_n is not None:
+                weight_scale_tmp = weight_scale_tmp.repeat_interleave(group_size_n, -2)
+            chunk_ref = chunk_ref * weight_scale_tmp
+            del weight_scale_tmp
+
+        if has_weight_scale_2:
+            chunk_ref = chunk_ref * weight_scale_2.view(-1, 1, 1)
+
+        if dtype_orig.is_integer_type and dtype_orig.is_signed:
+            quanted = quanted - 2 ** (dtype.num_bits - 1)
+
+        weight_ref[start:stop].copy_(chunk_ref.to("cpu"))
+        del chunk_ref
+        quanted_chunks.append(quanted)
+        scale_chunks.append(scale)
+        zp_chunks.append(zero_point)
+        ws2_chunks.append(weight_scale_2)
+
+    def _cat(chunks):
+        return None if chunks[0] is None else torch.cat(chunks)
+
+    quanted_weight = _cat(quanted_chunks)
+    weight_scale = _cat(scale_chunks)
+    zero_point = _cat(zp_chunks)
+    weight_scale_2 = _cat(ws2_chunks)
 
     if num_experts is None:
-        weight_orig = weight_orig.squeeze(0)
         weight_ref = weight_ref.squeeze(0)
         quanted_weight = quanted_weight.squeeze(0)
         if weight_scale is not None:
@@ -156,4 +192,4 @@ def generate_random_weight(
         if zero_point is not None:
             zero_point = zero_point.squeeze(0)
 
-    return weight_orig, weight_ref, quanted_weight, weight_scale, zero_point, weight_scale_2
+    return None, weight_ref, quanted_weight, weight_scale, zero_point, weight_scale_2

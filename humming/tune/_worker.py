@@ -203,7 +203,9 @@ def compute_golden(batch, weight_ref, gemm_type, output_dtype, top_k):
     import torch
 
     inputs_ref = batch["inputs_ref"].float()
-    weight_ref = weight_ref.float()
+    # The reference weight lives on the host for large-E layers; move it over
+    # only for the duration of the golden computation.
+    weight_ref = weight_ref.to(inputs_ref.device, torch.float32)
 
     if gemm_type.value == "dense":
         return inputs_ref.matmul(weight_ref.T).to(output_dtype)
@@ -299,6 +301,9 @@ def worker_main(args_dict, cmd_q, res_q):
     torch.manual_seed(0)
     torch.cuda.manual_seed_all(0)
     layer, torch_dtype, weight_ref = create_layer(args, gemm_type)
+    # Release the generator's fp32 intermediates back to the driver; on shared
+    # GPUs the cached blocks would otherwise starve sibling workers.
+    torch.cuda.empty_cache()
     compute_config_json = json.dumps({"use_f16_accum": False, "gemm_type": gemm_type.value})
     batches = {}
     refs = {}

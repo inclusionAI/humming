@@ -300,8 +300,9 @@ def test_baseline_outside_config_set_still_prunes(fake_worker, tmp_path):
             MeasureRequest(shape_m=64, configs=[cand], baseline_config=base)
         )
 
-    assert len(timings) == 1
-    assert timings[0].correctness_ok is None  # pruned: slower than the baseline
+    assert {_key(t.config) for t in timings} == {_key(cand), _key(base)}
+    assert _by_config(timings, cand).correctness_ok is None  # pruned: slower
+    assert _by_config(timings, base).fine_ms is not None
 
 
 def test_baseline_outside_config_set_still_gates(fake_worker, tmp_path):
@@ -318,7 +319,7 @@ def test_baseline_outside_config_set_still_gates(fake_worker, tmp_path):
             MeasureRequest(shape_m=64, configs=[cand], baseline_config=base)
         )
 
-    assert timings[0].correctness_ok is True
+    assert _by_config(timings, cand).correctness_ok is True
 
 
 def test_failed_baseline_reopens_slower_candidates(fake_worker, tmp_path):
@@ -357,3 +358,29 @@ def test_baseline_compare_death_is_poisoned(fake_worker, tmp_path):
         assert _by_config(timings, base).fail_reason == "worker_died"
         # the poison log must carry the death so a rerun blacklists it
         assert (str(64), _key(base)) in m._poison_keys
+
+
+def test_failed_baseline_picks_fastest_reopened_candidate(fake_worker, tmp_path):
+    """When the baseline fails the golden gate, ALL reopened candidates are
+    compared and the fastest correct one wins - not the first to pass."""
+    slow_ok, slower_ok, base = _config(8), _config(16), _config(32)
+    fake_worker.script = {
+        ("bench", _key(slow_ok)): {"ms": 0.20},
+        ("bench", _key(slower_ok)): {"ms": 0.30},
+        ("bench", _key(base)): {"ms": 0.10},
+        ("compare", _key(base)): {"passed": False},
+        ("compare", _key(slow_ok)): {"passed": True},
+        ("compare", _key(slower_ok)): {"passed": True},
+    }
+    with Measurer(
+        LAYER_ARGS, "grouped_masked", progress_log_path=str(tmp_path / "p.log")
+    ) as m:
+        timings = m.measure(
+            MeasureRequest(
+                shape_m=64, configs=[slow_ok, slower_ok, base], baseline_config=base
+            )
+        )
+
+    assert _by_config(timings, slow_ok).correctness_ok is True
+    assert _by_config(timings, slower_ok).correctness_ok is True
+    assert _by_config(timings, base).correctness_ok is False

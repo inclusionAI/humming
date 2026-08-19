@@ -271,7 +271,9 @@ def _make_records(configs, baseline_config):
 
     for config in configs:
         add_config(config, True)
-    add_config(baseline_config, False)
+    # The baseline's timing is part of the returned set (callers report
+    # winner-vs-baseline), but it must not compete for top-k fine slots.
+    add_config(baseline_config, True)
     return records, records_by_key, ordered_keys
 
 
@@ -429,6 +431,7 @@ class Measurer:
         shape_m,
         results_by_key,
         baseline_ms,
+        stop_at_first=True,
     ):
         baseline_key = baseline_record["key"]
         winner_key = None
@@ -474,7 +477,8 @@ class Measurer:
                     return False, False, False
             if passed:
                 winner_key = record["key"]
-                break
+                if stop_at_first:
+                    break
         if winner_key is None:
             return False, True, False
         return True, True, False
@@ -570,6 +574,7 @@ class Measurer:
             for item in sorted(coarse_results, key=lambda item: item["ms"])
             if math.isfinite(item["ms"])
             and item["record"]["key"] not in self._globally_broken_keys
+            and item["record"]["key"] != baseline_key
         ]
         fine_records = coarse_candidates[: self._topk]
         if (
@@ -647,12 +652,15 @@ class Measurer:
                 # The baseline itself fails the golden gate, so it cannot serve
                 # as the pruning bar: reconsider the round-0 candidates that
                 # were skipped for being slower than it.
+                # Compare every reopened candidate so the caller can pick the
+                # fastest correct one, not merely the first that passes.
                 self._compare_fine_candidates(
                     fine_results,
                     baseline_record,
                     req.shape_m,
                     results_by_key,
                     float("inf"),
+                    stop_at_first=False,
                 )
 
         return [results_by_key[key] for key in ordered_keys]

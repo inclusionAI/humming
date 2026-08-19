@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--is_moe_down", default=False, action="store_true")
     parser.add_argument("--shape_m_list", type=int, nargs="+", default=None)
     parser.add_argument("--no-save", default=False, action="store_true")
+    parser.add_argument("--num_spares", type=int, default=2)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--fast", default=False, action="store_true")
     return parser.parse_args()
@@ -159,6 +160,12 @@ def main() -> None:
     layer, _torch_dtype, _weight_ref = create_layer(args, gemm_type)
     sublayer_name = ""
     meta = layer.humming_metas[sublayer_name]
+    # The generator's fp32 intermediates stay in the torch caching allocator
+    # otherwise, starving the bench workers on shared GPUs.
+    import torch
+
+    del layer, _weight_ref
+    torch.cuda.empty_cache()
 
     shape_m_values = _shape_m_values(args.shape_m_list)
     table, per_m = _run_search(
@@ -170,6 +177,7 @@ def main() -> None:
         balanced=args.balanced,
         expert_max_tokens=args.expert_max_tokens,
         input_scale_group_size=args.input_scale_group_size,
+        num_spares=args.num_spares,
         fast=args.fast,
     )
 
