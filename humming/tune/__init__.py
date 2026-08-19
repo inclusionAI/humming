@@ -103,25 +103,146 @@ def get_heuristics_config(
             use_fused_e8m0_scale=fuse_e8m0_scale,
         )
     heuristics_cls = get_heuristics_class()
+
+    # Shared-storage layers with no explicit fuse_e8m0_scale request let the
+    # device heuristics choose the execution path per routed-M interval, so
+    # callers need no per-phase logic.  AUTO engages only for INDEXED MoE on
+    # shapes with measured winner bands; everything else (other gemm types,
+    # unmeasured shapes, devices without bands) keeps the previous behaviour
+    # (the LayerConfig default path).
+    auto_bands = None
+    if (
+        fuse_e8m0_scale is None
+        and layer_config.use_shared_e8m0_scale_storage
+        and gemm_type == GemmType.INDEXED
+    ):
+        band_map = getattr(heuristics_cls, "shared_e8m0_auto_fused_bands", None)
+        if band_map:
+            auto_bands = band_map.get((layer_config.shape_n, layer_config.shape_k, layer_config.num_experts))
+
     if isinstance(shape_m, int):
-        config = heuristics_cls.get_config(
-            layer_config=layer_config,
-            shape_m=shape_m,
-            use_f16_accum=use_f16_accum,
-            use_batch_invariant=use_batch_invariant,
-            gemm_type=gemm_type,
-        )
+        if auto_bands is not None:
+            layer_config, config = _shared_auto_single_config(
+                heuristics_cls,
+                layer_config,
+                shape_m=shape_m,
+                use_f16_accum=use_f16_accum,
+                use_batch_invariant=use_batch_invariant,
+                gemm_type=gemm_type,
+                fused_bands=auto_bands,
+            )
+        else:
+            config = heuristics_cls.get_config(
+                layer_config=layer_config,
+                shape_m=shape_m,
+                use_f16_accum=use_f16_accum,
+                use_batch_invariant=use_batch_invariant,
+                gemm_type=gemm_type,
+            )
         _apply_m_major_input_scale(config, use_m_major_input_scale, layer_config, gemm_type)
         _apply_raster_group_m(config, layer_config, gemm_type)
         return config
     else:
-        configs = heuristics_cls.get_configs(
-            layer_config=layer_config,
-            use_f16_accum=use_f16_accum,
-            use_batch_invariant=use_batch_invariant,
-            gemm_type=gemm_type,
-        )
+        if auto_bands is not None:
+            configs = _shared_auto_config_table(
+                heuristics_cls,
+                layer_config,
+                use_f16_accum=use_f16_accum,
+                use_batch_invariant=use_batch_invariant,
+                gemm_type=gemm_type,
+                fused_bands=auto_bands,
+            )
+        else:
+            configs = heuristics_cls.get_configs(
+                layer_config=layer_config,
+                use_f16_accum=use_f16_accum,
+                use_batch_invariant=use_batch_invariant,
+                gemm_type=gemm_type,
+            )
         for entry in configs:
             _apply_m_major_input_scale(entry[2], use_m_major_input_scale, layer_config, gemm_type)
             _apply_raster_group_m(entry[2], layer_config, gemm_type)
         return configs
+
+
+def _in_fused_bands(fused_bands, routed_m: int) -> bool:
+    return any(lo < routed_m and (hi is None or routed_m <= hi) for lo, hi in fused_bands)
+
+
+def _shared_auto_single_config(
+    heuristics_cls,
+    layer_config: LayerConfig,
+    *,
+    shape_m: int,
+    use_f16_accum: bool,
+    use_batch_invariant: bool,
+    gemm_type: GemmType,
+    fused_bands,
+):
+    """Resolve the shared-storage execution path for one routed-M value."""
+    use_fused = _in_fused_bands(fused_bands, shape_m)
+    path_layer = dataclasses.replace(layer_config, use_fused_e8m0_scale=use_fused)
+    config = heuristics_cls.get_config(
+        layer_config=path_layer,
+        shape_m=shape_m,
+        use_f16_accum=use_f16_accum,
+        use_batch_invariant=use_batch_invariant,
+        gemm_type=gemm_type,
+    )
+    # Route through ComputeConfig.fuse_e8m0_scale so per-interval kernels take
+    # the same validated override path as an explicit caller request.
+    config["fuse_e8m0_scale"] = use_fused
+    return path_layer, config
+
+
+def _shared_auto_config_table(
+    heuristics_cls,
+    layer_config: LayerConfig,
+    *,
+    use_f16_accum: bool,
+    use_batch_invariant: bool,
+    gemm_type: GemmType,
+    fused_bands,
+):
+    """Merge the explicit/fused interval tables into one path-annotated table.
+
+    Table entries are ``(lo_exclusive, hi_inclusive, config)``.  Every merged
+    sub-interval picks the path from the measured winner bands; the choice is
+    recorded as ``fuse_e8m0_scale`` in the config so each interval compiles
+    its own kernel variant through the standard ComputeConfig override.
+    """
+    tables = {}
+    for fused in (False, True):
+        tables[fused] = heuristics_cls.get_configs(
+            layer_config=dataclasses.replace(layer_config, use_fused_e8m0_scale=fused),
+            use_f16_accum=use_f16_accum,
+            use_batch_invariant=use_batch_invariant,
+            gemm_type=gemm_type,
+        )
+
+    def lookup(table, routed_m):
+        for lo, hi, config in table:
+            if lo < routed_m <= hi:
+                return config
+        raise RuntimeError(f"no heuristic interval contains routed_m={routed_m}")
+
+    breakpoints = {bound for table in tables.values() for lo, hi, _ in table for bound in (lo, hi)}
+    max_bound = max(breakpoints)
+    # Winner-band edges must become interval boundaries too, or the path
+    # decision would be quantized to the underlying tables' sampling grid.
+    for lo, hi in fused_bands:
+        for bound in (lo, hi):
+            if bound is not None and 0 < bound < max_bound:
+                breakpoints.add(bound)
+    breakpoints = sorted(breakpoints)
+    merged = []
+    for lo, hi in zip(breakpoints, breakpoints[1:], strict=False):
+        probe_m = lo + 1
+        use_fused = _in_fused_bands(fused_bands, probe_m)
+        config = dict(lookup(tables[use_fused], probe_m))
+        config["fuse_e8m0_scale"] = use_fused
+        if merged and merged[-1][1] == lo and merged[-1][2] == config:
+            merged[-1] = (merged[-1][0], hi, merged[-1][2])
+        else:
+            merged.append((lo, hi, config))
+    return merged

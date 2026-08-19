@@ -136,6 +136,38 @@ def test_mxfp4_shared_storage_runtime_scale_mode(fuse_e8m0_scale):
     )
 
 
+def test_mxfp4_shared_storage_schema_plumbing():
+    from humming.schema.humming import HummingInputSchema, HummingWeightSchema
+    from humming.transform import prepare_layer_config
+
+    weight_schema = HummingWeightSchema(
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+        weight_scale_group_size=WEIGHT_GROUP_SIZE,
+        use_shared_e8m0_scale_storage=True,
+    )
+    input_schema = HummingInputSchema(
+        a_dtype=dtypes.float8e4m3,
+        input_scale_group_size=0,
+    )
+    config = prepare_layer_config(
+        shape_n=256,
+        shape_k=256,
+        weight_schema=weight_schema,
+        input_schema=input_schema,
+        num_experts=NUM_EXPERTS,
+        torch_dtype=torch.bfloat16,
+    )
+    assert config.use_shared_e8m0_scale_storage
+    # Default derivation keeps the fused-capable resident semantics.
+    assert config.use_fused_e8m0_scale
+    assert not HummingWeightSchema(
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+        weight_scale_group_size=WEIGHT_GROUP_SIZE,
+    ).use_shared_e8m0_scale_storage
+
+
 def test_mxfp4_shared_storage_reuses_resident_tensors():
     explicit_case = _shared_storage_case(fuse_e8m0_scale=False)
     fused_case = _shared_storage_case(fuse_e8m0_scale=True)

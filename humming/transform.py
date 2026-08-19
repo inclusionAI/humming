@@ -62,6 +62,7 @@ def prepare_layer_config(
         weight_scale_2_type=weight_scale_2_type,
         has_zero_point=weight_schema.has_zero_point,
         is_fp_zero_point=weight_schema.is_fp_zero_point,
+        use_shared_e8m0_scale_storage=weight_schema.use_shared_e8m0_scale_storage,
     )
 
 

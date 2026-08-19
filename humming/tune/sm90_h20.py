@@ -14,6 +14,23 @@ class Sm90H20Heuristics(DeviceHeuristics):
     b8_allowed_dtypes: list[dtypes.DataType] = [dtypes.int8, dtypes.float8e4m3, dtypes.float8e5m2]
     b4_allowed_dtypes: list[dtypes.DataType] = []
     sm_version: int = 90
+    # Shared-storage layers may leave ComputeConfig.fuse_e8m0_scale unset; the
+    # heuristics then pick the execution path per routed-M interval from the
+    # measured winner bands below.  Keys are (shape_n, shape_k, num_experts)
+    # — interval-table boundaries depend on all three; values are routed-M
+    # bands (lo_exclusive, hi_inclusive or None for open-ended) where the
+    # fused path wins, with explicit accumulator scaling used elsewhere.
+    # AUTO engages only for these measured shapes and only for INDEXED MoE
+    # (K3 TP8 full four-arm integer-M sweeps, 2026-08-19); everything else
+    # keeps the previous behaviour of following the LayerConfig default path.
+    shared_e8m0_auto_fused_bands: dict[tuple[int, int, int], tuple] = {
+        # K3 W13: fused pocket where the explicit schedule collapses (up to
+        # 1.6x slower) right after the BM16->32 boundary, then fused again
+        # from the BM48 boundary onwards.
+        (768, 3584, 896): ((11456, 14336), (25728, None)),
+        # K3 W2: single flip at the BM48 boundary.
+        (3584, 384, 896): ((25728, None),),
+    }
 
     @classmethod
     def _apply_shared_e8m0_overrides(
@@ -31,6 +48,29 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config["use_stream_k"] = False
         elif layer_config.shape_k <= 512:
             config["num_sms"] = max(3072, config["num_sms"])
+            if layer_config.shape_k >= 384:
+                # Measured on K3 TP8 W2 (N=3584, K=384) dense integer-M sweep
+                # (2026-08-19): BN128/WN32/stage3/CTA4/TMA + grid>=3072 beats
+                # the native-derived schedule on all 6584 BM>=48 points,
+                # lifting the shared-fused/native-fused geomean from 0.942 to
+                # 0.981.  The extra resident warpgroups hide the shared
+                # decoder's selector-pack ALU chain, which paired NCU/SASS
+                # work showed is the residual cost.  DSV4-Flash W2 (N=4096,
+                # K=256) regresses 6-8% under this schedule, hence the K
+                # floor: only the measured shape family opts in.
+                block_k = config["block_shape"][2]
+                config["block_shape"] = (block_m, 128, block_k)
+                config["warp_shape"] = (block_m, 32, block_k)
+                config["num_stages"] = 3
+                config["num_ctas_per_sm"] = 4
+                config["use_stream_k"] = False
+                for key in tuple(config):
+                    if key.startswith("use_tma") or key == "use_mbarrier":
+                        config.pop(key)
+                config["use_tma"] = True
+                config["use_mbarrier"] = True
+                config["use_tma_a"] = False
+                config["use_tma_c"] = False
 
     @classmethod
     def _get_small_m_dense_override(

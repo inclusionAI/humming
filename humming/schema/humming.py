@@ -21,6 +21,9 @@ class HummingWeightSchema(BaseWeightSchema):
     has_zero_point: bool = False
     is_fp_zero_point: bool = False
     hadamard_block_size: int = 0
+    # Keep one group-friendly MXFP4/E8M0 representation usable by both the
+    # explicit and fused runtime scale paths (see LayerConfig).
+    use_shared_e8m0_scale_storage: bool = False
 
     KWARGS_ALIAS: ClassVar[dict[str, list[str]]] = {
         "b_dtype": ["weight_dtype", "dtype"],
