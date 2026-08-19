@@ -129,3 +129,26 @@ def test_shared_e8m0_small_m_keeps_existing_schedule():
 
     assert config["block_shape"][0] == 8
     assert config["use_stream_k"]
+
+
+def test_shared_e8m0_explicit_path_keeps_native_large_m_schedule():
+    shared_explicit = Sm90H20Heuristics.get_config(
+        dataclasses.replace(
+            _shared_layer(768, 3584, num_experts=896),
+            use_fused_e8m0_scale=False,
+        ),
+        131072,
+        gemm_type=GemmType.INDEXED,
+    )
+    native_explicit = Sm90H20Heuristics.get_config(
+        dataclasses.replace(
+            _shared_layer(768, 3584, num_experts=896),
+            use_fused_e8m0_scale=False,
+            use_shared_e8m0_scale_storage=False,
+        ),
+        131072,
+        gemm_type=GemmType.INDEXED,
+    )
+
+    assert shared_explicit == native_explicit
+    assert shared_explicit["use_stream_k"]

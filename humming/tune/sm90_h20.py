@@ -22,7 +22,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         config: dict,
     ) -> None:
         """Apply measured large-M schedules for group-friendly shared storage."""
-        if not layer_config.use_shared_e8m0_scale_storage:
+        if not layer_config.use_shared_e8m0_scale_storage or not layer_config.use_fused_e8m0_scale:
             return
         block_m = config["block_shape"][0]
         if block_m < 48:
