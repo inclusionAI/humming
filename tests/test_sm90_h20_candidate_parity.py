@@ -6,6 +6,9 @@ from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType
 from humming.tune.sm90_h20 import Sm90H20Heuristics
 from humming.tune.sm90_h20_families import (
+    _dense_block_shape_m,
+    _moe_block_shape_m,
+    build_h20_seed_config,
     fused_e8m0_moe_in_scope,
     make_h20_device_profile,
     select_fused_e8m0_moe,
@@ -83,14 +86,12 @@ def _problem(layer, gemm_type, shape_m, use_f16_accum):
     )
 
 
-def test_family_matches_legacy_across_grid():
-    """The migrated family must reproduce the legacy config for every in-scope
-    point; out-of-scope points must keep routing to the legacy path."""
+def test_family_matches_seed_across_grid():
+    """In scope, the selectors must reproduce the seed heuristic config;
+    out of scope, the dispatcher must serve the seed directly."""
     covered = 0
     for layer, gemm_type, shape_m, f16 in _grid():
-        legacy = Sm90H20Heuristics._get_config_legacy(
-            layer, shape_m, use_f16_accum=f16, gemm_type=gemm_type
-        )
+        legacy = build_h20_seed_config(_problem(layer, gemm_type, shape_m, f16))
         dispatched = Sm90H20Heuristics.get_config(
             layer, shape_m, use_f16_accum=f16, gemm_type=gemm_type
         )
@@ -100,7 +101,7 @@ def test_family_matches_legacy_across_grid():
         covered += 1
         decision = select_fused_e8m0_moe(_problem(layer, gemm_type, shape_m, f16))
         assert decision.to_config() == legacy, (
-            f"family diverges from legacy for n={layer.shape_n} k={layer.shape_k} "
+            f"family diverges from the seed for n={layer.shape_n} k={layer.shape_k} "
             f"E={layer.num_experts} isg={layer.input_scale_group_size} "
             f"gemm={gemm_type.value} m={shape_m} f16={f16}:\n"
             f"family: {decision.to_config()}\nlegacy: {legacy}"
@@ -164,16 +165,14 @@ def test_grid_fill_cta2_not_demoted_by_register_gate():
     assert "occupancy" in decision.reason
 
 
-def test_low_grid_keeps_legacy_construction():
+def test_low_grid_keeps_seed_construction():
     """8 output tiles: CTA1, the num_warps==4 warp_k reshape, and the num_sms
     trim must all match legacy field by field."""
     layer = _fused_moe_layer(128, 7168, 8, 128)
     config = select_fused_e8m0_moe(
         _problem(layer, GemmType.INDEXED, 12288, False)
     ).to_config()
-    legacy = Sm90H20Heuristics._get_config_legacy(
-        layer, 12288, use_f16_accum=False, gemm_type=GemmType.INDEXED
-    )
+    legacy = build_h20_seed_config(_problem(layer, GemmType.INDEXED, 12288, False))
     assert config == legacy
     assert config["num_ctas_per_sm"] == 1
     assert config["num_sms"] < _NUM_SMS  # tile-count trim engaged
@@ -204,9 +203,7 @@ def test_weight_scale_indivisible_k_keeps_parity():
     config = select_fused_e8m0_moe(
         _problem(layer, GemmType.INDEXED, 12288, False)
     ).to_config()
-    legacy = Sm90H20Heuristics._get_config_legacy(
-        layer, 12288, use_f16_accum=False, gemm_type=GemmType.INDEXED
-    )
+    legacy = build_h20_seed_config(_problem(layer, GemmType.INDEXED, 12288, False))
     assert config == legacy
 
 
@@ -216,9 +213,7 @@ def test_out_of_contract_k_fails_on_both_paths():
     rejection audit. Neither path returns a config."""
     layer = _fused_moe_layer(6144, 1040, 48, 0)
     with pytest.raises(AssertionError):
-        Sm90H20Heuristics._get_config_legacy(
-            layer, 12288, gemm_type=GemmType.INDEXED
-        )
+        build_h20_seed_config(_problem(layer, GemmType.INDEXED, 12288, False))
     with pytest.raises(AssertionError, match="no legal fused-E8M0"):
         select_fused_e8m0_moe(_problem(layer, GemmType.INDEXED, 12288, False))
 
@@ -227,9 +222,7 @@ def test_small_tile_family_covers_decode_shapes():
     """block_m <= 32 (decode-sized m per expert) must dispatch through the
     small-tile selector with the residency alternatives in the audit trail."""
     layer = _fused_moe_layer(6144, 7168, 48, 128)
-    legacy = Sm90H20Heuristics._get_config_legacy(
-        layer, 96, gemm_type=GemmType.GROUPED_MASKED
-    )
+    legacy = build_h20_seed_config(_problem(layer, GemmType.GROUPED_MASKED, 96, False))
     decision = select_fused_e8m0_moe(
         _problem(layer, GemmType.GROUPED_MASKED, 96, False)
     )
@@ -265,7 +258,7 @@ _DENSE_SHAPES = (
 _DENSE_M_VALUES = (8, 16, 24, 48, 64, 96, 128, 256, 1024, 4096, 12288, 49152)
 
 
-def test_dense_family_matches_legacy_across_grid():
+def test_dense_family_matches_seed_across_grid():
     from humming.tune.sm90_h20_families import (
         fused_e8m0_dense_in_scope,
         select_fused_e8m0_dense,
@@ -277,9 +270,7 @@ def test_dense_family_matches_legacy_across_grid():
         _DENSE_SHAPES, (0, 128), _DENSE_M_VALUES, (False, True)
     ):
         layer = _fused_dense_layer(shape_n, shape_k, isg)
-        legacy = Sm90H20Heuristics._get_config_legacy(
-            layer, shape_m, use_f16_accum=f16, gemm_type=GemmType.DENSE
-        )
+        legacy = build_h20_seed_config(_problem(layer, GemmType.DENSE, shape_m, f16))
         dispatched = Sm90H20Heuristics.get_config(
             layer, shape_m, use_f16_accum=f16, gemm_type=GemmType.DENSE
         )
@@ -292,7 +283,7 @@ def test_dense_family_matches_legacy_across_grid():
         )
         arms.add(decision.selected.candidate_id)
         assert decision.to_config() == legacy, (
-            f"dense family diverges for n={shape_n} k={shape_k} isg={isg} "
+            f"dense family diverges from the seed for n={shape_n} k={shape_k} isg={isg} "
             f"m={shape_m} f16={f16}:\n"
             f"family: {decision.to_config()}\nlegacy: {legacy}"
         )
@@ -337,9 +328,7 @@ def test_dense_scope_negative_boundaries():
         assert not fused_e8m0_dense_in_scope(layer, 64, GemmType.DENSE, False), (
             layer
         )
-        legacy = Sm90H20Heuristics._get_config_legacy(
-            layer, 64, gemm_type=GemmType.DENSE
-        )
+        legacy = build_h20_seed_config(_problem(layer, GemmType.DENSE, 64, False))
         assert (
             Sm90H20Heuristics.get_config(layer, 64, gemm_type=GemmType.DENSE)
             == legacy
@@ -352,3 +341,19 @@ def test_dense_scope_negative_boundaries():
     assert not fused_e8m0_dense_in_scope(tiny_n, 64, GemmType.DENSE, False)
     with pytest.raises(AssertionError):
         Sm90H20Heuristics.get_config(tiny_n, 64, gemm_type=GemmType.DENSE)
+
+
+def test_shared_block_m_helpers_pinned_values():
+    """The seed and the selectors share these helpers; pin their outputs so a
+    joint defect cannot slide through the select==seed comparison unnoticed."""
+    assert _moe_block_shape_m(48, 48, 64) == 8
+    assert _moe_block_shape_m(384, 48, 64) == 16
+    assert _moe_block_shape_m(3072, 48, 64) == 48
+    assert _moe_block_shape_m(12288, 48, 64) == 64
+    assert _moe_block_shape_m(12288, 48, 128) == 96
+    assert _moe_block_shape_m(49152, 48, 128) == 128
+    assert _dense_block_shape_m(1, 128) == 8
+    assert _dense_block_shape_m(64, 128) == 64
+    assert _dense_block_shape_m(100, 128) == 104
+    assert _dense_block_shape_m(12288, 128) == 128
+    assert _dense_block_shape_m(200, 64) == 56
