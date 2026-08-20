@@ -48,6 +48,30 @@ def _kernel_case(
 
 SPECIAL_WEIGHT_CASES = (
     _kernel_case(
+        required_features=(),
+        name="nvfp4-a16-dense",
+        layer_config=_layer_config(
+            a_dtype=dtypes.bfloat16,
+            b_dtype=dtypes.float4e2m1,
+            bs_dtype=dtypes.float8e4m3,
+            weight_scale_group_size=16,
+            weight_scale_2_type=WeightScale2Type.TENSOR,
+        ),
+    ),
+    _kernel_case(
+        required_features=(),
+        name="nvfp4-a16-indexed",
+        layer_config=_layer_config(
+            a_dtype=dtypes.bfloat16,
+            b_dtype=dtypes.float4e2m1,
+            bs_dtype=dtypes.float8e4m3,
+            weight_scale_group_size=16,
+            weight_scale_2_type=WeightScale2Type.TENSOR,
+            num_experts=8,
+        ),
+        gemm_type=GemmType.INDEXED,
+    ),
+    _kernel_case(
         required_features=("use_int_weight_scale",),
         name="int-weight-scale-int8",
         layer_config=_layer_config(
