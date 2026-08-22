@@ -115,7 +115,12 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
     )
     if use_wide_indexed_tile:
         warp_shape_n = 64
-        if layer_config.shape_k <= 512 and layer_config.shape_n >= 2048:
+        # N=512 spills its accumulator at two-CTA residency from M=48 onward.
+        if (
+            layer_config.shape_k <= 512
+            and layer_config.shape_n >= 2048
+            and block_shape_m < 48
+        ):
             block_shape_n = 512
             block_shape_k = 64
         else:
