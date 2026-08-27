@@ -201,6 +201,134 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
     return config
 
 
+# --- MXFP4 weights dequantised into 8-bit MMA inputs (fused e8m0 scales) ---
+
+# Measured on SM90 (H200, GLM-5.2 MoE shapes): this family is bound by the
+# accumulator register footprint of the math warps, so every schedule keeps
+# exactly eight of them (two WGMMA warpgroups). One warpgroup owning the whole
+# tile, or four warpgroups splitting it, both lose 2-4x.
+_FP4_MATH_WARPS = 8
+# An M block re-reads the whole expert weight slab, so while an expert still
+# fits in one block the tile is sized to hold the *largest* expert rather than
+# the average one: undersizing costs 25-35%, oversizing only ~5%. Past the
+# point where no legal tile can hold an expert, padding is unavoidable and the
+# tile settles on its own throughput optimum instead.
+_FP4_LARGE_BLOCK_M = 72
+_FP4_MAX_SMALL_BLOCK_M = 80
+_FP4_MIN_BLOCK_M = 16
+# Standard deviations of routing imbalance the tile is sized to absorb.
+_FP4_IMBALANCE_SIGMAS = 2.5
+_FP4_NUM_STAGES = 4
+
+
+def uses_fused_e8m0_fp4(layer_config: LayerConfig) -> bool:
+    """Whether FP4 weights are dequantised into 8-bit MMA inputs via e8m0."""
+    return (
+        bool(layer_config.use_fused_e8m0_scale)
+        and layer_config.b_dtype.num_bits == 4
+        and layer_config.a_dtype.num_bits == 8
+        and layer_config.input_scale_group_size > 0
+    )
+
+
+def _fused_e8m0_fp4_block_m(problem: TuningProblem) -> int:
+    layer_config = problem.layer_config
+    if problem.gemm_type == GemmType.DENSE or not layer_config.num_experts:
+        # No routing padding to absorb, so the tile only has to avoid
+        # overshooting the rows that exist.
+        return min(_FP4_LARGE_BLOCK_M, max(8, math.ceil(problem.shape_m / 8) * 8))
+
+    tokens_per_expert = problem.shape_m / layer_config.num_experts
+    if tokens_per_expert >= _FP4_MAX_SMALL_BLOCK_M:
+        return _FP4_LARGE_BLOCK_M
+
+    # Multinomial routing spreads expert counts by about sqrt(tokens_per_expert).
+    busiest_expert = tokens_per_expert + _FP4_IMBALANCE_SIGMAS * math.sqrt(
+        tokens_per_expert
+    )
+    block_shape_m = math.ceil(busiest_expert / 8) * 8
+    return min(max(block_shape_m, _FP4_MIN_BLOCK_M), _FP4_MAX_SMALL_BLOCK_M)
+
+
+def _fused_e8m0_fp4_num_blocks_m(problem: TuningProblem, block_shape_m: int) -> int:
+    num_blocks_m = math.ceil(problem.shape_m / block_shape_m)
+    if problem.gemm_type == GemmType.DENSE or not problem.layer_config.num_experts:
+        return num_blocks_m
+    # Every routed expert takes at least one padded M block of its own.
+    return max(problem.layer_config.num_experts, num_blocks_m)
+
+
+def select_fused_e8m0_fp4(problem: TuningProblem) -> TuningDecision:
+    if problem.device.num_sms is None:
+        raise ValueError("fused-e8m0 FP4 selection requires a device SM count")
+    preferred_block_m = _fused_e8m0_fp4_block_m(problem)
+
+    candidates = []
+    # Candidate order records measured preference; legality supplies fallbacks.
+    for block_shape_n, warp_shape_n in ((256, 32), (128, 32), (64, 16)):
+        for block_shape_k in (128, 64):
+            warp_shape_k = min(128, block_shape_k)
+            num_warps_nk = (block_shape_n // warp_shape_n) * (
+                block_shape_k // warp_shape_k
+            )
+            num_warps_m = max(1, _FP4_MATH_WARPS // num_warps_nk)
+            # Round the tile up until warp_m is a whole number of eight rows.
+            m_granularity = num_warps_m * 8
+            block_shape_m = (
+                math.ceil(preferred_block_m / m_granularity) * m_granularity
+            )
+            num_output_tiles = (
+                problem.layer_config.shape_n
+                // block_shape_n
+                * _fused_e8m0_fp4_num_blocks_m(problem, block_shape_m)
+            )
+            config = {
+                "block_shape": (block_shape_m, block_shape_n, block_shape_k),
+                "warp_shape": (
+                    block_shape_m // num_warps_m,
+                    warp_shape_n,
+                    warp_shape_k,
+                ),
+                # Stream-K only pays for itself while the grid cannot fill the
+                # device; past that its reduction pass is measured overhead.
+                "use_stream_k": (
+                    not problem.use_batch_invariant
+                    and num_output_tiles < problem.device.num_sms
+                ),
+                "use_f16_accum": problem.use_f16_accum,
+                "num_stages": _FP4_NUM_STAGES,
+            }
+            if problem.gemm_type != GemmType.INDEXED:
+                config["use_warp_spec"] = True
+                config["use_tma"] = True
+                config["use_mbarrier"] = True
+            candidate = ScheduleCandidate.from_config(
+                f"fused_e8m0_fp4_n{block_shape_n}_k{block_shape_k}",
+                config,
+            )
+            candidates.append(fit_pipeline_stages(problem, candidate))
+
+    analyses = tuple(analyze_candidate(problem, candidate) for candidate in candidates)
+    selected = next(
+        (analysis for analysis in analyses if analysis.legal),
+        None,
+    )
+    if selected is None:
+        rejected = {
+            analysis.candidate.candidate_id: analysis.rejection_reasons
+            for analysis in analyses
+        }
+        raise AssertionError(f"no legal fused-e8m0 FP4 SM90 schedule: {rejected}")
+
+    return TuningDecision(
+        problem=problem,
+        family="fused_e8m0_fp4",
+        selected=selected.candidate,
+        considered=analyses,
+        reason="selected the first legal measured-priority candidate",
+    )
+
+
 def select_grouped_scale(
     problem: TuningProblem,
 ) -> TuningDecision:

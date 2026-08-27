@@ -10,8 +10,10 @@ from humming.tune.sm90_policies import (
     Sm90CandidatePolicy,
     build_sm90_seed_config,
     calc_sm90_num_block_list,
+    select_fused_e8m0_fp4,
     select_grouped_scale,
     select_indexed_a16,
+    uses_fused_e8m0_fp4,
 )
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -148,14 +150,17 @@ class Sm90Heuristics(DeviceHeuristics):
             use_batch_invariant,
             gemm_type,
         )
+        tune_fused_e8m0_fp4 = uses_fused_e8m0_fp4(layer_config)
         problem = cls._make_problem(
             layer_config,
             shape_m,
             use_f16_accum,
             use_batch_invariant,
             gemm_type,
-            include_grid_size=tune_indexed_a16,
+            include_grid_size=tune_indexed_a16 or tune_fused_e8m0_fp4,
         )
+        if tune_fused_e8m0_fp4:
+            return select_fused_e8m0_fp4(problem)
         if cls._uses_grouped_scale_candidates(layer_config):
             return select_grouped_scale(problem)
         if not tune_indexed_a16:
@@ -176,9 +181,11 @@ class Sm90Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        use_candidates = cls._uses_grouped_scale_candidates(
-            layer_config
-        ) or cls._uses_indexed_a16_policy(layer_config, use_batch_invariant, gemm_type)
+        use_candidates = (
+            uses_fused_e8m0_fp4(layer_config)
+            or cls._uses_grouped_scale_candidates(layer_config)
+            or cls._uses_indexed_a16_policy(layer_config, use_batch_invariant, gemm_type)
+        )
         if use_candidates:
             return cls.get_tuning_decision(
                 layer_config,
