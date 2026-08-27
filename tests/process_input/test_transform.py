@@ -100,6 +100,14 @@ def test_unquantized_hadamard_inplace():
     torch.testing.assert_close(x, expected, rtol=0, atol=0)
 
 
+def test_inplace_cache_hit_keeps_input_storage():
+    first = torch.randn(5, 512, device="cuda", dtype=torch.bfloat16)
+    second = torch.randn_like(first)
+    process_input(first, inplace=True)
+    result = process_input(second, inplace=True)
+    assert result[0] is second
+
+
 def test_custom_binary_activation_hadamard_and_quantization():
     a = torch.randn(3, 256, device="cuda", dtype=torch.bfloat16)
     b = torch.randn_like(a)

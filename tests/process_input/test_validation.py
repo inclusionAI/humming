@@ -51,6 +51,13 @@ def test_inplace_validation():
         process_input(x, outputs=torch.empty_like(x), inplace=True)
 
 
+def test_inplace_alias_is_checked_after_cache_hit():
+    x = torch.randn(5, 512, device="cuda", dtype=torch.bfloat16)
+    process_input(x, outputs=x, inplace=True)
+    with pytest.raises(RuntimeError, match="must alias inputs"):
+        process_input(x, outputs=torch.empty_like(x), inplace=True)
+
+
 def test_scatter_layout_validation():
     x = torch.randn(2, 128, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(AssertionError):

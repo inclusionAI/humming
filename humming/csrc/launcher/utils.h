@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cuda.h>
+#include <string>
+
+#include "./torch_api.h"
+
 #define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
 
 inline void check_curesult(const CUresult res, const char *func_name) {
@@ -10,6 +15,22 @@ inline void check_curesult(const CUresult res, const char *func_name) {
     cuGetErrorString(res, &errStr);
     ASSERT_CHECK(false, func_name, " failed with error: ", errName, " (", errStr, ")");
   }
+}
+
+inline CUcontext get_current_context() {
+  CUcontext context;
+  check_curesult(cuCtxGetCurrent(&context), "cuCtxGetCurrent");
+  return context;
+}
+
+inline CUstream get_current_cuda_stream(int64_t dev) {
+#if USE_TORCH_STABLE_API
+  void *stream_ptr = nullptr;
+  aoti_torch_get_current_cuda_stream(dev, &stream_ptr);
+  return static_cast<CUstream>(stream_ptr);
+#else
+  return at::cuda::getCurrentCUDAStream(dev);
+#endif
 }
 
 uint32_t manual_crc32(const std::string &data) {

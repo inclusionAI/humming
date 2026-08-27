@@ -26,7 +26,10 @@ def _resolve_use_pdl(
 
 def _prepare_input_scale(config: LayerConfig, input_scale: torch.Tensor) -> torch.Tensor:
     if str(config.as_dtype) == "float8e8m0" and input_scale.dtype != torch.int32:
-        return input_scale.view(torch.int32)
+        packed_scale = input_scale.view(torch.int32)
+        if input_scale.ndim == 3:
+            packed_scale = packed_scale.reshape(input_scale.size(0), input_scale.size(1))
+        return packed_scale
     return input_scale
 
 

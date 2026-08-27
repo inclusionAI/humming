@@ -2,8 +2,7 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
 from .enums import GroupScaleLayout, QuantizationMode
-from .process import _allocate_legacy_group_scales, _legacy_group_scale_view, process_input
-from .spec import SCALE_TORCH_DTYPE
+from .process import process_input
 
 
 def hadamard_transform(
@@ -61,16 +60,6 @@ def hadamard_quant_input(
         if scale_dtype == "float8e8m0":
             group_scale_layout = GroupScaleLayout.MxPacked
 
-    if scales is None:
-        group_scales = _allocate_legacy_group_scales(inputs, group_size, scale_dtype, group_scale_layout)
-    elif group_scale_layout == GroupScaleLayout.MxPacked:
-        rows = inputs.numel() // inputs.size(-1)
-        stride = (rows + 3) // 4 * 4
-        groups = inputs.size(-1) // group_size
-        group_scales = scales.view(SCALE_TORCH_DTYPE[scale_dtype]).reshape((groups + 3) // 4, stride, 4)
-    else:
-        group_scales = scales
-
     quant_mode = (
         QuantizationMode.StaticTensorDynamicGroup
         if global_scale is not None
@@ -83,11 +72,12 @@ def hadamard_quant_input(
         quant_mode=quant_mode,
         quant_dtype=quant_dtype,
         quant_group_size=group_size,
-        group_scales=group_scales,
+        group_scales=scales,
+        group_scale_dtype=scale_dtype,
         token_scales=global_scale,
         hadamard_block_size=block_size,
         group_scale_layout=group_scale_layout,
         use_pdl=use_pdl,
     )
     assert result_group_scales is not None
-    return quantized, _legacy_group_scale_view(result_group_scales, group_scale_layout)
+    return quantized, result_group_scales

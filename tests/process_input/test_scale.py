@@ -270,6 +270,7 @@ def test_legacy_hadamard_m_major_scale_layout(scale_dtype):
     )
 
     if scale_dtype == "float8e8m0":
+        assert m_major.shape == (1, 4, 4)
         unpacked = m_major.view(torch.uint8).reshape(1, 4, 4)[0, :3]
         torch.testing.assert_close(unpacked, row_major.view(torch.uint8), rtol=0, atol=0)
     else:

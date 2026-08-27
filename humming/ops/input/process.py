@@ -1,5 +1,8 @@
+import copy
 import dataclasses
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
 import torch
@@ -20,15 +23,17 @@ from .spec import (
 
 @dataclasses.dataclass(kw_only=True)
 class _ProcessInput:
-    _executor_cache: ClassVar[dict[tuple[object, ...], tuple[object, ...]]] = {}
+    _family_cache: ClassVar[dict[tuple[object, ...], torch.Tensor]] = {}
 
     inputs: torch.Tensor
+    family_key: tuple[object, ...] | None = None
     outputs: torch.Tensor | None = None
     inplace: bool = False
     quant_mode: QuantizationMode | str = "none"
     quant_dtype: str | None = None
     quant_group_size: int | None = None
     group_scales: torch.Tensor | None = None
+    group_scale_dtype: str | None = None
     token_scales: torch.Tensor | None = None
     activation_type: ActivationType | str = "none"
     activation_impl: str | None = None
@@ -100,7 +105,8 @@ class _ProcessInput:
             assert self.hadamard_block_size <= 512, err_msg
             is_power_of_two = not self.hadamard_block_size & (self.hadamard_block_size - 1)
             assert is_power_of_two, "hadamard_block_size must be a power of two"
-            assert self.hidden_size % self.hadamard_block_size == 0, "hadamard_block_size must divide hidden_size"
+            err_msg = "hadamard_block_size must divide hidden_size"
+            assert self.hidden_size % self.hadamard_block_size == 0, err_msg
 
         if uses_group_scale:
             if self.quant_group_size is None or self.quant_group_size == 0:
@@ -186,11 +192,15 @@ class _ProcessInput:
         static_tensor = bool(self.static_mode & STATIC_TENSOR)
         static_group = bool(self.static_mode & STATIC_GROUP)
         if self.group_scales is not None:
-            self.group_scale_dtype = self.scale_dtype_name(self.group_scales)
-        elif self.dynamic_scale_mode == "group_token":
+            tensor_scale_dtype = self.scale_dtype_name(self.group_scales)
+            if self.group_scale_dtype is not None:
+                assert self.group_scale_dtype == tensor_scale_dtype
+            self.group_scale_dtype = tensor_scale_dtype
+        elif self.group_scale_dtype is None and self.dynamic_scale_mode == "group_token":
             self.group_scale_dtype = "float8e4m3"
-        else:
+        elif self.group_scale_dtype is None:
             self.group_scale_dtype = "float32"
+        assert self.group_scale_dtype in SCALE_TORCH_DTYPE
         if static_tensor:
             assert self.token_scales is not None and self.token_scales.dtype == torch.float32
             self.validate_tensor(self.token_scales)
@@ -252,35 +262,6 @@ class _ProcessInput:
             returned_outputs = returned_outputs.view(torch.uint8)
         return returned_outputs, self.group_scales, self.token_scales
 
-    def make_executor_key(self) -> tuple[object, ...]:
-        from humming.kernel.process_input import ProcessInputKernel
-
-        context = ProcessInputKernel.current_context()
-        return (
-            context,
-            self.inputs.dtype,
-            self.quant_dtype,
-            self.hidden_size,
-            self.quant_group_size,
-            self.hadamard_block_size,
-            self.tile_size,
-            self.layout,
-            self.output_width,
-            self.num_experts == 1,
-            self.expert_layout.dtype if self.expert_layout is not None else None,
-            self.indices.dtype if self.indices is not None else None,
-            self.zero_invalid,
-            self.activation_type,
-            self.activation_impl,
-            self.quant_mode,
-            self.group_scale_dtype,
-            self.group_scale_layout,
-            self.use_pdl,
-            self.schedule_rows,
-            self.schedule_width,
-            self.working_set_bytes,
-        )
-
     def select_schedule(self) -> None:
         self.capability = torch.cuda.get_device_capability(self.inputs.device)
         if self.quant_dtype in ("float8e4m3", "float8e5m2") and self.capability < (8, 9):
@@ -298,44 +279,80 @@ class _ProcessInput:
             self.target_bits = 8 // QUANT_STORAGE[self.quant_dtype][1]
         else:
             self.target_bits = self.source_bits
-        properties = torch.cuda.get_device_properties(self.inputs.device)
+        self.properties = torch.cuda.get_device_properties(self.inputs.device)
+        separate_outputs = self.separate_scatter_outputs(self.num_work_rows)
         expanded_rows = self.num_work_rows * self.output_width
+        self.schedule_rows = expanded_rows if separate_outputs else self.num_work_rows
+        self.schedule_width = 1 if separate_outputs else self.output_width
+        self.plan = select_process_input_plan(self, self.properties)
+        self.plan = dataclasses.replace(self.plan, separate_outputs=separate_outputs)
+
+    def separate_scatter_outputs(self, rows: int) -> bool:
         can_repeat_input = self.activation_type == ActivationType.None_
         can_repeat_input &= self.hadamard_block_size <= 1
-        row_limit = properties.multi_processor_count
+        row_limit = self.properties.multi_processor_count
         if self.dynamic_scale_mode not in ("token", "group_token"):
             row_limit = (row_limit + 1) // 2
         separate_outputs = self.output_width > 1 and can_repeat_input
-        separate_outputs &= expanded_rows <= row_limit
-        self.schedule_rows = expanded_rows if separate_outputs else self.num_work_rows
-        self.schedule_width = 1 if separate_outputs else self.output_width
-        self.executor_key = self.make_executor_key()
-        self.cached_executor = self._executor_cache.get(self.executor_key)
-        if self.cached_executor is not None:
-            self.plan, self.phase_kernels, self.scale_kernel = self.cached_executor
-            return
-        self.plan = select_process_input_plan(self, properties)
-        self.plan = dataclasses.replace(self.plan, separate_outputs=separate_outputs)
+        return separate_outputs and rows * self.output_width <= row_limit
 
-    def prepare_executor(self) -> None:
+    def plan_for_rows(self, rows: int):
+        operation = copy.copy(self)
+        operation.num_work_rows = rows
+        separate_outputs = self.separate_scatter_outputs(rows)
+        operation.schedule_rows = rows * self.output_width if separate_outputs else rows
+        operation.schedule_width = 1 if separate_outputs else self.output_width
+        bytes_per_row = (self.working_set_bytes + self.num_work_rows - 1) // self.num_work_rows
+        operation.working_set_bytes = bytes_per_row * rows
+        plan = select_process_input_plan(operation, self.properties)
+        return dataclasses.replace(plan, separate_outputs=separate_outputs)
+
+    def plan_intervals(self):
+        plans = {self.num_work_rows: self.plan}
+
+        def get_plan(rows: int):
+            if rows not in plans:
+                plans[rows] = self.plan_for_rows(rows)
+            return plans[rows]
+
+        def partition(first: int, last: int):
+            if first > last:
+                return []
+            distance = last - first
+            probes = {first, last, first + distance // 4, first + distance // 2, first + 3 * distance // 4}
+            probe_plans = {get_plan(row) for row in probes}
+            if len(probe_plans) == 1:
+                return [(first, last, probe_plans.pop())]
+            if distance <= 16:
+                return [(row, row, get_plan(row)) for row in range(first, last + 1)]
+            middle = (first + last) // 2
+            return partition(first, middle) + partition(middle + 1, last)
+
+        small_limit = max(1, 4 * self.properties.multi_processor_count)
+        intervals = [(row, row, get_plan(row)) for row in range(1, small_limit + 1)]
+        bytes_per_row = max(1, (self.working_set_bytes + self.num_work_rows - 1) // self.num_work_rows)
+        l2_rows = max(1, self.properties.L2_cache_size // bytes_per_row)
+        maximum = 1 << 30
+        cuts = {small_limit, maximum}
+        cuts.update(row for row in range(l2_rows - 2, l2_rows + 3) if small_limit < row < maximum)
+        first = small_limit + 1
+        for last in sorted(cuts):
+            if last < first:
+                continue
+            intervals.extend(partition(first, last))
+            first = last + 1
+
+        merged = []
+        for first, last, plan in intervals:
+            if merged and merged[-1][1] + 1 == first and merged[-1][2] == plan:
+                merged[-1] = merged[-1][0], last, plan
+            else:
+                merged.append((first, last, plan))
+        return merged
+
+    def kernel_specs(self, plan):
         from humming import dtypes
         from humming.kernel.process_input import ProcessInputKernel, ProcessInputScaleKernel
-
-        self.num_input_rows = self.inputs.numel() // self.input_row_size
-        uses_token_scale = self.dynamic_scale_mode in ("token", "group_token")
-        self.static_tensor_scales = self.token_scales if self.static_mode & STATIC_TENSOR else None
-        self.static_group_scales = self.group_scales if self.static_mode & STATIC_GROUP else None
-        self.output_token_scales = self.token_scales if uses_token_scale else None
-
-        self.kernel_outputs = self.outputs
-        if self.quant_dtype in HIDDEN_BASE and self.outputs.dtype == torch.uint8:
-            self.kernel_outputs = self.outputs.view(QUANT_STORAGE[self.quant_dtype][0])
-        self.scales_kernel_view = self.group_scales
-        if self.group_scales is not None and self.group_scale_dtype == "float8e8m0":
-            self.scales_kernel_view = self.group_scales.view(torch.uint8)
-
-        if self.cached_executor is not None:
-            return
 
         target_dtype = (
             dtypes.DataType.from_str(self.quant_dtype) if self.quant_dtype is not None else dtypes.float32
@@ -348,13 +365,14 @@ class _ProcessInput:
             hidden_size=self.hidden_size,
             quant_group_size=self.quant_group_size,
             hadamard_block_size=self.hadamard_block_size,
-            threads_per_task=self.plan.threads_per_task,
-            values_per_thread=self.plan.values_per_thread,
-            tokens_per_block=self.plan.tokens_per_block,
+            threads_per_task=plan.threads_per_task,
+            values_per_thread=plan.values_per_thread,
+            tokens_per_block=plan.tokens_per_block,
             tile_size=self.tile_size,
             layout=kernel_layout,
+            semantic_layout=self.layout,
             layout_width=self.output_width,
-            scatter_single_output=self.plan.separate_outputs,
+            scatter_single_output=plan.separate_outputs,
             expert_layout_int64=self.expert_layout is not None and self.expert_layout.dtype == torch.int64,
             index_int64=self.indices is not None and self.indices.dtype == torch.int64,
             zero_invalid=self.zero_invalid and self.layout == LayoutType.GroupedPadded,
@@ -363,93 +381,90 @@ class _ProcessInput:
             quant_mode=self.quant_mode,
             group_scale_dtype=self.group_scale_dtype,
             scale_layout=self.group_scale_layout,
-            work_partition=self.plan.work_partition,
-            tiles_per_block=self.plan.tiles_per_block,
+            work_partition=plan.work_partition,
+            tiles_per_block=plan.tiles_per_block,
             use_pdl=self.use_pdl and self.capability[0] >= 9,
         )
-        if self.dynamic_scale_mode == "token" and self.plan.two_stage:
+        if self.dynamic_scale_mode == "token" and plan.two_stage:
             phases = (1, 2)
         else:
             phases = (0,)
-        self.phase_kernels = {
-            phase: ProcessInputKernel(**kernel_args, quantization_phase=phase) for phase in phases
-        }
-        self.scale_kernel = None
-        if self.dynamic_scale_mode == "group_token" and self.plan.work_partition == 1:
-            self.scale_kernel = ProcessInputScaleKernel(
-                **kernel_args,
-                quantization_phase=0,
-                finalize_tokens_per_block=self.plan.finalize_tokens_per_block,
-            )
-        self._executor_cache[self.executor_key] = self.plan, self.phase_kernels, self.scale_kernel
-
-    def launch_phase(self, quantization_phase: int, output_scales: torch.Tensor | None) -> None:
-        kernel = self.phase_kernels[quantization_phase]
-        kernel(
-            inputs=self.inputs,
-            outputs=self.kernel_outputs,
-            static_tensor_scales=self.static_tensor_scales,
-            static_group_scales=self.static_group_scales,
-            output_scales=output_scales,
-            token_scales=self.output_token_scales,
-            expert_layout=self.expert_layout,
-            indices=self.indices,
-            num_input_rows=self.num_input_rows,
-            num_output_rows=self.num_output_rows,
-            num_work_rows=self.num_work_rows,
-            num_experts=self.num_experts,
-            max_tokens_per_expert=self.max_tokens_per_expert,
-            group_scale_stride=self.group_scale_stride,
-        )
-
-    def launch_group_token_finalizer(self, intermediate_scales: torch.Tensor) -> None:
-        self.scale_kernel(
-            intermediate_scales=intermediate_scales,
-            group_scales=self.scales_kernel_view,
-            token_scales=self.output_token_scales,
-            expert_layout=self.expert_layout,
-            indices=self.indices,
-            num_input_rows=self.num_input_rows,
-            num_output_rows=self.num_output_rows,
-            num_work_rows=self.num_work_rows,
-            num_experts=self.num_experts,
-            max_tokens_per_expert=self.max_tokens_per_expert,
-            group_scale_stride=self.group_scale_stride,
-        )
-
-    def launch(self) -> None:
-        if self.dynamic_scale_mode == "group_token":
-            if self.plan.work_partition == 0:
-                self.launch_phase(0, self.scales_kernel_view)
-                return
-            intermediate_scales = torch.empty(
-                self.num_output_rows * self.num_quant_groups,
-                dtype=torch.uint16,
-                device=self.inputs.device,
-            )
-            self.launch_phase(0, intermediate_scales)
-            self.launch_group_token_finalizer(intermediate_scales)
-        elif self.dynamic_scale_mode == "token" and self.plan.two_stage:
-            self.launch_phase(1, self.output_token_scales)
-            self.launch_phase(2, self.output_token_scales)
+        phase_specs = {}
+        for phase in phases:
+            phase_specs[phase] = (ProcessInputKernel, kernel_args | {"quantization_phase": phase})
+        scale_spec = None
+        if self.dynamic_scale_mode == "group_token" and plan.work_partition == 1:
+            scale_args = kernel_args | {"quantization_phase": 0}
+            scale_args["finalize_tokens_per_block"] = plan.finalize_tokens_per_block
+            scale_spec = ProcessInputScaleKernel, scale_args
+        if self.dynamic_scale_mode == "token" and plan.two_stage:
+            return phase_specs[1], phase_specs[2]
         else:
-            uses_token_scale = self.dynamic_scale_mode in ("token", "group_token")
-            output_scales = self.output_token_scales if uses_token_scale else self.scales_kernel_view
-            self.launch_phase(0, output_scales)
+            return phase_specs[0], scale_spec
 
-    def run(self) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    def prepare_launch_configs(self) -> torch.Tensor:
+        self.prepare()
+        self.select_schedule()
+        intervals = self.plan_intervals()
+        plan_specs = {plan: self.kernel_specs(plan) for _, _, plan in intervals}
+
+        def spec_key(spec):
+            kernel_type, kernel_args = spec
+            return kernel_type, tuple(sorted(kernel_args.items()))
+
+        unique_specs = {}
+        for primary, secondary in plan_specs.values():
+            for spec in (primary, secondary):
+                if spec is not None:
+                    unique_specs.setdefault(spec_key(spec), spec)
+
+        def compile_kernel(spec):
+            kernel_type, kernel_args = spec
+            return kernel_type(**kernel_args)
+
+        parallel = len(unique_specs) > 1
+        parallel &= os.environ.get("HUMMING_DISABLE_PARALLEL_BUILD", "0") != "1"
+        if parallel:
+            workers = min(16, len(unique_specs))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                initializer=torch.cuda.set_device,
+                initargs=(self.inputs.device.index,),
+            ) as executor:
+                compiled = executor.map(compile_kernel, unique_specs.values())
+                kernels = dict(zip(unique_specs, compiled, strict=True))
+        else:
+            kernels = {key: compile_kernel(spec) for key, spec in unique_specs.items()}
+        for kernel in kernels.values():
+            kernel.load_cubin()
+
+        compiled_plans = {}
+        for plan, (primary, secondary) in plan_specs.items():
+            primary_id = kernels[spec_key(primary)].process_input_kernel_id
+            secondary_kernel = None if secondary is None else kernels[spec_key(secondary)]
+            secondary_id = -1 if secondary_kernel is None else secondary_kernel.process_input_kernel_id
+            compiled_plans[plan] = primary_id, secondary_id
+
+        compiled_intervals = []
+        for first, last, plan in intervals:
+            kernel_ids = compiled_plans[plan]
+            if compiled_intervals and compiled_intervals[-1][2] == kernel_ids:
+                compiled_intervals[-1] = compiled_intervals[-1][0], last, kernel_ids
+            else:
+                compiled_intervals.append((first, last, kernel_ids))
+        configs = []
+        for first, last, (primary_id, secondary_id) in compiled_intervals:
+            configs.extend((first - 1, last, primary_id, secondary_id))
+        self.launch_configs = torch.tensor(configs, dtype=torch.int64, device="cpu")
+        if self.family_key is not None:
+            self._family_cache[self.family_key] = self.launch_configs
+        return self.launch_configs
+
+    def prepare(self) -> None:
         self.normalize()
         self.prepare_layout()
         self.allocate_outputs()
         self.allocate_scales()
-        result = self.result()
-        if isinstance(self.inputs, FakeTensor):
-            return result
-        assert self.inputs.is_cuda
-        self.select_schedule()
-        self.prepare_executor()
-        self.launch()
-        return result
 
 
 def process_input(
@@ -461,6 +476,7 @@ def process_input(
     quant_dtype: str | None = None,
     quant_group_size: int | None = None,
     group_scales: torch.Tensor | None = None,
+    group_scale_dtype: str | None = None,
     token_scales: torch.Tensor | None = None,
     activation_type: str = "none",
     activation_impl: str | None = None,
@@ -472,53 +488,88 @@ def process_input(
     group_scale_layout: str = "row_major",
     use_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    operation = _ProcessInput(
-        inputs=inputs,
-        outputs=outputs,
-        inplace=inplace,
-        quant_mode=quant_mode,
-        quant_dtype=quant_dtype,
-        quant_group_size=quant_group_size,
-        group_scales=group_scales,
-        token_scales=token_scales,
-        activation_type=activation_type,
-        activation_impl=activation_impl,
-        hadamard_block_size=hadamard_block_size,
-        layout=layout,
-        expert_layout=expert_layout,
-        indices=indices,
-        zero_invalid=zero_invalid,
-        group_scale_layout=group_scale_layout,
-        use_pdl=use_pdl,
+    layout_type = LayoutType(layout)
+    output_width = 1
+    if layout_type == LayoutType.Scatter and indices is not None:
+        output_width = indices.size(1)
+    single_expert = layout_type == LayoutType.Grouped and expert_layout is not None
+    single_expert = single_expert and expert_layout.numel() == 2
+    # M and ordinary leading dimensions remain runtime values. K, scatter width,
+    # and the single-expert specialization change the generated cubin.
+    family_key = (
+        inputs.device.index,
+        inputs.dtype,
+        inputs.size(-1),
+        outputs.dtype if outputs is not None else None,
+        group_scales.dtype if group_scales is not None else None,
+        group_scale_dtype,
+        token_scales.dtype if token_scales is not None else None,
+        expert_layout.dtype if expert_layout is not None else None,
+        indices.dtype if indices is not None else None,
+        inplace,
+        quant_mode,
+        quant_dtype,
+        quant_group_size,
+        activation_type,
+        activation_impl,
+        hadamard_block_size,
+        layout_type,
+        output_width,
+        single_expert,
+        zero_invalid,
+        group_scale_layout,
+        use_pdl,
     )
-    return operation.run()
+    fake = isinstance(inputs, FakeTensor)
+    launch_configs = None if fake else _ProcessInput._family_cache.get(family_key)
+    operation = None
+    if launch_configs is None:
+        operation = _ProcessInput(
+            inputs=inputs,
+            family_key=family_key,
+            outputs=outputs,
+            inplace=inplace,
+            quant_mode=quant_mode,
+            quant_dtype=quant_dtype,
+            quant_group_size=quant_group_size,
+            group_scales=group_scales,
+            group_scale_dtype=group_scale_dtype,
+            token_scales=token_scales,
+            activation_type=activation_type,
+            activation_impl=activation_impl,
+            hadamard_block_size=hadamard_block_size,
+            layout=layout,
+            expert_layout=expert_layout,
+            indices=indices,
+            zero_invalid=zero_invalid,
+            group_scale_layout=group_scale_layout,
+            use_pdl=use_pdl,
+        )
+    if fake:
+        operation.prepare()
+        return operation.result()
 
-
-def _allocate_legacy_group_scales(
-    inputs: torch.Tensor,
-    group_size: int,
-    scale_dtype: str,
-    group_scale_layout: GroupScaleLayout,
-) -> torch.Tensor:
-    rows = inputs.numel() // inputs.size(-1)
-    groups = inputs.size(-1) // group_size
-    stride = (rows + 3) // 4 * 4 if group_scale_layout != GroupScaleLayout.RowMajor else rows
-    if group_scale_layout == GroupScaleLayout.RowMajor:
-        shape = tuple(inputs.shape[:-1]) + (groups,)
-    elif group_scale_layout == GroupScaleLayout.MMajor:
-        shape = (groups, stride)
-    else:
-        shape = ((groups + 3) // 4, stride, 4)
-    return torch.empty(shape, device=inputs.device, dtype=SCALE_TORCH_DTYPE[scale_dtype])
-
-
-def _legacy_group_scale_view(
-    scales: torch.Tensor,
-    group_scale_layout: GroupScaleLayout,
-) -> torch.Tensor:
-    if group_scale_layout != GroupScaleLayout.MxPacked:
-        return scales
-    return scales.view(torch.int32).reshape(scales.size(0), scales.size(1))
+    assert inputs.is_cuda
+    if operation is not None:
+        with torch.cuda.device(inputs.device):
+            launch_configs = operation.prepare_launch_configs()
+        outputs = operation.outputs
+        group_scales = operation.group_scales
+        token_scales = operation.token_scales
+    result = torch.ops.humming.launch_process_input(
+        launch_configs,
+        inputs,
+        outputs,
+        group_scales,
+        token_scales,
+        expert_layout,
+        indices,
+        inplace,
+    )
+    result_output, result_group_scales, result_token_scales = result
+    if quant_dtype in HIDDEN_BASE and result_output.dtype != torch.uint8:
+        result_output = result_output.view(torch.uint8)
+    return result_output, result_group_scales, result_token_scales
 
 
 def quant_input(
@@ -553,7 +604,6 @@ def quant_input(
         group_scale_layout = GroupScaleLayout.MMajor
         if scale_dtype == "float8e8m0":
             group_scale_layout = GroupScaleLayout.MxPacked
-    group_scales = _allocate_legacy_group_scales(inputs, group_size, scale_dtype, group_scale_layout)
     quant_mode = (
         QuantizationMode.StaticTensorDynamicGroup
         if global_scale is not None
@@ -565,10 +615,10 @@ def quant_input(
         quant_mode=quant_mode,
         quant_dtype=dtype,
         quant_group_size=group_size,
-        group_scales=group_scales,
+        group_scale_dtype=scale_dtype,
         token_scales=global_scale,
         group_scale_layout=group_scale_layout,
         use_pdl=use_pdl,
     )
     assert result_group_scales is not None
-    return quantized, _legacy_group_scale_view(result_group_scales, group_scale_layout)
+    return quantized, result_group_scales

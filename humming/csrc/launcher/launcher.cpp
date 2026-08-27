@@ -6,17 +6,12 @@
 #include <vector>
 
 #include "./elf.h"
+#include "./process_input.h"
 #include "./tensor.h"
 #include "./torch_api.h"
 #include "./utils.h"
 
 static std::unordered_map<CUcontext, std::unordered_map<int64_t, KernelData>> g_kernel_data;
-
-inline CUcontext get_current_context() {
-  CUcontext context;
-  check_curesult(cuCtxGetCurrent(&context), "cuCtxGetCurrent");
-  return context;
-}
 
 inline int64_t find_kernel_configs_target_index(IntArrayRef &configs, int64_t shape_m) {
   size_t n = configs.size();
@@ -47,16 +42,6 @@ inline KernelLaunchData find_kernel_launch_data(
   KernelLaunchData kernel_launch_data = {kernel_data, num_sms};
   return kernel_launch_data;
 };
-
-inline CUstream get_current_cuda_stream(int64_t dev) {
-#if USE_TORCH_STABLE_API
-  void *stream_ptr = nullptr;
-  aoti_torch_get_current_cuda_stream(dev, &stream_ptr);
-  return static_cast<CUstream>(stream_ptr);
-#else
-  return at::cuda::getCurrentCUDAStream(dev);
-#endif
-}
 
 inline int64_t get_num_sms(int64_t num_sms, int64_t dev) {
   if (num_sms > 0) return num_sms;
@@ -331,14 +316,21 @@ COMMON_TORCH_LIBRARY(humming, m) {
       "Tensor? sorted_ids, Tensor? expert_ids, Tensor? num_tokens_padded, Tensor? expert_layout, "
       "Tensor? locks, SymInt top_k, SymInt valid_shape_m, bool should_check_tensor = True) -> Tensor");
   m.def("register_kernel(str cubin_path) -> (int, str)");
+  m.def("register_process_input_kernel(str cubin_path) -> (int, str)");
   m.def("get_kernel_smem_size(int kernel_id) -> int");
+  m.def(
+      "launch_process_input(Tensor configs, Tensor inputs, Tensor? outputs, Tensor? group_scales, "
+      "Tensor? token_scales, Tensor? expert_layout, Tensor? indices, bool inplace) "
+      "-> (Tensor, Tensor?, Tensor?)");
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, CUDA, m) {
   m.impl("launch_kernel", COMMON_TORCH_BOX(&launch_kernel));
+  m.impl("launch_process_input", COMMON_TORCH_BOX(&launch_process_input));
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, Undefined, m) {
   m.impl("register_kernel", COMMON_TORCH_BOX(&register_kernel));
+  m.impl("register_process_input_kernel", COMMON_TORCH_BOX(&register_process_input_kernel));
   m.impl("get_kernel_smem_size", COMMON_TORCH_BOX(&get_kernel_smem_size));
 };

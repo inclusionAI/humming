@@ -29,6 +29,11 @@ def register_kernel(cubin_path: str) -> tuple[int, str]:
     return torch.ops.humming.register_kernel(cubin_path)
 
 
+def register_process_input_kernel(cubin_path: str) -> tuple[int, str]:
+    init_humming_launcher()
+    return torch.ops.humming.register_process_input_kernel(cubin_path)
+
+
 def get_kernel_smem_size(kernel_id: int) -> int:
     init_humming_launcher()
     return torch.ops.humming.get_kernel_smem_size(kernel_id)
