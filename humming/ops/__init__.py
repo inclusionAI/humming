@@ -6,8 +6,12 @@ import torch
 from humming import dtypes
 from humming.kernel.humming import HummingKernel
 from humming.ops.bench import tops_bench  # noqa
-from humming.ops.hadamard import hadamard_quant_input, hadamard_transform
-from humming.ops.input import quant_input
+from humming.ops.input import (
+    hadamard_quant_input,
+    hadamard_transform,
+    process_input,
+    quant_input,
+)
 from humming.ops.moe import moe_fused_mul_sum
 from humming.ops.utils import init_humming_launcher, register_op
 from humming.ops.weight import (
@@ -187,6 +191,7 @@ __all__ = [
     "hadamard_transform",
     "hadamard_quant_input",
     "quant_input",
+    "process_input",
     "quant_weight",
     "dequant_weight",
     "repack_weight",
