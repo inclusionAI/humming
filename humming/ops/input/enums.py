@@ -12,6 +12,12 @@ class QuantizationMode(str, Enum):
     DynamicGroupToken = "dynamic_group_token"
 
 
+class QuantizationPhase(str, Enum):
+    Fused = "fused"
+    CollectAbsmax = "collect_absmax"
+    Quantize = "quantize"
+
+
 class ActivationType(str, Enum):
     None_ = "none"
     Unary = "unary"

@@ -12,12 +12,6 @@ enum class LayoutType : uint32_t {
 };
 
 
-enum class WorkPartition : uint32_t {
-  Row = 0,
-  Tile = 1,
-};
-
-
 struct InputLayoutParams {
   // Grouped/permute: E + 1 expert row offsets.
   // GroupedPadded: E valid-token counts.
@@ -44,7 +38,7 @@ template <
     bool kExpertLayoutInt64_ = false,
     bool kIndexInt64_ = false,
     bool kZeroInvalid_ = false,
-    WorkPartition kPartition_ = WorkPartition::Row,
+    bool kUseTilePartition_ = false,
     uint32_t kTileSize_ = kHiddenSize_,
     uint32_t kTilesPerBlock_ = 1>
 class InputLayout {
@@ -60,20 +54,20 @@ public:
   static constexpr bool kExpertLayoutInt64 = kExpertLayoutInt64_;
   static constexpr bool kIndexInt64 = kIndexInt64_;
   static constexpr bool kZeroInvalid = kZeroInvalid_;
-  static constexpr WorkPartition kPartition = kPartition_;
+  static constexpr bool kUseTilePartition = kUseTilePartition_;
   static constexpr uint32_t kTileSize = kTileSize_;
   static constexpr uint32_t kTilesPerBlock = kTilesPerBlock_;
   static constexpr uint32_t kNumTiles = kHiddenSize / kTileSize;
   static constexpr uint32_t kTilesPerTask = kTilesPerBlock < kNumTiles ? kTilesPerBlock : kNumTiles;
   static constexpr uint32_t kColumnsPerTask = kTilesPerTask * kTileSize;
-  static constexpr uint32_t kBlocksPerRow = kPartition == WorkPartition::Tile ? (kNumTiles + kTilesPerBlock - 1) / kTilesPerBlock : 1;
+  static constexpr uint32_t kBlocksPerRow = kUseTilePartition ? (kNumTiles + kTilesPerBlock - 1) / kTilesPerBlock : 1;
   static constexpr uint32_t kThreads = kThreadsPerTask * kTokensPerBlock;
   static constexpr uint32_t kOutputsPerToken = kType == LayoutType::Scatter && !kScatterSingleOutput ? kScatterWidth : 1;
   static constexpr bool kUniformRoutes = kScatterSingleOutput || kValuesPerThread <= 8;
   static constexpr uint32_t kRouteChunks = kDirectScatter && !kUniformRoutes ? (kOutputsPerToken + 31) / 32 : kOutputsPerToken;
   static constexpr uint64_t kInvalidRow = ~uint64_t{0};
   static constexpr bool kFullColumns =
-      kPartition == WorkPartition::Row
+      !kUseTilePartition
           ? kThreadsPerTask * kValuesPerThread == kHiddenSize
           : kNumTiles % kTilesPerBlock == 0 && kThreadsPerTask * kValuesPerThread == kColumnsPerTask;
 
@@ -83,9 +77,9 @@ public:
   static_assert(kTokensPerBlock > 0);
   static_assert(kTileSize > 0 && kHiddenSize % kTileSize == 0);
   static_assert(kTilesPerBlock > 0);
-  static_assert(kPartition != WorkPartition::Row || kThreadsPerTask * kValuesPerThread >= kHiddenSize);
-  static_assert(kPartition != WorkPartition::Tile || kTokensPerBlock == 1);
-  static_assert(kPartition != WorkPartition::Tile || kThreadsPerTask * kValuesPerThread >= kColumnsPerTask);
+  static_assert(kUseTilePartition || kThreadsPerTask * kValuesPerThread >= kHiddenSize);
+  static_assert(!kUseTilePartition || kTokensPerBlock == 1);
+  static_assert(!kUseTilePartition || kThreadsPerTask * kValuesPerThread >= kColumnsPerTask);
   static_assert(kType != LayoutType::Scatter || kScatterWidth > 0);
   static_assert(kType == LayoutType::Scatter || kScatterWidth == 1);
   static_assert(kType != LayoutType::Scatter || kIndexInt64);
@@ -162,7 +156,7 @@ public:
   CUDA_INLINE InputLayout(const InputLayoutParams &params, SharedStorage *shared)
       : params_(params), shared_(shared), first_token_(0), first_column_(0), last_column_(kHiddenSize),
         direct_input_row_(0), direct_route_(0) {
-    if constexpr (kPartition == WorkPartition::Row) {
+    if constexpr (!kUseTilePartition) {
       first_token_ = static_cast<uint64_t>(blockIdx.x) * kTokensPerBlock;
     } else {
       uint64_t task = blockIdx.x / kBlocksPerRow;
@@ -178,7 +172,7 @@ public:
   }
 
   __host__ __device__ static constexpr uint64_t grid_size(uint64_t rows) {
-    if constexpr (kPartition == WorkPartition::Tile) {
+    if constexpr (kUseTilePartition) {
       return rows * kBlocksPerRow;
     } else {
       return (rows + kTokensPerBlock - 1) / kTokensPerBlock;
@@ -188,7 +182,7 @@ public:
   CUDA_INLINE BlockTask block() const {
     uint64_t rows = num_work_rows();
     uint64_t remaining = first_token_ < rows ? rows - first_token_ : 0;
-    uint32_t max_tokens = kPartition == WorkPartition::Row ? kTokensPerBlock : 1;
+    uint32_t max_tokens = kUseTilePartition ? 1 : kTokensPerBlock;
     uint32_t num_tokens = static_cast<uint32_t>(remaining < max_tokens ? remaining : max_tokens);
     return BlockTask{first_token_, num_tokens, first_column_, last_column_ - first_column_};
   }
@@ -213,13 +207,13 @@ public:
 
   CUDA_INLINE ThreadTask thread() const {
     uint32_t thread = threadIdx.x;
-    uint32_t token_in_block = kPartition == WorkPartition::Row ? thread / kThreadsPerTask : 0;
-    uint32_t lane = kPartition == WorkPartition::Row ? thread - token_in_block * kThreadsPerTask : thread;
+    uint32_t token_in_block = kUseTilePartition ? 0 : thread / kThreadsPerTask;
+    uint32_t lane = kUseTilePartition ? thread : thread - token_in_block * kThreadsPerTask;
     uint32_t column = first_column_ + lane * kValuesPerThread;
     uint32_t num_values = kFullColumns ? kValuesPerThread : (column < last_column_ ? min(kValuesPerThread, last_column_ - column) : 0);
-    if constexpr (kType == LayoutType::Normal && kFullColumns && (kPartition == WorkPartition::Tile || kTokensPerBlock == 1)) {
+    if constexpr (kType == LayoutType::Normal && kFullColumns && (kUseTilePartition || kTokensPerBlock == 1)) {
       uint64_t row = first_token_;
-      uint64_t element_offset = static_cast<uint64_t>(blockIdx.x) * (kPartition == WorkPartition::Tile ? kColumnsPerTask : kHiddenSize) + lane * kValuesPerThread;
+      uint64_t element_offset = static_cast<uint64_t>(blockIdx.x) * (kUseTilePartition ? kColumnsPerTask : kHiddenSize) + lane * kValuesPerThread;
       return ThreadTask{row, element_offset, token_in_block, lane, column, num_values, 0, true};
     }
     if constexpr (kDirectScatter) {
@@ -270,7 +264,7 @@ public:
   }
 
   CUDA_INLINE WriteTask write(const ThreadTask &thread, const RouteTask &routes, uint32_t route = 0) const {
-    if constexpr (kType == LayoutType::Normal && kFullColumns && (kPartition == WorkPartition::Tile || kTokensPerBlock == 1))
+    if constexpr (kType == LayoutType::Normal && kFullColumns && (kUseTilePartition || kTokensPerBlock == 1))
       return WriteTask{thread.input_row, thread.element_offset, thread.column, thread.num_values, true, false};
     if constexpr (kDirectScatter) {
       uint64_t output_row;
@@ -323,7 +317,7 @@ private:
     PRAGMA_UNROLL
     for (uint32_t route = 0; route < kOutputsPerToken; route++)
       task.output_rows[route] = kInvalidRow;
-    if constexpr (kType == LayoutType::Normal && (kPartition == WorkPartition::Tile || kTokensPerBlock == 1)) {
+    if constexpr (kType == LayoutType::Normal && (kUseTilePartition || kTokensPerBlock == 1)) {
       task.active = true;
     } else {
       task.active = logical_row < num_work_rows();
@@ -332,7 +326,7 @@ private:
 
     if constexpr (kType == LayoutType::Normal) {
       task.input_row = logical_row;
-      if constexpr (kPartition == WorkPartition::Tile || kTokensPerBlock == 1) {
+      if constexpr (kUseTilePartition || kTokensPerBlock == 1) {
         task.load = true;
       } else {
         task.load = logical_row < params_.num_input_rows;

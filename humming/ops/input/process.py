@@ -1,9 +1,6 @@
 import copy
 import dataclasses
 import math
-import os
-from concurrent.futures import ThreadPoolExecutor
-from typing import ClassVar
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -23,10 +20,7 @@ from .spec import (
 
 @dataclasses.dataclass(kw_only=True)
 class _ProcessInput:
-    _family_cache: ClassVar[dict[tuple[object, ...], torch.Tensor]] = {}
-
     inputs: torch.Tensor
-    family_key: tuple[object, ...] | None = None
     outputs: torch.Tensor | None = None
     inplace: bool = False
     quant_mode: QuantizationMode | str = "none"
@@ -350,9 +344,8 @@ class _ProcessInput:
                 merged.append((first, last, plan))
         return merged
 
-    def kernel_specs(self, plan):
+    def kernel_config(self):
         from humming import dtypes
-        from humming.kernel.process_input import ProcessInputKernel, ProcessInputScaleKernel
 
         target_dtype = (
             dtypes.DataType.from_str(self.quant_dtype) if self.quant_dtype is not None else dtypes.float32
@@ -365,14 +358,10 @@ class _ProcessInput:
             hidden_size=self.hidden_size,
             quant_group_size=self.quant_group_size,
             hadamard_block_size=self.hadamard_block_size,
-            threads_per_task=plan.threads_per_task,
-            values_per_thread=plan.values_per_thread,
-            tokens_per_block=plan.tokens_per_block,
             tile_size=self.tile_size,
             layout=kernel_layout,
             semantic_layout=self.layout,
             layout_width=self.output_width,
-            scatter_single_output=plan.separate_outputs,
             expert_layout_int64=self.expert_layout is not None and self.expert_layout.dtype == torch.int64,
             index_int64=self.indices is not None and self.indices.dtype == torch.int64,
             zero_invalid=self.zero_invalid and self.layout == LayoutType.GroupedPadded,
@@ -381,84 +370,23 @@ class _ProcessInput:
             quant_mode=self.quant_mode,
             group_scale_dtype=self.group_scale_dtype,
             scale_layout=self.group_scale_layout,
-            work_partition=plan.work_partition,
-            tiles_per_block=plan.tiles_per_block,
             use_pdl=self.use_pdl and self.capability[0] >= 9,
         )
-        if self.dynamic_scale_mode == "token" and plan.two_stage:
-            phases = (1, 2)
-        else:
-            phases = (0,)
-        phase_specs = {}
-        for phase in phases:
-            phase_specs[phase] = (ProcessInputKernel, kernel_args | {"quantization_phase": phase})
-        scale_spec = None
-        if self.dynamic_scale_mode == "group_token" and plan.work_partition == 1:
-            scale_args = kernel_args | {"quantization_phase": 0}
-            scale_args["finalize_tokens_per_block"] = plan.finalize_tokens_per_block
-            scale_spec = ProcessInputScaleKernel, scale_args
-        if self.dynamic_scale_mode == "token" and plan.two_stage:
-            return phase_specs[1], phase_specs[2]
-        else:
-            return phase_specs[0], scale_spec
+        return kernel_args
 
-    def prepare_launch_configs(self) -> torch.Tensor:
+    def prepare_launch_configs(self, cache_key=None) -> torch.Tensor:
+        from humming.kernel.process_input import ProcessInputKernel
+
         self.prepare()
         self.select_schedule()
         intervals = self.plan_intervals()
-        plan_specs = {plan: self.kernel_specs(plan) for _, _, plan in intervals}
-
-        def spec_key(spec):
-            kernel_type, kernel_args = spec
-            return kernel_type, tuple(sorted(kernel_args.items()))
-
-        unique_specs = {}
-        for primary, secondary in plan_specs.values():
-            for spec in (primary, secondary):
-                if spec is not None:
-                    unique_specs.setdefault(spec_key(spec), spec)
-
-        def compile_kernel(spec):
-            kernel_type, kernel_args = spec
-            return kernel_type(**kernel_args)
-
-        parallel = len(unique_specs) > 1
-        parallel &= os.environ.get("HUMMING_DISABLE_PARALLEL_BUILD", "0") != "1"
-        if parallel:
-            workers = min(16, len(unique_specs))
-            with ThreadPoolExecutor(
-                max_workers=workers,
-                initializer=torch.cuda.set_device,
-                initargs=(self.inputs.device.index,),
-            ) as executor:
-                compiled = executor.map(compile_kernel, unique_specs.values())
-                kernels = dict(zip(unique_specs, compiled, strict=True))
-        else:
-            kernels = {key: compile_kernel(spec) for key, spec in unique_specs.items()}
-        for kernel in kernels.values():
-            kernel.load_cubin()
-
-        compiled_plans = {}
-        for plan, (primary, secondary) in plan_specs.items():
-            primary_id = kernels[spec_key(primary)].process_input_kernel_id
-            secondary_kernel = None if secondary is None else kernels[spec_key(secondary)]
-            secondary_id = -1 if secondary_kernel is None else secondary_kernel.process_input_kernel_id
-            compiled_plans[plan] = primary_id, secondary_id
-
-        compiled_intervals = []
-        for first, last, plan in intervals:
-            kernel_ids = compiled_plans[plan]
-            if compiled_intervals and compiled_intervals[-1][2] == kernel_ids:
-                compiled_intervals[-1] = compiled_intervals[-1][0], last, kernel_ids
-            else:
-                compiled_intervals.append((first, last, kernel_ids))
-        configs = []
-        for first, last, (primary_id, secondary_id) in compiled_intervals:
-            configs.extend((first - 1, last, primary_id, secondary_id))
-        self.launch_configs = torch.tensor(configs, dtype=torch.int64, device="cpu")
-        if self.family_key is not None:
-            self._family_cache[self.family_key] = self.launch_configs
-        return self.launch_configs
+        return ProcessInputKernel.prepare_kernels(
+            self.kernel_config(),
+            intervals,
+            self.dynamic_scale_mode,
+            self.inputs.device,
+            cache_key,
+        )
 
     def prepare(self) -> None:
         self.normalize()
@@ -488,6 +416,8 @@ def process_input(
     group_scale_layout: str = "row_major",
     use_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    from humming.kernel.process_input import ProcessInputKernel
+
     layout_type = LayoutType(layout)
     output_width = 1
     if layout_type == LayoutType.Scatter and indices is not None:
@@ -521,12 +451,11 @@ def process_input(
         use_pdl,
     )
     fake = isinstance(inputs, FakeTensor)
-    launch_configs = None if fake else _ProcessInput._family_cache.get(family_key)
+    launch_configs = None if fake else ProcessInputKernel._str2kernel_cache.get(family_key)
     operation = None
     if launch_configs is None:
         operation = _ProcessInput(
             inputs=inputs,
-            family_key=family_key,
             outputs=outputs,
             inplace=inplace,
             quant_mode=quant_mode,
@@ -552,7 +481,7 @@ def process_input(
     assert inputs.is_cuda
     if operation is not None:
         with torch.cuda.device(inputs.device):
-            launch_configs = operation.prepare_launch_configs()
+            launch_configs = operation.prepare_launch_configs(family_key)
         outputs = operation.outputs
         group_scales = operation.group_scales
         token_scales = operation.token_scales

@@ -26,7 +26,7 @@ enum class QuantizationMode : uint32_t {
 };
 
 
-enum class ProcessPhase : uint32_t {
+enum class QuantizationPhase : uint32_t {
   Fused = 0,
   CollectAbsmax = 1,
   Quantize = 2,
@@ -527,7 +527,7 @@ template <
     uint32_t kWarpOffset,
     bool kStaticScale,
     ScaleMode kScaleMode,
-    ProcessPhase kPhase = ProcessPhase::Fused>
+    QuantizationPhase kPhase = QuantizationPhase::Fused>
 CUDA_INLINE QuantGroupResult<TargetType, ScaleType, kValuesPerLane> quant_group(
     float *values,
     float *shared,
@@ -535,7 +535,7 @@ CUDA_INLINE QuantGroupResult<TargetType, ScaleType, kValuesPerLane> quant_group(
     ScaleStorage<ScaleType> collected_scale = {}) {
   static_assert(supported_scale_type<ScaleType>);
   static_assert(kScaleMode == ScaleMode::DynamicGroup || std::is_same<ScaleType, Float32>::value);
-  static_assert(kPhase == ProcessPhase::Fused || kScaleMode == ScaleMode::DynamicToken);
+  static_assert(kPhase == QuantizationPhase::Fused || kScaleMode == ScaleMode::DynamicToken);
 
   QuantGroupResult<TargetType, ScaleType, kValuesPerLane> result;
   if constexpr (kStaticScale && kScaleMode != ScaleMode::DynamicGroup) {
@@ -545,7 +545,7 @@ CUDA_INLINE QuantGroupResult<TargetType, ScaleType, kValuesPerLane> quant_group(
       values[value] *= static_multiplier;
   }
 
-  if constexpr (kPhase == ProcessPhase::Quantize) {
+  if constexpr (kPhase == QuantizationPhase::Quantize) {
     result.scale = collected_scale;
   } else if constexpr (kScaleMode != ScaleMode::Static) {
     float maximum = group_absmax<kValuesPerLane, kScaleSize, kNumWarps, kWarpOffset>(values, shared);
@@ -555,7 +555,7 @@ CUDA_INLINE QuantGroupResult<TargetType, ScaleType, kValuesPerLane> quant_group(
     result.scale = encode_scale<ScaleType>(raw_scale);
   }
 
-  if constexpr (kScaleMode != ScaleMode::Static && kPhase != ProcessPhase::CollectAbsmax) {
+  if constexpr (kScaleMode != ScaleMode::Static && kPhase != QuantizationPhase::CollectAbsmax) {
     float scale = decode_scale<ScaleType>(result.scale);
     if constexpr (kStaticScale && kScaleMode == ScaleMode::DynamicGroup)
       scale *= static_scale;
@@ -572,7 +572,7 @@ CUDA_INLINE QuantGroupResult<TargetType, ScaleType, kValuesPerLane> quant_group(
       values[value] *= dynamic_multiplier;
   }
 
-  if constexpr (kPhase != ProcessPhase::CollectAbsmax) {
+  if constexpr (kPhase != QuantizationPhase::CollectAbsmax) {
     if constexpr (TargetType::kIsFloatingPointType) {
       pack_float<TargetType, kValuesPerLane>(values, result.packed);
     } else if constexpr (TargetType::kBits == 8) {

@@ -204,7 +204,7 @@ def test_kernel_runtime_instances_are_context_local():
             threads_per_task=32,
             values_per_thread=1,
             quant_mode="none",
-            work_partition=1,
+            use_tile_partition=True,
             tile_size=32,
         )
 

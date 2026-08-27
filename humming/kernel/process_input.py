@@ -2,10 +2,18 @@ import dataclasses
 from typing import ClassVar
 
 import jinja2
+import torch
 
 from humming import dtypes
+from humming.config.base import BaseHummingConfig
 from humming.jit.runtime import KernelRuntime
-from humming.ops.input.enums import ActivationType, GroupScaleLayout, LayoutType, QuantizationMode
+from humming.ops.input.enums import (
+    ActivationType,
+    GroupScaleLayout,
+    LayoutType,
+    QuantizationMode,
+    QuantizationPhase,
+)
 from humming.ops.input.spec import QUANT_STORAGE
 
 _SOURCE_TYPE_CPP = {
@@ -25,119 +33,50 @@ _SCALE_TYPE_CPP = {
 CODE_TEMPLATE = jinja2.Template("""
 #include <humming/kernel/process_input.cuh>
 
-{% if activation_type == "None" %}
-using ProcessInputActivation = NoActivation;
-{% else %}
 struct ProcessInputActivation {
   static constexpr ActivationType kType = ActivationType::{{ activation_type }};
-  __device__ __forceinline__ static float apply({{ activation_arguments }}) {
+{% if activation_type == "Unary" %}
+  __device__ __forceinline__ static float apply(float a) {
     return {{ activation_impl }};
   }
-};
+{% elif activation_type != "None" %}
+  __device__ __forceinline__ static float apply(float a, float b) {
+    return {{ activation_impl }};
+  }
 {% endif %}
+};
 
-using RuntimeConfig = ProcessInputConfig<
-    {{ source_type }}, {{ target_type }},
-    InputShape<{{ hidden_size }}, {{ quant_group_size }}, {{ hadamard_block_size }}>,
-    InputSchedule<{{ threads_per_task }}, {{ values_per_thread }}, {{ tokens_per_block }},
-        static_cast<WorkPartition>({{ work_partition }}), {{ tile_size }},
-        {{ tiles_per_block }}, {{ use_pdl }}>,
-    InputLayoutConfig<LayoutType::{{ layout }}, {{ layout_width }},
-        {{ scatter_single_output }}, {{ expert_layout_int64 }}, {{ index_int64 }}, {{ zero_invalid }}>,
-    ProcessInputActivation,
-    InputQuantization<QuantizationMode::{{ quant_mode }},
-        static_cast<ProcessPhase>({{ quantization_phase }}),
-        {{ group_scale_type }}, GroupScaleLayout::{{ scale_layout }}>>;
+class KernelConfig {
+public:
+  using SourceType = {{ source_dtype }};
+  using TargetType = {{ target_dtype }};
+  using GroupScaleType = {{ group_scale_dtype }};
+  using Activation = ProcessInputActivation;
+{{ process_input_config }}
+};
 
-extern "C" __constant__ uint32_t PI_NUM_THREADS = RuntimeConfig::kThreads;
-extern "C" __constant__ uint32_t PI_SOURCE_DTYPE_ID = {{ source_dtype_id }};
-extern "C" __constant__ uint32_t PI_OUTPUT_DTYPE_ID = {{ output_dtype_id }};
-extern "C" __constant__ uint32_t PI_GROUP_SCALE_DTYPE_ID = {{ group_scale_dtype_id }};
-extern "C" __constant__ uint32_t PI_INPUT_ROW_SIZE = {{ input_row_size }};
-extern "C" __constant__ uint32_t PI_HIDDEN_SIZE = RuntimeConfig::kHiddenSize;
-extern "C" __constant__ uint32_t PI_QUANT_GROUP_SIZE = RuntimeConfig::kQuantGroupSize;
-extern "C" __constant__ uint32_t PI_TILE_SIZE = RuntimeConfig::kTileSize;
-extern "C" __constant__ uint32_t PI_TILES_PER_BLOCK = RuntimeConfig::kTilesPerBlock;
-extern "C" __constant__ uint32_t PI_TOKENS_PER_BLOCK = RuntimeConfig::kTokensPerBlock;
-extern "C" __constant__ uint32_t PI_LAYOUT = static_cast<uint32_t>(LayoutType::{{ semantic_layout }});
-extern "C" __constant__ uint32_t PI_LAYOUT_WIDTH = {{ layout_width }};
-extern "C" __constant__ uint32_t PI_WORK_PARTITION = static_cast<uint32_t>(RuntimeConfig::kPartition);
-extern "C" __constant__ uint32_t PI_QUANT_MODE = static_cast<uint32_t>(RuntimeConfig::kQuantization);
-extern "C" __constant__ uint32_t PI_QUANT_PHASE = static_cast<uint32_t>(RuntimeConfig::kPhase);
-extern "C" __constant__ uint32_t PI_SCALE_LAYOUT = static_cast<uint32_t>(RuntimeConfig::kGroupScaleLayout);
-extern "C" __constant__ uint32_t PI_OUTPUT_PACKING = {{ output_packing }};
-extern "C" __constant__ uint32_t PI_FINALIZE_TOKENS = {{ finalize_tokens }};
-extern "C" __constant__ uint32_t PI_SCATTER_SINGLE_OUTPUT = {{ scatter_single_output }};
-extern "C" __constant__ uint32_t PI_EXPERT_LAYOUT_INT64 = {{ expert_layout_int64 }};
-extern "C" __constant__ uint32_t PI_INDEX_INT64 = {{ index_int64 }};
-extern "C" __constant__ uint32_t PI_USE_PDL = {{ use_pdl }};
-extern "C" __constant__ uint32_t PI_ALLOW_BYTE_OUTPUT = {{ allow_byte_output }};
-extern "C" __constant__ uint32_t PI_IS_FINALIZER = {{ is_finalizer }};
+using RuntimeConfig = ProcessInputConfig<KernelConfig>;
+
+{{ process_input_extern }}
+extern "C" __constant__ uint32_t NUM_THREADS = RuntimeConfig::kThreads;
+extern "C" __constant__ uint32_t INPUT_ROW_SIZE = RuntimeConfig::kInputRowSize;
+extern "C" __constant__ uint32_t OUTPUT_PACKING = RuntimeConfig::kOutputPacking;
+extern "C" __constant__ uint32_t ALLOW_BYTE_OUTPUT = RuntimeConfig::kAllowByteOutput;
+extern "C" __constant__ uint32_t SOURCE_DTYPE_ID = {{ source_dtype_config }}::kId;
+extern "C" __constant__ uint32_t OUTPUT_DTYPE_ID = {{ output_dtype }}::kId;
+extern "C" __constant__ uint32_t GROUP_SCALE_DTYPE_ID = {{ group_scale_data_type }}::kId;
+extern "C" __constant__ uint32_t SEMANTIC_LAYOUT = static_cast<uint32_t>(KernelConfig::kSemanticLayout);
+extern "C" __constant__ uint32_t QUANT_MODE = static_cast<uint32_t>(RuntimeConfig::kQuantization);
+extern "C" __constant__ uint32_t QUANTIZATION_PHASE = static_cast<uint32_t>(RuntimeConfig::kPhase);
+extern "C" __constant__ uint32_t SCALE_LAYOUT = static_cast<uint32_t>(RuntimeConfig::kGroupScaleLayout);
 """)
 
 
-def _cvt_patch_mode(target_dtype):
-    if target_dtype == dtypes.float8e3m4:
-        return "cvt_e3m4"
-    if target_dtype == dtypes.float4e0m3:
-        return "cvt_e0m3"
-    return None
-
-
-def _render_code(kernel) -> str:
-    activation_arguments = "float a" if kernel.activation_type == ActivationType.Unary else "float a, float b"
-    quantized = kernel.quant_mode != QuantizationMode.Disabled
-    if quantized:
-        output_torch_dtype = QUANT_STORAGE[kernel.target_dtype.to_str()][0]
-    else:
-        output_torch_dtype = dtypes.torch_dtype_map[kernel.source_dtype]
-    output_dtype = dtypes.DataType.from_torch_dtype(output_torch_dtype)
-    group_scale_dtype = dtypes.DataType.from_str(kernel.group_scale_dtype)
-    output_packing = QUANT_STORAGE[kernel.target_dtype.to_str()][1] if quantized else 1
-    binary_types = (ActivationType.BinarySplit, ActivationType.BinaryInterleaved)
-    binary_activation = kernel.activation_type in binary_types
-    return CODE_TEMPLATE.render(
-        source_type=_SOURCE_TYPE_CPP[kernel.source_dtype],
-        target_type=kernel.target_dtype.to_cpp_str(),
-        hidden_size=kernel.hidden_size,
-        quant_group_size=kernel.quant_group_size,
-        hadamard_block_size=kernel.hadamard_block_size,
-        threads_per_task=kernel.threads_per_task,
-        values_per_thread=kernel.values_per_thread,
-        tokens_per_block=kernel.tokens_per_block,
-        work_partition=kernel.work_partition,
-        tile_size=kernel.tile_size,
-        tiles_per_block=kernel.tiles_per_block,
-        use_pdl=int(kernel.use_pdl),
-        layout=kernel.layout.name,
-        layout_width=kernel.layout_width,
-        scatter_single_output=int(kernel.scatter_single_output),
-        expert_layout_int64=int(kernel.expert_layout_int64),
-        index_int64=int(kernel.index_int64),
-        zero_invalid=int(kernel.zero_invalid),
-        activation_type=kernel.activation_type.cpp_name,
-        activation_arguments=activation_arguments,
-        activation_impl=kernel.activation_impl,
-        quant_mode=kernel.quant_mode.name,
-        quantization_phase=kernel.quantization_phase,
-        group_scale_type=_SCALE_TYPE_CPP[kernel.group_scale_dtype],
-        scale_layout=kernel.scale_layout.name,
-        source_dtype_id=kernel.source_dtype.id(),
-        output_dtype_id=output_dtype.id(),
-        group_scale_dtype_id=group_scale_dtype.id(),
-        input_row_size=kernel.hidden_size * (2 if binary_activation else 1),
-        semantic_layout=kernel.semantic_layout.name,
-        output_packing=output_packing,
-        finalize_tokens=getattr(kernel, "finalize_tokens_per_block", 0),
-        allow_byte_output=int(kernel.target_dtype.to_str() in ("float8e3m4",)),
-        is_finalizer=int(isinstance(kernel, ProcessInputScaleKernel)),
-    )
-
-
 @dataclasses.dataclass(kw_only=True)
-class ProcessInputKernel(KernelRuntime):
+class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
     # Kernel metadata
     name: ClassVar[str] = "process_input_kernel"
+    _str2kernel_cache: ClassVar[dict[tuple[object, ...], torch.Tensor]] = {}
 
     # Input/output types
     source_dtype: dtypes.DataType
@@ -165,16 +104,17 @@ class ProcessInputKernel(KernelRuntime):
     quant_mode: QuantizationMode | str = QuantizationMode.DynamicGroup
     group_scale_dtype: str = "float32"
     scale_layout: GroupScaleLayout | str = GroupScaleLayout.RowMajor
-    quantization_phase: int = 0
+    quantization_phase: QuantizationPhase | str = QuantizationPhase.Fused
 
     # Schedule
     threads_per_task: int
     values_per_thread: int
     tokens_per_block: int = 1
-    work_partition: int = 0
+    use_tile_partition: bool = False
     tile_size: int
     tiles_per_block: int = 1
     use_pdl: bool = False
+    finalize_tokens_per_block: int = 0
 
     def __post_init__(self):
         self.activation_type = ActivationType(self.activation_type)
@@ -184,6 +124,7 @@ class ProcessInputKernel(KernelRuntime):
         else:
             self.semantic_layout = LayoutType(self.semantic_layout)
         self.quant_mode = QuantizationMode(self.quant_mode)
+        self.quantization_phase = QuantizationPhase(self.quantization_phase)
         self.scale_layout = GroupScaleLayout(self.scale_layout)
         super().__post_init__()
 
@@ -194,45 +135,131 @@ class ProcessInputKernel(KernelRuntime):
 
         kernel_id, kernel_name = register_process_input_kernel(self.kernel_filename)
         assert self.name in kernel_name
+        self.kernel_id = kernel_id
         self.kernel_name = kernel_name
-        self.process_input_kernel_id = kernel_id
         self.cubin_loaded = True
 
     def init_kernel(self):
-        assert self.hidden_size % self.quant_group_size == 0
-        assert self.hidden_size % self.tile_size == 0
-        assert self.values_per_thread > 0
-        assert self.threads_per_task > 0
-        assert not self.scatter_single_output or self.layout == LayoutType.Scatter
-        threads = self.threads_per_task * self.tokens_per_block
-        assert threads % 32 == 0 and 32 <= threads <= 1024
-        self.code = _render_code(self)
-        self.kernel_expr = "process_input_kernel<RuntimeConfig>"
+        is_finalizer = isinstance(self, ProcessInputScaleKernel)
+        if is_finalizer:
+            assert self.quant_mode == QuantizationMode.DynamicGroupToken
+            assert self.use_tile_partition
+            assert self.quantization_phase == QuantizationPhase.Fused
+            assert 1 <= self.finalize_tokens_per_block <= 32
+            finalize_tokens = self.finalize_tokens_per_block
+            kernel_expr = f"finalize_group_token_scales_kernel<RuntimeConfig, {finalize_tokens}>"
+        else:
+            assert self.hidden_size % self.quant_group_size == 0
+            assert self.hidden_size % self.tile_size == 0
+            assert self.values_per_thread > 0
+            assert self.threads_per_task > 0
+            assert not self.scatter_single_output or self.layout == LayoutType.Scatter
+            threads = self.threads_per_task * self.tokens_per_block
+            assert threads % 32 == 0 and 32 <= threads <= 1024
+            kernel_expr = "process_input_kernel<RuntimeConfig>"
+
+        output_torch_dtype = dtypes.torch_dtype_map[self.source_dtype]
+        if self.quant_mode != QuantizationMode.Disabled:
+            output_torch_dtype = QUANT_STORAGE[self.target_dtype.to_str()][0]
+        output_dtype = dtypes.DataType.from_torch_dtype(output_torch_dtype)
+        group_scale_data_type = dtypes.DataType.from_str(self.group_scale_dtype)
+        template_args = self.to_template_args()
+        template_args.update(
+            process_input_config=self.to_cpp_str(ProcessInputKernel),
+            process_input_extern=self.to_extern_cpp_str(ProcessInputKernel),
+            source_dtype=_SOURCE_TYPE_CPP[self.source_dtype],
+            source_dtype_config=self.source_dtype.to_cpp_str(),
+            output_dtype=output_dtype.to_cpp_str(),
+            group_scale_dtype=_SCALE_TYPE_CPP[self.group_scale_dtype],
+            group_scale_data_type=group_scale_data_type.to_cpp_str(),
+            activation_type=self.activation_type.cpp_name,
+        )
+        self.code = CODE_TEMPLATE.render(**template_args)
+        self.kernel_expr = kernel_expr
         self.prepare()
 
     def postprocess_cubin(self, cubin_path: str):
         from humming.utils.cubin import patch_cubin
 
-        mode = _cvt_patch_mode(self.target_dtype)
+        mode = None
+        if self.target_dtype == dtypes.float8e3m4:
+            mode = "cvt_e3m4"
+        elif self.target_dtype == dtypes.float4e0m3:
+            mode = "cvt_e0m3"
         if mode:
             patch_cubin(cubin_path=cubin_path, mode=mode)
+
+    @classmethod
+    def prepare_kernels(cls, kernel_args, intervals, dynamic_scale_mode, device, cache_key=None):
+        if cache_key is not None and cache_key in cls._str2kernel_cache:
+            return cls._str2kernel_cache[cache_key]
+
+        plan_specs = {}
+        for _, _, plan in intervals:
+            if plan in plan_specs:
+                continue
+            schedule_args = {
+                "threads_per_task": plan.threads_per_task,
+                "values_per_thread": plan.values_per_thread,
+                "tokens_per_block": plan.tokens_per_block,
+                "use_tile_partition": plan.use_tile_partition,
+                "tiles_per_block": plan.tiles_per_block,
+                "scatter_single_output": plan.separate_outputs,
+            }
+            plan_args = kernel_args | schedule_args
+            primary = (cls, plan_args | {"quantization_phase": QuantizationPhase.Fused})
+            secondary = None
+            if dynamic_scale_mode == "token" and plan.two_stage:
+                primary = (cls, plan_args | {"quantization_phase": QuantizationPhase.CollectAbsmax})
+                secondary = (cls, plan_args | {"quantization_phase": QuantizationPhase.Quantize})
+            elif dynamic_scale_mode == "group_token" and plan.use_tile_partition:
+                finalizer_args = plan_args | {"quantization_phase": QuantizationPhase.Fused}
+                finalizer_args["finalize_tokens_per_block"] = plan.finalize_tokens_per_block
+                secondary = (ProcessInputScaleKernel, finalizer_args)
+            plan_specs[plan] = primary, secondary
+
+        def spec_key(spec):
+            kernel_type, config = spec
+            return kernel_type, tuple(sorted(config.items()))
+
+        unique_specs = {}
+        for primary, secondary in plan_specs.values():
+            unique_specs.setdefault(spec_key(primary), primary)
+            if secondary is not None:
+                unique_specs.setdefault(spec_key(secondary), secondary)
+
+        specs = list(unique_specs.values())
+        compiled = cls.compile_many(specs, device)
+        kernels = dict(zip(unique_specs, compiled, strict=True))
+        plan_kernel_ids = {}
+        for plan, (primary, secondary) in plan_specs.items():
+            primary_id = kernels[spec_key(primary)].kernel_id
+            secondary_id = -1
+            if secondary is not None:
+                secondary_id = kernels[spec_key(secondary)].kernel_id
+            plan_kernel_ids[plan] = primary_id, secondary_id
+
+        compiled_intervals = []
+        for first, last, plan in intervals:
+            kernel_ids = plan_kernel_ids[plan]
+            if compiled_intervals and compiled_intervals[-1][2] == kernel_ids:
+                compiled_intervals[-1] = compiled_intervals[-1][0], last, kernel_ids
+            else:
+                compiled_intervals.append((first, last, kernel_ids))
+
+        launch_configs = []
+        for first, last, (primary_id, secondary_id) in compiled_intervals:
+            launch_configs.extend((first - 1, last, primary_id, secondary_id))
+        result = torch.tensor(launch_configs, dtype=torch.int64, device="cpu")
+        if cache_key is not None:
+            cls._str2kernel_cache[cache_key] = result
+        return result
 
 
 @dataclasses.dataclass(kw_only=True)
 class ProcessInputScaleKernel(ProcessInputKernel):
     name: ClassVar[str] = "finalize_group_token_scales_kernel"
     finalize_tokens_per_block: int = 4
-
-    def init_kernel(self):
-        assert self.quant_mode == QuantizationMode.DynamicGroupToken
-        assert self.work_partition == 1
-        assert self.quantization_phase == 0
-        assert 1 <= self.finalize_tokens_per_block <= 32
-        self.code = _render_code(self)
-        self.kernel_expr = (
-            f"finalize_group_token_scales_kernel<RuntimeConfig, {self.finalize_tokens_per_block}>"
-        )
-        self.prepare()
 
     def postprocess_cubin(self, cubin_path: str):
         pass

@@ -20,9 +20,20 @@ enum class QuantizationMode : uint32_t {
   DynamicGroupToken = 7,
 };
 
+enum class QuantizationPhase : uint32_t {
+  Fused = 0,
+  CollectAbsmax = 1,
+  Quantize = 2,
+};
+
 inline QuantizationMode process_input_quantization_mode(uint32_t id) {
   ASSERT_CHECK(id <= static_cast<uint32_t>(QuantizationMode::DynamicGroupToken), "invalid quantization mode: ", id);
   return static_cast<QuantizationMode>(id);
+}
+
+inline QuantizationPhase process_input_quantization_phase(uint32_t id) {
+  ASSERT_CHECK(id <= static_cast<uint32_t>(QuantizationPhase::Quantize), "invalid quantization phase: ", id);
+  return static_cast<QuantizationPhase>(id);
 }
 
 struct ProcessInputKernelData {
@@ -40,9 +51,9 @@ struct ProcessInputKernelData {
   uint32_t tokens_per_block;
   uint32_t layout;
   uint32_t layout_width;
-  uint32_t work_partition;
+  bool use_tile_partition;
   QuantizationMode quant_mode;
-  uint32_t quant_phase;
+  QuantizationPhase quantization_phase;
   uint32_t scale_layout;
   uint32_t output_packing;
   uint32_t finalize_tokens;
@@ -83,12 +94,14 @@ inline std::tuple<int64_t, std::string> register_process_input_kernel(const std:
 
   CubinReader reader(cubin_path);
   std::string kernel_name;
+  bool is_finalizer = false;
   for (const auto &name : reader.getKernelNames()) {
     bool process_kernel = name.find("process_input_kernel") != std::string::npos;
     bool scale_kernel = name.find("finalize_group_token_scales_kernel") != std::string::npos;
     if (!process_kernel && !scale_kernel) continue;
     ASSERT_CHECK(kernel_name.empty(), "multiple process-input kernels found in ", cubin_path);
     kernel_name = name;
+    is_finalizer = scale_kernel;
   }
   ASSERT_CHECK(!kernel_name.empty(), "no process-input kernel found in ", cubin_path);
 
@@ -106,30 +119,30 @@ inline std::tuple<int64_t, std::string> register_process_input_kernel(const std:
         ProcessInputKernelData{
             module,
             func,
-            reader.getUint32("PI_NUM_THREADS"),
-            reader.getUint32("PI_SOURCE_DTYPE_ID"),
-            reader.getUint32("PI_OUTPUT_DTYPE_ID"),
-            reader.getUint32("PI_GROUP_SCALE_DTYPE_ID"),
-            reader.getUint32("PI_INPUT_ROW_SIZE"),
-            reader.getUint32("PI_HIDDEN_SIZE"),
-            reader.getUint32("PI_QUANT_GROUP_SIZE"),
-            reader.getUint32("PI_TILE_SIZE"),
-            reader.getUint32("PI_TILES_PER_BLOCK"),
-            reader.getUint32("PI_TOKENS_PER_BLOCK"),
-            reader.getUint32("PI_LAYOUT"),
-            reader.getUint32("PI_LAYOUT_WIDTH"),
-            reader.getUint32("PI_WORK_PARTITION"),
-            process_input_quantization_mode(reader.getUint32("PI_QUANT_MODE")),
-            reader.getUint32("PI_QUANT_PHASE"),
-            reader.getUint32("PI_SCALE_LAYOUT"),
-            reader.getUint32("PI_OUTPUT_PACKING"),
-            reader.getUint32("PI_FINALIZE_TOKENS"),
-            reader.getBool("PI_SCATTER_SINGLE_OUTPUT"),
-            reader.getBool("PI_EXPERT_LAYOUT_INT64"),
-            reader.getBool("PI_INDEX_INT64"),
-            reader.getBool("PI_USE_PDL"),
-            reader.getBool("PI_ALLOW_BYTE_OUTPUT"),
-            reader.getBool("PI_IS_FINALIZER")});
+            reader.getUint32("NUM_THREADS"),
+            reader.getUint32("SOURCE_DTYPE_ID"),
+            reader.getUint32("OUTPUT_DTYPE_ID"),
+            reader.getUint32("GROUP_SCALE_DTYPE_ID"),
+            reader.getUint32("INPUT_ROW_SIZE"),
+            reader.getUint32("HIDDEN_SIZE"),
+            reader.getUint32("QUANT_GROUP_SIZE"),
+            reader.getUint32("TILE_SIZE"),
+            reader.getUint32("TILES_PER_BLOCK"),
+            reader.getUint32("TOKENS_PER_BLOCK"),
+            reader.getUint32("SEMANTIC_LAYOUT"),
+            reader.getUint32("LAYOUT_WIDTH"),
+            reader.getBool("USE_TILE_PARTITION"),
+            process_input_quantization_mode(reader.getUint32("QUANT_MODE")),
+            process_input_quantization_phase(reader.getUint32("QUANTIZATION_PHASE")),
+            reader.getUint32("SCALE_LAYOUT"),
+            reader.getUint32("OUTPUT_PACKING"),
+            reader.getUint32("FINALIZE_TOKENS_PER_BLOCK"),
+            reader.getBool("SCATTER_SINGLE_OUTPUT"),
+            reader.getBool("EXPERT_LAYOUT_INT64"),
+            reader.getBool("INDEX_INT64"),
+            reader.getBool("USE_PDL"),
+            reader.getBool("ALLOW_BYTE_OUTPUT"),
+            is_finalizer});
   }
 
   Registration result = std::make_tuple(kernel_id, kernel_name);
@@ -168,8 +181,8 @@ inline void check_process_input_index(
 
 inline bool has_static_tensor_scale(QuantizationMode mode) {
   return mode == QuantizationMode::StaticTensor ||
-    mode == QuantizationMode::StaticTensorGroup ||
-    mode == QuantizationMode::StaticTensorDynamicGroup;
+         mode == QuantizationMode::StaticTensorGroup ||
+         mode == QuantizationMode::StaticTensorDynamicGroup;
 }
 
 inline bool has_static_group_scale(QuantizationMode mode) {
@@ -182,8 +195,8 @@ inline bool has_dynamic_token_scale(QuantizationMode mode) {
 
 inline bool has_dynamic_group_scale(QuantizationMode mode) {
   return mode == QuantizationMode::DynamicGroup ||
-    mode == QuantizationMode::StaticTensorDynamicGroup ||
-    mode == QuantizationMode::DynamicGroupToken;
+         mode == QuantizationMode::StaticTensorDynamicGroup ||
+         mode == QuantizationMode::DynamicGroupToken;
 }
 
 inline ProcessInputShape process_input_shape(
@@ -380,7 +393,7 @@ inline void launch_process_input_main(
 
   int64_t work_rows = shape.num_work_rows * (data.scatter_single_output ? data.layout_width : 1);
   uint64_t grid_x;
-  if (data.work_partition == 0) {
+  if (!data.use_tile_partition) {
     grid_x = CEIL_DIV(work_rows, data.tokens_per_block);
   } else {
     uint64_t tiles = data.hidden_size / data.tile_size;
@@ -491,7 +504,9 @@ inline std::tuple<Tensor, std::optional<Tensor>, std::optional<Tensor>> launch_p
   void *public_group_scales = group_scales.has_value() ? group_scales->data_ptr() : nullptr;
   void *public_token_scales = token_scales.has_value() ? token_scales->data_ptr() : nullptr;
   if (secondary_id < 0) {
-    ASSERT_CHECK(primary.quant_phase == 0, "single-stage process-input kernel must use the fused phase");
+    ASSERT_CHECK(
+        primary.quantization_phase == QuantizationPhase::Fused,
+        "single-stage process-input kernel must use the fused phase");
     bool token_scale = primary.quant_mode == QuantizationMode::DynamicToken;
     void *output_scales = token_scale ? public_token_scales : public_group_scales;
     launch_process_input_main(
@@ -499,15 +514,19 @@ inline std::tuple<Tensor, std::optional<Tensor>, std::optional<Tensor>> launch_p
   } else {
     ProcessInputKernelData &secondary = get_process_input_kernel(secondary_id, context);
     if (primary.quant_mode == QuantizationMode::DynamicToken) {
-      ASSERT_CHECK(primary.quant_phase == 1 && secondary.quant_phase == 2, "invalid dynamic-token phases");
+      ASSERT_CHECK(
+          primary.quantization_phase == QuantizationPhase::CollectAbsmax &&
+              secondary.quantization_phase == QuantizationPhase::Quantize,
+          "invalid dynamic-token phases");
       launch_process_input_main(
           primary, inputs, prepared_output, group_scales, token_scales, expert_layout, indices, shape, public_token_scales);
       launch_process_input_main(
           secondary, inputs, prepared_output, group_scales, token_scales, expert_layout, indices, shape, public_token_scales);
     } else {
       bool valid_finalizer = primary.quant_mode == QuantizationMode::DynamicGroupToken;
-      valid_finalizer = valid_finalizer && primary.quant_phase == 0;
-      valid_finalizer = valid_finalizer && secondary.is_finalizer && secondary.quant_phase == 0;
+      valid_finalizer = valid_finalizer && primary.quantization_phase == QuantizationPhase::Fused;
+      valid_finalizer = valid_finalizer && secondary.is_finalizer;
+      valid_finalizer = valid_finalizer && secondary.quantization_phase == QuantizationPhase::Fused;
       ASSERT_CHECK(valid_finalizer, "invalid process-input secondary kernel");
       int64_t groups = primary.hidden_size / primary.quant_group_size;
       Tensor intermediate = torch_empty({shape.num_output_rows * groups * 2}, ScalarType::Byte, inputs.device());

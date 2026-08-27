@@ -11,7 +11,7 @@ class ProcessInputPlan:
     threads_per_task: int
     values_per_thread: int
     tokens_per_block: int = 1
-    work_partition: int = 0
+    use_tile_partition: bool = False
     tiles_per_block: int = 1
     separate_outputs: bool = False
     two_stage: bool = False
@@ -141,7 +141,7 @@ def _tile_candidates(operation, device, block_size: int):
             yield ProcessInputPlan(
                 threads,
                 values,
-                work_partition=1,
+                use_tile_partition=True,
                 tiles_per_block=tiles_per_block,
                 finalize_tokens_per_block=_finalize_rows(operation.schedule_rows),
             )
