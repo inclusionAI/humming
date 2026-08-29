@@ -131,6 +131,24 @@ def test_custom_binary_activation_hadamard_and_quantization():
     torch.testing.assert_close(result[0], expected, rtol=0, atol=1)
 
 
+def test_multiline_activation_impl():
+    a = torch.randn(3, 256, device="cuda", dtype=torch.float32)
+    b = torch.randn_like(a)
+    inputs = torch.cat((a, b), dim=-1)
+    activation_impl = """[](float a, float b) {
+        float squared = a * a;
+        return squared + b;
+    }(a, b)"""
+
+    result = process_input(
+        inputs,
+        activation_type="binary_split",
+        activation_impl=activation_impl,
+    )
+
+    torch.testing.assert_close(result[0], a * a + b, rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize("block_size", [16, 256, 512])
 def test_hadamard_involution(block_size):
     torch.manual_seed(0)

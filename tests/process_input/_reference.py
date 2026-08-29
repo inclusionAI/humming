@@ -9,7 +9,7 @@ from humming.ops.input import hadamard_transform
 SCALE_DTYPES = {
     "float32": torch.float32,
     "float8e4m3": torch.float8_e4m3fn,
-    "float8e8m0": getattr(torch, "float8_e8m0fnu", torch.uint8),
+    "float8e8m0": torch.float8_e8m0fnu,
 }
 
 

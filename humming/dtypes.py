@@ -198,6 +198,7 @@ float32 = FloatingPointType.from_str("float32")
 
 
 torch_dtype_map = {
+    int8: torch.int8,
     float8e8m0: torch.float8_e8m0fnu,
     float8e4m3: torch.float8_e4m3fn,
     float8e5m2: torch.float8_e5m2,

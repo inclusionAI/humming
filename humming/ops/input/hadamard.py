@@ -13,12 +13,10 @@ def hadamard_transform(
 ) -> torch.Tensor:
     assert inputs.is_cuda
     assert inputs.is_contiguous()
-    assert 2 <= block_size <= 512 and (block_size & (block_size - 1)) == 0, (
-        f"block_size must be a power of 2 in [2, 512], got {block_size}"
-    )
-    assert inputs.size(-1) % block_size == 0, (
-        f"last dim {inputs.size(-1)} must be divisible by block_size {block_size}"
-    )
+    err_msg = f"block_size must be a power of 2 in [2, 512], got {block_size}"
+    assert 2 <= block_size <= 512 and (block_size & (block_size - 1)) == 0, err_msg
+    err_msg = f"last dim {inputs.size(-1)} must be divisible by block_size {block_size}"
+    assert inputs.size(-1) % block_size == 0, err_msg
     assert inputs.dtype in (torch.float16, torch.bfloat16, torch.float32)
 
     if outputs is None:
@@ -29,12 +27,7 @@ def hadamard_transform(
         assert outputs.is_contiguous()
 
     if not isinstance(inputs, FakeTensor):
-        process_input(
-            inputs,
-            outputs=outputs,
-            hadamard_block_size=block_size,
-            use_pdl=use_pdl,
-        )
+        process_input(inputs, outputs=outputs, hadamard_block_size=block_size, use_pdl=use_pdl)
 
     return outputs
 
@@ -60,11 +53,9 @@ def hadamard_quant_input(
         if scale_dtype == "float8e8m0":
             group_scale_layout = GroupScaleLayout.MxPacked
 
-    quant_mode = (
-        QuantizationMode.StaticTensorDynamicGroup
-        if global_scale is not None
-        else QuantizationMode.DynamicGroup
-    )
+    quant_mode = QuantizationMode.DynamicGroup
+    if global_scale is not None:
+        quant_mode = QuantizationMode.StaticTensorDynamicGroup
 
     quantized, result_group_scales, _ = process_input(
         inputs,

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -7,6 +9,28 @@ from humming.ops.input import QuantizationMode, hadamard_transform, process_inpu
 def test_quantization_mode_accepts_enum_and_string():
     assert QuantizationMode("dynamic_group") is QuantizationMode.DynamicGroup
     assert QuantizationMode.DynamicGroup.value == "dynamic_group"
+
+
+@pytest.mark.parametrize(
+    ("mode", "static_tensor", "dynamic_token", "dynamic_group", "dynamic_mode"),
+    [
+        (QuantizationMode.Disabled, False, False, False, None),
+        (QuantizationMode.StaticTensor, True, False, False, None),
+        (QuantizationMode.DynamicToken, False, True, False, "token"),
+        (QuantizationMode.DynamicGroup, False, False, True, "group"),
+        (QuantizationMode.StaticTensorDynamicGroup, True, False, True, "group"),
+        (QuantizationMode.DynamicGroupToken, False, True, True, "group_token"),
+    ],
+)
+def test_quantization_mode_scale_properties(mode, static_tensor, dynamic_token, dynamic_group, dynamic_mode):
+    assert mode.quantized == (mode != QuantizationMode.Disabled)
+    assert mode.has_static_tensor_scale == static_tensor
+    assert mode.has_dynamic_token_scale == dynamic_token
+    assert mode.has_dynamic_group_scale == dynamic_group
+    assert mode.has_dynamic_scale == (dynamic_token or dynamic_group)
+    assert mode.dynamic_scale_mode == dynamic_mode
+    assert mode.uses_token_scale == (static_tensor or dynamic_token)
+    assert mode.uses_group_scale == dynamic_group
 
 
 @pytest.mark.parametrize(
@@ -21,7 +45,8 @@ def test_quantization_mode_accepts_enum_and_string():
 )
 def test_target_dtype_capability_guard(monkeypatch, dtype, capability, minimum):
     x = torch.randn(1, 128, device="cuda", dtype=torch.bfloat16)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: capability)
+    properties = SimpleNamespace(major=capability[0], minor=capability[1])
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _device: properties)
     with pytest.raises(RuntimeError, match=rf"{dtype} output requires {minimum}"):
         process_input(x, quant_mode="dynamic_group", quant_dtype=dtype)
 

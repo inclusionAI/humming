@@ -14,7 +14,6 @@ from humming.ops.input.enums import (
     QuantizationMode,
     QuantizationPhase,
 )
-from humming.ops.input.spec import QUANT_STORAGE
 
 _SOURCE_TYPE_CPP = {
     dtypes.float16: "__half",
@@ -61,9 +60,8 @@ using RuntimeConfig = ProcessInputConfig<KernelConfig>;
 extern "C" __constant__ uint32_t NUM_THREADS = RuntimeConfig::kThreads;
 extern "C" __constant__ uint32_t INPUT_ROW_SIZE = RuntimeConfig::kInputRowSize;
 extern "C" __constant__ uint32_t OUTPUT_PACKING = RuntimeConfig::kOutputPacking;
-extern "C" __constant__ uint32_t ALLOW_BYTE_OUTPUT = RuntimeConfig::kAllowByteOutput;
 extern "C" __constant__ uint32_t SOURCE_DTYPE_ID = {{ source_dtype_config }}::kId;
-extern "C" __constant__ uint32_t OUTPUT_DTYPE_ID = {{ output_dtype }}::kId;
+extern "C" __constant__ uint32_t TARGET_DTYPE_ID = KernelConfig::TargetType::kId;
 extern "C" __constant__ uint32_t GROUP_SCALE_DTYPE_ID = {{ group_scale_data_type }}::kId;
 extern "C" __constant__ uint32_t SEMANTIC_LAYOUT = static_cast<uint32_t>(KernelConfig::kSemanticLayout);
 extern "C" __constant__ uint32_t QUANT_MODE = static_cast<uint32_t>(RuntimeConfig::kQuantization);
@@ -158,10 +156,6 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
             assert threads % 32 == 0 and 32 <= threads <= 1024
             kernel_expr = "process_input_kernel<RuntimeConfig>"
 
-        output_torch_dtype = dtypes.torch_dtype_map[self.source_dtype]
-        if self.quant_mode != QuantizationMode.Disabled:
-            output_torch_dtype = QUANT_STORAGE[self.target_dtype.to_str()][0]
-        output_dtype = dtypes.DataType.from_torch_dtype(output_torch_dtype)
         group_scale_data_type = dtypes.DataType.from_str(self.group_scale_dtype)
         template_args = self.to_template_args()
         template_args.update(
@@ -169,7 +163,6 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
             process_input_extern=self.to_extern_cpp_str(ProcessInputKernel),
             source_dtype=_SOURCE_TYPE_CPP[self.source_dtype],
             source_dtype_config=self.source_dtype.to_cpp_str(),
-            output_dtype=output_dtype.to_cpp_str(),
             group_scale_dtype=_SCALE_TYPE_CPP[self.group_scale_dtype],
             group_scale_data_type=group_scale_data_type.to_cpp_str(),
             activation_type=self.activation_type.cpp_name,
@@ -190,7 +183,7 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
             patch_cubin(cubin_path=cubin_path, mode=mode)
 
     @classmethod
-    def prepare_kernels(cls, kernel_args, intervals, dynamic_scale_mode, device, cache_key=None):
+    def prepare_kernels(cls, kernel_args, intervals, quant_mode, device, cache_key=None):
         if cache_key is not None and cache_key in cls._str2kernel_cache:
             return cls._str2kernel_cache[cache_key]
 
@@ -209,10 +202,10 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
             plan_args = kernel_args | schedule_args
             primary = (cls, plan_args | {"quantization_phase": QuantizationPhase.Fused})
             secondary = None
-            if dynamic_scale_mode == "token" and plan.two_stage:
+            if quant_mode.dynamic_scale_mode == "token" and plan.two_stage:
                 primary = (cls, plan_args | {"quantization_phase": QuantizationPhase.CollectAbsmax})
                 secondary = (cls, plan_args | {"quantization_phase": QuantizationPhase.Quantize})
-            elif dynamic_scale_mode == "group_token" and plan.use_tile_partition:
+            elif quant_mode.dynamic_scale_mode == "group_token" and plan.use_tile_partition:
                 finalizer_args = plan_args | {"quantization_phase": QuantizationPhase.Fused}
                 finalizer_args["finalize_tokens_per_block"] = plan.finalize_tokens_per_block
                 secondary = (ProcessInputScaleKernel, finalizer_args)

@@ -16,15 +16,13 @@ struct ProcessInputConfig {
   static constexpr bool kDynamicTokenMode = kQuantization == QuantizationMode::DynamicToken;
   static constexpr bool kDynamicGroupMode = kQuantization == QuantizationMode::DynamicGroup || kQuantization == QuantizationMode::StaticTensorDynamicGroup;
   static constexpr bool kDynamicGroupTokenMode = kQuantization == QuantizationMode::DynamicGroupToken;
-  static constexpr bool kStaticTensorScale = kQuantization == QuantizationMode::StaticTensor || kQuantization == QuantizationMode::StaticTensorGroup || kQuantization == QuantizationMode::StaticTensorDynamicGroup;
-  static constexpr bool kStaticGroupScale = kQuantization == QuantizationMode::StaticGroup || kQuantization == QuantizationMode::StaticTensorGroup;
+  static constexpr bool kStaticTensorScale = kQuantization == QuantizationMode::StaticTensor || kQuantization == QuantizationMode::StaticTensorDynamicGroup;
   static constexpr bool kDynamicGroupScale = kDynamicGroupMode || kDynamicGroupTokenMode;
   static constexpr bool kStagedGroupToken = kDynamicGroupTokenMode && kUseTilePartition;
   static constexpr ScaleMode kConfiguredScaleMode = kDynamicTokenMode ? ScaleMode::DynamicToken : kDynamicGroupTokenMode ? ScaleMode::DynamicGroupToken : kDynamicGroupMode ? ScaleMode::DynamicGroup : ScaleMode::Static;
   static constexpr ScaleMode kScaleMode = kStagedGroupToken ? ScaleMode::DynamicGroup : kConfiguredScaleMode;
   static constexpr bool kDynamicOutputScale = kScaleMode == ScaleMode::DynamicGroup || kScaleMode == ScaleMode::DynamicGroupToken;
   static constexpr bool kFusedGroupToken = kScaleMode == ScaleMode::DynamicGroupToken;
-  using StaticGroupScaleType = std::conditional_t<kStaticGroupScale, typename Config::GroupScaleType, Float32>;
   using ConfiguredDynamicGroupScaleType = std::conditional_t<kDynamicGroupScale, typename Config::GroupScaleType, Float32>;
   using DynamicGroupScaleType = std::conditional_t<kStagedGroupToken, M3BFloat16, ConfiguredDynamicGroupScaleType>;
   using OutputScaleType = std::conditional_t<kDynamicOutputScale, DynamicGroupScaleType, Float32>;
@@ -46,7 +44,7 @@ struct ProcessInputConfig {
   static constexpr uint32_t kInputRowSize = kHiddenSize * (kBinaryActivation ? 2 : 1);
   static constexpr bool kPlainScatter = kLayout == LayoutType::Scatter && kActivation == ActivationType::None;
   static constexpr bool kDirectScatter = kScatterSingleOutput || (kPlainScatter && !kHadamard);
-  static constexpr bool kStaticScale = kStaticTensorScale || kStaticGroupScale;
+  static constexpr bool kStaticScale = kStaticTensorScale;
   static constexpr ScaleMode kQuantScaleMode = kScaleMode == ScaleMode::DynamicGroupToken ? ScaleMode::DynamicGroup : kScaleMode;
   static constexpr QuantizationPhase kPhase = Config::kQuantizationPhase;
   static constexpr GroupScaleLayout kGroupScaleLayout = Config::kScaleLayout;
@@ -56,7 +54,6 @@ struct ProcessInputConfig {
   static constexpr bool kAllowByteOutput = std::is_same<TargetType, Float8E3M4>::value;
   static constexpr uint32_t kTilesPerBlock = Config::kTilesPerBlock;
 
-  static_assert(public_scale_type<StaticGroupScaleType>);
   static_assert(supported_scale_type<DynamicGroupScaleType>);
   static_assert(kScaleMode == ScaleMode::DynamicGroup || kScaleMode == ScaleMode::DynamicGroupToken || std::is_same<DynamicGroupScaleType, Float32>::value);
   static_assert(kPhase == QuantizationPhase::Fused || kScaleMode == ScaleMode::DynamicToken);
@@ -66,10 +63,9 @@ struct ProcessInputConfig {
       kScaleMode == ScaleMode::DynamicGroup ||
       kScaleMode == ScaleMode::DynamicGroupToken);
   static_assert(kQuantize || kScaleMode == ScaleMode::Static);
-  static_assert(kQuantize || !kStaticTensorScale && !kStaticGroupScale);
+  static_assert(kQuantize || !kStaticTensorScale);
   static_assert(kQuantize || kPhase == QuantizationPhase::Fused);
   static_assert(kQuantize || kGroupScaleLayout == GroupScaleLayout::RowMajor);
-  static_assert(kScaleMode != ScaleMode::DynamicToken || !kStaticGroupScale);
   static_assert(!kUseTilePartition || (kScaleMode != ScaleMode::DynamicToken && kScaleMode != ScaleMode::DynamicGroupToken));
   static_assert(kScaleMode != ScaleMode::DynamicGroupToken || kPhase == QuantizationPhase::Fused);
   static_assert(!kUseTilePartition || kTokensPerBlock == 1);
@@ -120,7 +116,6 @@ __global__ __launch_bounds__(Config::kThreads) void process_input_kernel(
     const void *input,
     void *output,
     const float *__restrict__ static_tensor_scales,
-    const void *__restrict__ static_group_scales,
     void *__restrict__ output_scales,
     float *__restrict__ token_scales,
     const void *__restrict__ expert_layout,
@@ -134,7 +129,6 @@ __global__ __launch_bounds__(Config::kThreads) void process_input_kernel(
   using TargetType = typename Config::TargetType;
   using Activation = typename Config::Activation;
   using Layout = typename Config::Layout;
-  using StaticGroupScaleType = typename Config::StaticGroupScaleType;
   using OutputScaleType = typename Config::OutputScaleType;
   using QuantScaleType = typename Config::QuantScaleType;
 
@@ -247,8 +241,6 @@ __global__ __launch_bounds__(Config::kThreads) void process_input_kernel(
       float static_scale = 1.f;
       if constexpr (Config::kStaticTensorScale)
         static_scale *= __ldg(static_tensor_scales + thread.expert);
-      if constexpr (Config::kStaticGroupScale)
-        static_scale *= load_scale<StaticGroupScaleType>(static_group_scales, thread.expert * kGroupsPerToken + group);
 
       auto result = quant_group<
           TargetType,

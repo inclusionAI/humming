@@ -5,17 +5,20 @@ import math
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
+from humming import dtypes
+
 from .enums import ActivationType, GroupScaleLayout, LayoutType, QuantizationMode
 from .plan import select_process_input_plan
-from .spec import (
-    E8M0_TORCH_DTYPE,
-    HIDDEN_BASE,
-    QUANT_MODE_SPECS,
-    QUANT_STORAGE,
-    SCALE_TORCH_DTYPE,
-    STATIC_GROUP,
-    STATIC_TENSOR,
-)
+
+QUANT_DTYPE_MIN_CAPABILITY = {
+    dtypes.int4: (7, 5),
+    dtypes.int8: (7, 5),
+    dtypes.float8e4m3: (8, 9),
+    dtypes.float8e5m2: (8, 9),
+    dtypes.float4e0m3: (10, 0),
+    dtypes.float4e2m1: (10, 0),
+    dtypes.float8e3m4: (10, 0),
+}
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -24,7 +27,7 @@ class _ProcessInput:
     outputs: torch.Tensor | None = None
     inplace: bool = False
     quant_mode: QuantizationMode | str = "none"
-    quant_dtype: str | None = None
+    quant_dtype: dtypes.DataType | None = None
     quant_group_size: int | None = None
     group_scales: torch.Tensor | None = None
     group_scale_dtype: str | None = None
@@ -44,13 +47,10 @@ class _ProcessInput:
 
     @staticmethod
     def scale_dtype_name(tensor: torch.Tensor) -> str:
-        if tensor.dtype == torch.float32:
-            return "float32"
-        if tensor.dtype == torch.float8_e4m3fn:
-            return "float8e4m3"
-        if tensor.dtype == torch.uint8 or tensor.dtype == E8M0_TORCH_DTYPE:
-            return "float8e8m0"
-        raise AssertionError(f"unsupported scale dtype: {tensor.dtype}")
+        scale_dtype = dtypes.DataType.from_torch_dtype(tensor.dtype)
+        supported = (dtypes.float32, dtypes.float8e4m3, dtypes.float8e8m0)
+        assert scale_dtype in supported, f"unsupported scale dtype: {tensor.dtype}"
+        return scale_dtype.to_str()
 
     def normalize(self) -> None:
         assert self.inputs.dtype in (torch.float16, torch.bfloat16, torch.float32)
@@ -58,10 +58,9 @@ class _ProcessInput:
         self.layout = LayoutType(self.layout)
         self.group_scale_layout = GroupScaleLayout(self.group_scale_layout)
         self.quant_mode = QuantizationMode(self.quant_mode)
-        self.dynamic_scale_mode, self.static_mode = QUANT_MODE_SPECS[self.quant_mode]
-        self.quantized = self.quant_mode != QuantizationMode.Disabled
+        self.quantized = self.quant_mode.quantized
         assert self.quantized == (self.quant_dtype is not None), "quant_dtype must match quant_mode"
-        valid_quant_dtype = not self.quantized or self.quant_dtype in QUANT_STORAGE
+        valid_quant_dtype = not self.quantized or self.quant_dtype in QUANT_DTYPE_MIN_CAPABILITY
         assert valid_quant_dtype, f"unsupported quant_dtype: {self.quant_dtype}"
 
         self.input_row_size = self.inputs.size(-1)
@@ -70,14 +69,13 @@ class _ProcessInput:
             assert self.activation_impl in (None, ""), "activation_impl requires activation_type"
             self.activation_impl = ""
         else:
-            assert self.activation_impl and "\n" not in self.activation_impl
-            assert all(c not in self.activation_impl for c in ";{}"), "activation_impl must be one expression"
+            assert self.activation_impl, "activation_impl is required"
 
         binary_types = (ActivationType.BinarySplit, ActivationType.BinaryInterleaved)
         binary = self.activation_type in binary_types
         if binary:
             assert self.input_row_size % 2 == 0
-        self.hidden_size = self.input_row_size // 2 if binary else self.input_row_size
+        self.hidden_size = self.input_row_size // (2 if binary else 1)
 
         if self.inplace:
             valid_output = self.outputs is None or self.outputs is self.inputs
@@ -89,9 +87,7 @@ class _ProcessInput:
             assert self.layout in allowed_layouts, f"inplace does not support {self.layout.value} layout"
             self.outputs = self.inputs
 
-        has_static_group = bool(self.static_mode & STATIC_GROUP)
-        uses_group_scale = self.dynamic_scale_mode in ("group", "group_token")
-        uses_group_scale |= has_static_group
+        uses_group_scale = self.quant_mode.uses_group_scale
         self.hadamard_block_size = self.hadamard_block_size or 1
         has_hadamard = self.hadamard_block_size > 1
         if has_hadamard:
@@ -169,43 +165,38 @@ class _ProcessInput:
         self.num_output_rows = math.prod(self.output_leading_shape)
 
     def allocate_outputs(self) -> None:
-        output_storage = QUANT_STORAGE[self.quant_dtype] if self.quant_dtype else None
-        output_dtype, packing = output_storage or (self.inputs.dtype, 1)
+        output_dtype = self.inputs.dtype
+        if self.quant_dtype is not None:
+            output_dtype = dtypes.torch_dtype_map.get(self.quant_dtype, torch.uint8)
+        packing = 8 // self.quant_dtype.num_bits if self.quant_dtype is not None else 1
         assert self.hidden_size % packing == 0
         output_shape = self.output_leading_shape + (self.hidden_size // packing,)
         if self.outputs is None:
             self.outputs = torch.empty(output_shape, dtype=output_dtype, device=self.inputs.device)
             return
-        allowed_dtypes = (output_dtype,)
-        if self.quant_dtype in HIDDEN_BASE:
-            allowed_dtypes += (torch.uint8,)
-        assert self.outputs.shape == output_shape and self.outputs.dtype in allowed_dtypes
+        assert self.outputs.shape == output_shape and self.outputs.dtype == output_dtype
         self.validate_tensor(self.outputs)
 
     def allocate_scales(self) -> None:
-        static_tensor = bool(self.static_mode & STATIC_TENSOR)
-        static_group = bool(self.static_mode & STATIC_GROUP)
+        static_tensor = self.quant_mode.has_static_tensor_scale
         if self.group_scales is not None:
             tensor_scale_dtype = self.scale_dtype_name(self.group_scales)
             if self.group_scale_dtype is not None:
                 assert self.group_scale_dtype == tensor_scale_dtype
             self.group_scale_dtype = tensor_scale_dtype
-        elif self.group_scale_dtype is None and self.dynamic_scale_mode == "group_token":
+        elif self.group_scale_dtype is None and self.quant_mode.dynamic_scale_mode == "group_token":
             self.group_scale_dtype = "float8e4m3"
         elif self.group_scale_dtype is None:
             self.group_scale_dtype = "float32"
-        assert self.group_scale_dtype in SCALE_TORCH_DTYPE
+        group_scale_dtype = dtypes.DataType.from_str(self.group_scale_dtype)
+        supported = (dtypes.float32, dtypes.float8e4m3, dtypes.float8e8m0)
+        assert group_scale_dtype in supported
         if static_tensor:
             assert self.token_scales is not None and self.token_scales.dtype == torch.float32
             self.validate_tensor(self.token_scales)
             assert self.token_scales.numel() == self.num_experts
-        if static_group:
-            assert self.group_scales is not None
-            self.validate_tensor(self.group_scales)
-            assert self.group_scales.numel() == self.num_experts * self.num_quant_groups
-
-        uses_group = self.dynamic_scale_mode in ("group", "group_token")
-        uses_token = self.dynamic_scale_mode in ("token", "group_token")
+        uses_group = self.quant_mode.uses_group_scale
+        uses_token = self.quant_mode.has_dynamic_token_scale
         row_major_scales = self.group_scale_layout == GroupScaleLayout.RowMajor
         assert uses_group or row_major_scales, "non-row-major scale layout requires dynamic group scales"
         padded_rows = (self.num_output_rows + 3) // 4 * 4
@@ -215,65 +206,54 @@ class _ProcessInput:
             self.group_scale_stride = padded_rows
 
         if uses_group:
-            if self.dynamic_scale_mode == "group_token":
-                assert self.group_scale_dtype == "float8e4m3"
+            if self.quant_mode.dynamic_scale_mode == "group_token":
+                assert group_scale_dtype == dtypes.float8e4m3
             if self.group_scale_layout == GroupScaleLayout.MxPacked:
-                assert self.group_scale_dtype in ("float8e4m3", "float8e8m0")
+                assert group_scale_dtype in (dtypes.float8e4m3, dtypes.float8e8m0)
                 scale_shape = ((self.num_quant_groups + 3) // 4, self.group_scale_stride, 4)
             elif self.group_scale_layout == GroupScaleLayout.MMajor:
                 scale_shape = (self.num_quant_groups, self.group_scale_stride)
             else:
                 scale_shape = self.output_leading_shape + (self.num_quant_groups,)
             if self.group_scales is None:
-                self.group_scales = torch.empty(
-                    scale_shape,
-                    dtype=SCALE_TORCH_DTYPE[self.group_scale_dtype],
-                    device=self.inputs.device,
-                )
+                dtype = dtypes.torch_dtype_map[group_scale_dtype]
+                self.group_scales = torch.empty(scale_shape, dtype=dtype, device=self.inputs.device)
             else:
                 assert self.group_scales.shape == scale_shape
                 self.validate_tensor(self.group_scales)
-        elif not static_group:
+        else:
             assert self.group_scales is None, "group_scales is not used by quant_mode"
 
         if uses_token:
             if self.token_scales is None:
-                self.token_scales = torch.empty(
-                    self.output_leading_shape,
-                    dtype=torch.float32,
-                    device=self.inputs.device,
-                )
+                shape = self.output_leading_shape
+                self.token_scales = torch.empty(shape, dtype=torch.float32, device=self.inputs.device)
             else:
                 assert self.token_scales.shape == self.output_leading_shape
                 assert self.token_scales.dtype == torch.float32
                 self.validate_tensor(self.token_scales)
-        elif not static_tensor:
+        elif not self.quant_mode.uses_token_scale:
             assert self.token_scales is None, "token_scales is not used by quant_mode"
 
     def result(self) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        returned_outputs = self.outputs
-        if self.quant_dtype in HIDDEN_BASE and returned_outputs.dtype != torch.uint8:
-            returned_outputs = returned_outputs.view(torch.uint8)
-        return returned_outputs, self.group_scales, self.token_scales
+        return self.outputs, self.group_scales, self.token_scales
 
     def select_schedule(self) -> None:
-        self.capability = torch.cuda.get_device_capability(self.inputs.device)
-        if self.quant_dtype in ("float8e4m3", "float8e5m2") and self.capability < (8, 9):
+        self.properties = torch.cuda.get_device_properties(self.inputs.device)
+        self.capability = (self.properties.major, self.properties.minor)
+        minimum_capability = QUANT_DTYPE_MIN_CAPABILITY.get(self.quant_dtype)
+        if minimum_capability is not None and self.capability < minimum_capability:
             actual = f"SM{self.capability[0]}{self.capability[1]}"
-            raise RuntimeError(f"{self.quant_dtype} output requires SM89 or newer, got {actual}")
-        if self.quant_dtype in ("float8e3m4", "float4e0m3", "float4e2m1"):
-            if self.capability < (10, 0):
-                actual = f"SM{self.capability[0]}{self.capability[1]}"
-                raise RuntimeError(f"{self.quant_dtype} output requires SM100 or newer, got {actual}")
+            minimum = f"SM{minimum_capability[0]}{minimum_capability[1]}"
+            raise RuntimeError(f"{self.quant_dtype} output requires {minimum} or newer, got {actual}")
         tensors = (self.inputs, self.outputs, self.group_scales, self.token_scales)
         tensors += (self.expert_layout, self.indices)
         self.working_set_bytes = sum(t.numel() * t.element_size() for t in tensors if t is not None)
         self.source_bits = self.inputs.element_size() * 8
         if self.quantized:
-            self.target_bits = 8 // QUANT_STORAGE[self.quant_dtype][1]
+            self.target_bits = self.quant_dtype.num_bits
         else:
             self.target_bits = self.source_bits
-        self.properties = torch.cuda.get_device_properties(self.inputs.device)
         separate_outputs = self.separate_scatter_outputs(self.num_work_rows)
         expanded_rows = self.num_work_rows * self.output_width
         self.schedule_rows = expanded_rows if separate_outputs else self.num_work_rows
@@ -285,7 +265,7 @@ class _ProcessInput:
         can_repeat_input = self.activation_type == ActivationType.None_
         can_repeat_input &= self.hadamard_block_size <= 1
         row_limit = self.properties.multi_processor_count
-        if self.dynamic_scale_mode not in ("token", "group_token"):
+        if not self.quant_mode.has_dynamic_token_scale:
             row_limit = (row_limit + 1) // 2
         separate_outputs = self.output_width > 1 and can_repeat_input
         return separate_outputs and rows * self.output_width <= row_limit
@@ -339,17 +319,13 @@ class _ProcessInput:
         merged = []
         for first, last, plan in intervals:
             if merged and merged[-1][1] + 1 == first and merged[-1][2] == plan:
-                merged[-1] = merged[-1][0], last, plan
+                merged[-1] = (merged[-1][0], last, plan)
             else:
                 merged.append((first, last, plan))
         return merged
 
     def kernel_config(self):
-        from humming import dtypes
-
-        target_dtype = (
-            dtypes.DataType.from_str(self.quant_dtype) if self.quant_dtype is not None else dtypes.float32
-        )
+        target_dtype = self.quant_dtype or dtypes.float32
         single_expert_grouped = self.layout == LayoutType.Grouped and self.num_experts == 1
         kernel_layout = LayoutType.Normal if single_expert_grouped else self.layout
         kernel_args = dict(
@@ -383,7 +359,7 @@ class _ProcessInput:
         return ProcessInputKernel.prepare_kernels(
             self.kernel_config(),
             intervals,
-            self.dynamic_scale_mode,
+            self.quant_mode,
             self.inputs.device,
             cache_key,
         )
@@ -401,7 +377,7 @@ def process_input(
     outputs: torch.Tensor | None = None,
     inplace: bool = False,
     quant_mode: str = "none",
-    quant_dtype: str | None = None,
+    quant_dtype: str | dtypes.DataType | None = None,
     quant_group_size: int | None = None,
     group_scales: torch.Tensor | None = None,
     group_scale_dtype: str | None = None,
@@ -418,6 +394,7 @@ def process_input(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     from humming.kernel.process_input import ProcessInputKernel
 
+    quant_dtype = None if quant_dtype is None else dtypes.DataType.from_str(quant_dtype)
     layout_type = LayoutType(layout)
     output_width = 1
     if layout_type == LayoutType.Scatter and indices is not None:
@@ -474,6 +451,7 @@ def process_input(
             group_scale_layout=group_scale_layout,
             use_pdl=use_pdl,
         )
+
     if fake:
         operation.prepare()
         return operation.result()
@@ -495,10 +473,7 @@ def process_input(
         indices,
         inplace,
     )
-    result_output, result_group_scales, result_token_scales = result
-    if quant_dtype in HIDDEN_BASE and result_output.dtype != torch.uint8:
-        result_output = result_output.view(torch.uint8)
-    return result_output, result_group_scales, result_token_scales
+    return result
 
 
 def quant_input(
@@ -512,21 +487,8 @@ def quant_input(
     scale_dtype: str = "float32",
     global_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    is_dynamic = scales is None
     if group_size is None or group_size == 0:
         group_size = inputs.size(-1)
-    if not is_dynamic:
-        assert global_scale is None and not m_major_scale and scale_dtype == "float32"
-        quantized, _, _ = process_input(
-            inputs,
-            outputs=outputs,
-            quant_mode=QuantizationMode.StaticGroup,
-            quant_dtype=dtype,
-            quant_group_size=group_size,
-            group_scales=scales,
-            use_pdl=use_pdl,
-        )
-        return quantized, scales
 
     group_scale_layout = GroupScaleLayout.RowMajor
     if m_major_scale:
@@ -544,6 +506,7 @@ def quant_input(
         quant_mode=quant_mode,
         quant_dtype=dtype,
         quant_group_size=group_size,
+        group_scales=scales,
         group_scale_dtype=scale_dtype,
         token_scales=global_scale,
         group_scale_layout=group_scale_layout,

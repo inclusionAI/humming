@@ -10,24 +10,6 @@ from ._reference import (
 )
 
 
-def test_combined_static_tensor_and_group_scales():
-    x = torch.randn(3, 512, device="cuda", dtype=torch.float32)
-    tensor_scale = torch.tensor([0.5], device="cuda")
-    group_scale = torch.tensor([0.25, 0.5, 1.0, 2.0], device="cuda")
-    result = process_input(
-        x,
-        quant_mode="static_tensor_group",
-        quant_dtype="int8",
-        quant_group_size=128,
-        token_scales=tensor_scale,
-        group_scales=group_scale,
-    )
-    scales = tensor_scale * group_scale
-    expected = torch.round(x.reshape(3, 4, 128) / scales[None, :, None])
-    expected = expected.clamp(-127, 127).to(torch.int8).reshape_as(x)
-    torch.testing.assert_close(result[0], expected, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("quant_dtype", ["float8e4m3", "int8"])
 def test_normal_four_group_subwarp_schedule(quant_dtype):
     """Cover the four-groups-per-warp identity fast path."""
@@ -60,59 +42,25 @@ def test_normal_four_group_subwarp_schedule(quant_dtype):
 
 
 @pytest.mark.parametrize("block_size", [None, 128])
-@pytest.mark.parametrize("granularity", ["tensor", "group"])
-def test_static_fp32_scale(block_size, granularity):
+def test_static_fp32_tensor_scale(block_size):
     torch.manual_seed(10)
     x = torch.randn(3, 512, device="cuda", dtype=torch.float32)
     group_size = 128
-    if granularity == "tensor":
-        static_scale = torch.tensor([0.025], device="cuda")
-        scale_matrix = static_scale.expand(3, 4)
-    else:
-        static_scale = torch.tensor([0.01, 0.02, 0.04, 0.08], device="cuda")
-        scale_matrix = static_scale.expand(3, 4)
-    quant_mode = "static_tensor" if granularity == "tensor" else "static_group"
-    static_args = (
-        {"token_scales": static_scale} if granularity == "tensor" else {"group_scales": static_scale}
-    )
+    static_scale = torch.tensor([0.025], device="cuda")
+    scale_matrix = static_scale.expand(3, 4)
 
     result = process_input(
         x,
-        quant_mode=quant_mode,
+        quant_mode="static_tensor",
         quant_dtype="int8",
         quant_group_size=group_size,
+        token_scales=static_scale,
         hadamard_block_size=block_size,
-        **static_args,
     )
     source = _source_after_transform(x, block_size)
     expected = _quantize_int8_reference(source, scale_matrix, group_size)
 
-    if granularity == "tensor":
-        assert result[2] is static_scale and result[1] is None
-    else:
-        assert result[1] is static_scale and result[2] is None
-    torch.testing.assert_close(result[0], expected, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("scale_dtype", ["float8e4m3", "float8e8m0"])
-def test_static_group_scale_dtype_is_inferred(scale_dtype):
-    x = torch.randn(2, 512, device="cuda", dtype=torch.float32)
-    decoded_scales = torch.tensor([0.5, 1.0, 2.0, 4.0], device="cuda")
-    if scale_dtype == "float8e4m3":
-        group_scales = decoded_scales.to(torch.float8_e4m3fn)
-    elif hasattr(torch, "float8_e8m0fnu"):
-        group_scales = decoded_scales.to(torch.float8_e8m0fnu)
-    else:
-        group_scales = (torch.log2(decoded_scales) + 127).to(torch.uint8)
-
-    result = process_input(
-        x,
-        quant_mode="static_group",
-        quant_dtype="int8",
-        quant_group_size=128,
-        group_scales=group_scales,
-    )
-    expected = _quantize_int8_reference(x, decoded_scales.expand(2, 4), 128)
+    assert result[2] is static_scale and result[1] is None
     torch.testing.assert_close(result[0], expected, rtol=0, atol=0)
 
 

@@ -12,12 +12,10 @@
 enum class QuantizationMode : uint32_t {
   Disabled = 0,
   StaticTensor = 1,
-  StaticGroup = 2,
-  StaticTensorGroup = 3,
-  DynamicToken = 4,
-  DynamicGroup = 5,
-  StaticTensorDynamicGroup = 6,
-  DynamicGroupToken = 7,
+  DynamicToken = 2,
+  DynamicGroup = 3,
+  StaticTensorDynamicGroup = 4,
+  DynamicGroupToken = 5,
 };
 
 enum class QuantizationPhase : uint32_t {
@@ -41,7 +39,7 @@ struct ProcessInputKernelData {
   CUfunction func;
   uint32_t num_threads;
   uint32_t source_dtype_id;
-  uint32_t output_dtype_id;
+  uint32_t target_dtype_id;
   uint32_t group_scale_dtype_id;
   uint32_t input_row_size;
   uint32_t hidden_size;
@@ -61,7 +59,6 @@ struct ProcessInputKernelData {
   bool expert_layout_int64;
   bool index_int64;
   bool use_pdl;
-  bool allow_byte_output;
   bool is_finalizer;
 };
 
@@ -121,7 +118,7 @@ inline std::tuple<int64_t, std::string> register_process_input_kernel(const std:
             func,
             reader.getUint32("NUM_THREADS"),
             reader.getUint32("SOURCE_DTYPE_ID"),
-            reader.getUint32("OUTPUT_DTYPE_ID"),
+            reader.getUint32("TARGET_DTYPE_ID"),
             reader.getUint32("GROUP_SCALE_DTYPE_ID"),
             reader.getUint32("INPUT_ROW_SIZE"),
             reader.getUint32("HIDDEN_SIZE"),
@@ -141,7 +138,6 @@ inline std::tuple<int64_t, std::string> register_process_input_kernel(const std:
             reader.getBool("EXPERT_LAYOUT_INT64"),
             reader.getBool("INDEX_INT64"),
             reader.getBool("USE_PDL"),
-            reader.getBool("ALLOW_BYTE_OUTPUT"),
             is_finalizer});
   }
 
@@ -181,12 +177,7 @@ inline void check_process_input_index(
 
 inline bool has_static_tensor_scale(QuantizationMode mode) {
   return mode == QuantizationMode::StaticTensor ||
-         mode == QuantizationMode::StaticTensorGroup ||
          mode == QuantizationMode::StaticTensorDynamicGroup;
-}
-
-inline bool has_static_group_scale(QuantizationMode mode) {
-  return mode == QuantizationMode::StaticGroup || mode == QuantizationMode::StaticTensorGroup;
 }
 
 inline bool has_dynamic_token_scale(QuantizationMode mode) {
@@ -280,13 +271,15 @@ inline Tensor prepare_process_input_output(
     std::optional<Tensor> outputs,
     bool inplace) {
   auto expected_shape = process_input_output_shape(data, inputs, shape);
-  ScalarType dtype = dtype_id_to_tensor_dtype(data.output_dtype_id);
+  ScalarType dtype = dtype_id_to_tensor_dtype(data.source_dtype_id);
+  if (data.quant_mode != QuantizationMode::Disabled)
+    dtype = dtype_id_to_tensor_dtype(data.target_dtype_id);
   if (inplace) {
     ASSERT_CHECK(!outputs.has_value() || outputs->data_ptr() == inputs.data_ptr(), "inplace output must alias inputs");
     outputs = inputs;
   }
   if (!outputs.has_value()) return torch_empty(expected_shape, dtype, inputs.device());
-  check_process_input_tensor(*outputs, "outputs", inputs.get_device(), dtype, data.allow_byte_output);
+  check_process_input_tensor(*outputs, "outputs", inputs.get_device(), dtype);
   ASSERT_CHECK(outputs->dim() == static_cast<int64_t>(expected_shape.size()), "invalid output rank");
   for (size_t dimension = 0; dimension < expected_shape.size(); dimension++)
     ASSERT_CHECK(outputs->size(dimension) == expected_shape[dimension], "invalid output shape");
@@ -298,22 +291,18 @@ inline std::optional<Tensor> prepare_process_input_group_scales(
     const Tensor &inputs,
     const ProcessInputShape &shape,
     std::optional<Tensor> scales) {
-  bool used = has_static_group_scale(data.quant_mode) || has_dynamic_group_scale(data.quant_mode);
+  bool used = has_dynamic_group_scale(data.quant_mode);
   if (!used) {
     ASSERT_CHECK(!scales.has_value(), "group_scales is not used by quant_mode");
     return std::nullopt;
   }
   int64_t groups = data.hidden_size / data.quant_group_size;
-  int64_t elements = shape.num_experts * groups;
-  if (has_dynamic_group_scale(data.quant_mode)) {
-    elements = shape.num_output_rows * groups;
-    if (data.scale_layout == 1) elements = shape.group_scale_stride * groups;
-    if (data.scale_layout == 2) elements = shape.group_scale_stride * CEIL_DIV(groups, 4) * 4;
-  }
+  int64_t elements = shape.num_output_rows * groups;
+  if (data.scale_layout == 1) elements = shape.group_scale_stride * groups;
+  if (data.scale_layout == 2) elements = shape.group_scale_stride * CEIL_DIV(groups, 4) * 4;
   ScalarType dtype = dtype_id_to_tensor_dtype(data.group_scale_dtype_id);
   bool allow_byte = data.group_scale_dtype_id == 20080800;
   if (!scales.has_value()) {
-    ASSERT_CHECK(has_dynamic_group_scale(data.quant_mode), "static group_scales is required");
     std::vector<int64_t> scale_shape;
     if (data.scale_layout == 0) {
       scale_shape = process_input_leading_shape(data, inputs, shape);
@@ -367,7 +356,6 @@ inline void launch_process_input_main(
   void *group_scale_ptr = group_scales.has_value() ? group_scales->data_ptr() : nullptr;
   void *token_scale_ptr = token_scales.has_value() ? token_scales->data_ptr() : nullptr;
   void *static_tensor_ptr = has_static_tensor_scale(data.quant_mode) ? token_scale_ptr : nullptr;
-  void *static_group_ptr = has_static_group_scale(data.quant_mode) ? group_scale_ptr : nullptr;
   void *dynamic_token_ptr = has_dynamic_token_scale(data.quant_mode) ? token_scale_ptr : nullptr;
   void *expert_layout_ptr = expert_layout.has_value() ? expert_layout->data_ptr() : nullptr;
   void *indices_ptr = indices.has_value() ? indices->data_ptr() : nullptr;
@@ -380,7 +368,6 @@ inline void launch_process_input_main(
       &input_ptr,
       &output_ptr,
       &static_tensor_ptr,
-      &static_group_ptr,
       &output_scales,
       &dynamic_token_ptr,
       &expert_layout_ptr,

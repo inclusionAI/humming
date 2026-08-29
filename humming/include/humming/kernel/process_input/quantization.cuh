@@ -17,12 +17,10 @@ enum class ScaleMode : uint32_t {
 enum class QuantizationMode : uint32_t {
   Disabled = 0,
   StaticTensor = 1,
-  StaticGroup = 2,
-  StaticTensorGroup = 3,
-  DynamicToken = 4,
-  DynamicGroup = 5,
-  StaticTensorDynamicGroup = 6,
-  DynamicGroupToken = 7,
+  DynamicToken = 2,
+  DynamicGroup = 3,
+  StaticTensorDynamicGroup = 4,
+  DynamicGroupToken = 5,
 };
 
 
