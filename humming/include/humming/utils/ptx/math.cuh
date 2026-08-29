@@ -2,6 +2,14 @@
 
 #include <humming/utils/base.cuh>
 
+CUDA_INLINE uint32_t prmt(uint32_t a, uint32_t b, uint32_t s) {
+  uint32_t res;
+  asm volatile("prmt.b32 %0, %1, %2, %3;\n"
+               : "=r"(res)
+               : "r"(a), "r"(b), "r"(s));
+  return res;
+};
+
 template <uint32_t lut>
 CUDA_INLINE uint32_t lop3(uint32_t a, uint32_t b, uint32_t c) {
   uint32_t res;

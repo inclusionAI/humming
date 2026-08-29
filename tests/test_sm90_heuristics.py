@@ -288,6 +288,34 @@ def test_mxfp4_a16_indexed_preserves_warp_k_and_fits_grid(
     assert config["use_stream_k"] is expected_stream_k
 
 
+@pytest.mark.parametrize("shape_k", [512, 256])
+def test_mxfp4_a16_short_k_limits_wide_n_tile_before_block_m48(shape_k):
+    layer = _layer(
+        6144,
+        shape_k,
+        num_experts=256,
+        a_dtype=dtypes.bfloat16,
+        as_dtype=None,
+        input_scale_group_size=0,
+    )
+
+    small = Sm90Heuristics.get_config(
+        layer,
+        shape_m=6144,
+        gemm_type=GemmType.INDEXED,
+    )
+    large = Sm90Heuristics.get_config(
+        layer,
+        shape_m=8192,
+        gemm_type=GemmType.INDEXED,
+    )
+
+    assert small["block_shape"] == (32, 512, 64)
+    assert small["num_ctas_per_sm"] == 2
+    assert large["block_shape"] == (48, 256, 64)
+    assert large["num_ctas_per_sm"] == 2
+
+
 def test_nvfp4_a16_uses_narrow_first_wave_only():
     layer = _layer(
         5376,
