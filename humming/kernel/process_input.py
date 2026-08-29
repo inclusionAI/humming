@@ -35,11 +35,11 @@ CODE_TEMPLATE = jinja2.Template("""
 struct ProcessInputActivation {
   static constexpr ActivationType kType = ActivationType::{{ activation_type }};
 {% if activation_type == "Unary" %}
-  __device__ __forceinline__ static float apply(float a) {
+  CUDA_INLINE static float apply(float a) {
     return {{ activation_impl }};
   }
 {% elif activation_type != "None" %}
-  __device__ __forceinline__ static float apply(float a, float b) {
+  CUDA_INLINE static float apply(float a, float b) {
     return {{ activation_impl }};
   }
 {% endif %}
