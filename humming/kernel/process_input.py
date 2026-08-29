@@ -63,7 +63,7 @@ extern "C" __constant__ uint32_t OUTPUT_PACKING = RuntimeConfig::kOutputPacking;
 extern "C" __constant__ uint32_t SOURCE_DTYPE_ID = {{ source_dtype_config }}::kId;
 extern "C" __constant__ uint32_t TARGET_DTYPE_ID = KernelConfig::TargetType::kId;
 extern "C" __constant__ uint32_t GROUP_SCALE_DTYPE_ID = {{ group_scale_data_type }}::kId;
-extern "C" __constant__ uint32_t SEMANTIC_LAYOUT = static_cast<uint32_t>(KernelConfig::kSemanticLayout);
+extern "C" __constant__ uint32_t LAYOUT = static_cast<uint32_t>(KernelConfig::kLayout);
 extern "C" __constant__ uint32_t QUANT_MODE = static_cast<uint32_t>(RuntimeConfig::kQuantization);
 extern "C" __constant__ uint32_t QUANTIZATION_PHASE = static_cast<uint32_t>(RuntimeConfig::kPhase);
 extern "C" __constant__ uint32_t SCALE_LAYOUT = static_cast<uint32_t>(RuntimeConfig::kGroupScaleLayout);
@@ -87,7 +87,6 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
 
     # Layout
     layout: LayoutType | str = LayoutType.Normal
-    semantic_layout: LayoutType | str | None = None
     layout_width: int = 1
     scatter_single_output: bool = False
     expert_layout_int64: bool = False
@@ -117,10 +116,6 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
     def __post_init__(self):
         self.activation_type = ActivationType(self.activation_type)
         self.layout = LayoutType(self.layout)
-        if self.semantic_layout is None:
-            self.semantic_layout = self.layout
-        else:
-            self.semantic_layout = LayoutType(self.semantic_layout)
         self.quant_mode = QuantizationMode(self.quant_mode)
         self.quantization_phase = QuantizationPhase(self.quantization_phase)
         self.scale_layout = GroupScaleLayout(self.scale_layout)

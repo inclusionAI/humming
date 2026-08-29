@@ -326,8 +326,6 @@ class _ProcessInput:
 
     def kernel_config(self):
         target_dtype = self.quant_dtype or dtypes.float32
-        single_expert_grouped = self.layout == LayoutType.Grouped and self.num_experts == 1
-        kernel_layout = LayoutType.Normal if single_expert_grouped else self.layout
         kernel_args = dict(
             source_dtype=dtypes.DataType.from_torch_dtype(self.inputs.dtype),
             target_dtype=target_dtype,
@@ -335,8 +333,7 @@ class _ProcessInput:
             quant_group_size=self.quant_group_size,
             hadamard_block_size=self.hadamard_block_size,
             tile_size=self.tile_size,
-            layout=kernel_layout,
-            semantic_layout=self.layout,
+            layout=self.layout,
             layout_width=self.output_width,
             expert_layout_int64=self.expert_layout is not None and self.expert_layout.dtype == torch.int64,
             index_int64=self.indices is not None and self.indices.dtype == torch.int64,
@@ -399,10 +396,8 @@ def process_input(
     output_width = 1
     if layout_type == LayoutType.Scatter and indices is not None:
         output_width = indices.size(1)
-    single_expert = layout_type == LayoutType.Grouped and expert_layout is not None
-    single_expert = single_expert and expert_layout.numel() == 2
-    # M and ordinary leading dimensions remain runtime values. K, scatter width,
-    # and the single-expert specialization change the generated cubin.
+    # M and ordinary leading dimensions remain runtime values. K and scatter
+    # width change the generated cubin.
     family_key = (
         inputs.device.index,
         inputs.dtype,
@@ -422,7 +417,6 @@ def process_input(
         hadamard_block_size,
         layout_type,
         output_width,
-        single_expert,
         zero_invalid,
         group_scale_layout,
         use_pdl,

@@ -126,7 +126,7 @@ inline std::tuple<int64_t, std::string> register_process_input_kernel(const std:
             reader.getUint32("TILE_SIZE"),
             reader.getUint32("TILES_PER_BLOCK"),
             reader.getUint32("TOKENS_PER_BLOCK"),
-            reader.getUint32("SEMANTIC_LAYOUT"),
+            reader.getUint32("LAYOUT"),
             reader.getUint32("LAYOUT_WIDTH"),
             reader.getBool("USE_TILE_PARTITION"),
             process_input_quantization_mode(reader.getUint32("QUANT_MODE")),
