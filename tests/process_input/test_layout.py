@@ -103,26 +103,13 @@ def test_scatter_layout(
         for target in target_row:
             if target < 0:
                 continue
-            torch.testing.assert_close(
-                result[0][target].float(),
-                reference[0][input_row].float(),
-                rtol=0,
-                atol=0,
-            )
-            if result[1] is not None:
-                torch.testing.assert_close(
-                    result[1][target].float(),
-                    reference[1][input_row].float(),
-                    rtol=0,
-                    atol=0,
-                )
-            if result[2] is not None:
-                torch.testing.assert_close(
-                    result[2][target],
-                    reference[2][input_row],
-                    rtol=0,
-                    atol=0,
-                )
+            for index, (actual, expected) in enumerate(zip(result, reference, strict=True)):
+                if actual is None:
+                    continue
+                actual, expected = actual[target], expected[input_row]
+                if index < 2:
+                    actual, expected = actual.float(), expected.float()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     for untouched in (6, 7, 8):
         assert torch.count_nonzero(result[0][untouched]) == 0
