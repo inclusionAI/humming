@@ -10,9 +10,11 @@ from humming.kernel.process_mxfp4 import ProcessMxfp4W4A8Kernel
 from humming.kernel.quant_weight import QuantWeightKernel
 from humming.kernel.repack_weight import RepackWeightKernel
 from humming.kernel.unpack_weight import UnpackWeightKernel
+from humming.ops.utils import register_op
 
 
-def dequant_weight(
+@register_op("humming::dequant_weight")
+def _dequant_weight_op(
     inputs: torch.Tensor,
     exponent_bits: int,
     mantissa_bits: int,
@@ -36,7 +38,8 @@ def dequant_weight(
     return outputs
 
 
-def pack_weight(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
+@register_op("humming::pack_weight")
+def _pack_weight_op(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
     assert inputs.is_cuda
     assert inputs.is_contiguous()
     assert inputs.size(-1) % 32 == 0
@@ -53,7 +56,8 @@ def pack_weight(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
     return outputs
 
 
-def quant_weight(
+@register_op("humming::quant_weight")
+def _quant_weight_op(
     inputs: torch.Tensor,
     source_dtype_str: str,
     target_dtype_str: str,
@@ -102,7 +106,8 @@ def quant_weight(
     return outputs, scales, zero_point
 
 
-def repack_weight(
+@register_op("humming::repack_weight")
+def _repack_weight_op(
     inputs: torch.Tensor,
     weight_bits: int,
     activation_bits: int,
@@ -179,7 +184,8 @@ def repack_weight(
     return outputs
 
 
-def unpack_weight(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
+@register_op("humming::unpack_weight")
+def _unpack_weight_op(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
     assert inputs.is_cuda
     assert inputs.is_contiguous()
     assert inputs.size(-1) % num_bits == 0
@@ -196,7 +202,8 @@ def unpack_weight(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
     return outputs
 
 
-def process_mxfp4_w4a8_weight(
+@register_op("humming::process_mxfp4_w4a8_weight")
+def _process_mxfp4_w4a8_weight_op(
     inputs: torch.Tensor,
     delta_scale_offsets: torch.Tensor,
     inplace: bool = False,
@@ -218,3 +225,88 @@ def process_mxfp4_w4a8_weight(
     kernel(inputs, outputs, delta_scale_offsets)
 
     return outputs
+
+
+def dequant_weight(
+    inputs: torch.Tensor,
+    exponent_bits: int,
+    mantissa_bits: int,
+    is_signed: bool,
+) -> torch.Tensor:
+    return torch.ops.humming.dequant_weight(inputs, exponent_bits, mantissa_bits, is_signed)
+
+
+def pack_weight(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
+    return torch.ops.humming.pack_weight(inputs, num_bits)
+
+
+def quant_weight(
+    inputs: torch.Tensor,
+    source_dtype_str: str,
+    target_dtype_str: str,
+    group_size: int,
+    has_scale: bool,
+    use_e8m0_scale: bool,
+    has_zero_point: bool,
+    is_fp_zero_point: bool,
+    allow_negative_scale: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops.humming.quant_weight(
+        inputs,
+        source_dtype_str,
+        target_dtype_str,
+        group_size,
+        has_scale,
+        use_e8m0_scale,
+        has_zero_point,
+        is_fp_zero_point,
+        allow_negative_scale,
+    )
+
+
+def repack_weight(
+    inputs: torch.Tensor,
+    weight_bits: int,
+    activation_bits: int,
+    is_weight_packed: bool,
+    should_preprocess_for_int2fp: bool = False,
+    should_preprocess_with_zp: bool = False,
+    use_wgmma: bool = False,
+    use_fused_e8m0_scale: bool = False,
+    interleave_mode: int = 3,
+    group_size_zp: int = 0,
+    padded_shape_n: int | None = None,
+    padded_shape_k: int | None = None,
+    zero_point: torch.Tensor | None = None,
+    use_packed_k_layout: bool = False,
+    use_native_dequant: bool = False,
+) -> torch.Tensor:
+    return torch.ops.humming.repack_weight(
+        inputs,
+        weight_bits,
+        activation_bits,
+        is_weight_packed,
+        should_preprocess_for_int2fp,
+        should_preprocess_with_zp,
+        use_wgmma,
+        use_fused_e8m0_scale,
+        interleave_mode,
+        group_size_zp,
+        padded_shape_n,
+        padded_shape_k,
+        zero_point,
+        use_packed_k_layout,
+        use_native_dequant,
+    )
+
+
+def unpack_weight(inputs: torch.Tensor, num_bits: int) -> torch.Tensor:
+    return torch.ops.humming.unpack_weight(inputs, num_bits)
+
+
+def process_mxfp4_w4a8_weight(
+    inputs: torch.Tensor,
+    delta_scale_offsets: torch.Tensor,
+    inplace: bool = False,
+) -> torch.Tensor:
+    return torch.ops.humming.process_mxfp4_w4a8_weight(inputs, delta_scale_offsets, inplace)

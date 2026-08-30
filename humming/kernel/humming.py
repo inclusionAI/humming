@@ -466,6 +466,28 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         )
         raise NotImplementedError(msg)
 
+    @staticmethod
+    def _prepare_config_str(config: str | dict | list | None) -> str:
+        if config is None:
+            return "{}"
+        return config if isinstance(config, str) else str(config)
+
+    @staticmethod
+    def _prepare_config_obj(config: str | dict | list | None):
+        if config is None:
+            return {}
+        return json.loads(config) if isinstance(config, str) else config
+
+    @classmethod
+    def _resolve_configs(cls, layer_config, compute_config, tuning_config):
+        layer_obj = dict(cls._prepare_config_obj(layer_config))
+        compute_obj = dict(cls._prepare_config_obj(compute_config))
+        tuning_obj = cls._prepare_config_obj(tuning_config)
+        layer_obj.pop("sublayer_name", None)
+        if not tuning_obj:
+            tuning_obj = get_heuristics_config(LayerConfig(**layer_obj), **compute_obj)
+        return layer_obj, compute_obj, tuning_obj
+
     @classmethod
     def prepare_kernels(
         cls,
@@ -473,25 +495,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         compute_config: str | dict | None = None,
         tuning_config: str | dict | list | None = None,
     ) -> "torch.Tensor":
-        def prepare_config_str(config: str | dict | list | None):
-            if config is None:
-                return "{}"
-            elif isinstance(config, str):
-                return config
-            else:
-                return str(config)
-
-        def prepare_config_obj(config: str | dict | list | None):
-            if config is None:
-                return {}
-            elif not isinstance(config, str):
-                return config
-            else:
-                return json.loads(config)
-
-        layer_config_str = prepare_config_str(layer_config)
-        compute_config_str = prepare_config_str(compute_config)
-        tuning_config_str = prepare_config_str(tuning_config)
+        layer_config_str = cls._prepare_config_str(layer_config)
+        compute_config_str = cls._prepare_config_str(compute_config)
+        tuning_config_str = cls._prepare_config_str(tuning_config)
         cache_key = (
             layer_config_str,
             compute_config_str,
@@ -501,13 +507,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if cache_key in cls._str2kernel_cache:
             return cls._str2kernel_cache[cache_key]
 
-        layer_config_obj = prepare_config_obj(layer_config)
-        compute_config_obj = prepare_config_obj(compute_config)
-        tuning_config_obj = prepare_config_obj(tuning_config)
-        layer_config_obj.pop("sublayer_name", None)
-
-        if not tuning_config_obj:
-            tuning_config_obj = get_heuristics_config(LayerConfig(**layer_config_obj), **compute_config_obj)
+        config_objs = cls._resolve_configs(layer_config, compute_config, tuning_config)
+        layer_config_obj, compute_config_obj, tuning_config_obj = config_objs
 
         if isinstance(tuning_config_obj, dict):
             config = layer_config_obj | compute_config_obj | tuning_config_obj

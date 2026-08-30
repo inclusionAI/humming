@@ -18,24 +18,23 @@ _launcher_inited = False
 
 def register_op(
     name: str,
-    impl_func: Callable,
-    fake_impl_func: Callable | None = None,
     mutates_args: list[str] | None = None,
 ):
-    mutates_args = [] if mutates_args is None else mutates_args
-    schema_str = torch.library.infer_schema(impl_func, mutates_args=mutates_args)
-    lib_name, op_name = name.split("::")
+    def decorator(impl_func: Callable):
+        schema_str = torch.library.infer_schema(impl_func, mutates_args=mutates_args or [])
+        lib_name, op_name = name.split("::")
 
-    if lib_name not in _libs:
-        _lib = torch.library.Library(lib_name, "FRAGMENT")
-        _libs[lib_name] = _lib
+        if lib_name not in _libs:
+            _libs[lib_name] = torch.library.Library(lib_name, "FRAGMENT")
 
-    _lib = _libs[lib_name]
-    _lib.define(op_name + schema_str)
-    _lib.impl(op_name, impl_func, dispatch_key="CUDA")
-    if fake_impl_func is not None:
+        lib = _libs[lib_name]
+        lib.define(op_name + schema_str)
+        lib.impl(op_name, impl_func, dispatch_key="CUDA")
         with _shield_lazy_modules():
-            _lib._register_fake(op_name, fake_impl_func)
+            lib._register_fake(op_name, impl_func)
+        return impl_func
+
+    return decorator
 
 
 @contextlib.contextmanager

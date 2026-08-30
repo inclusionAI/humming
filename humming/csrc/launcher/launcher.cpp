@@ -73,6 +73,7 @@ Tensor launch_kernel_impl(
     int64_t valid_shape_m,
     bool should_check_tensor = true) {
 
+  if (locks_.has_value() && locks_->numel() == 0) locks_.reset();
   CUcontext context = get_current_context();
   KernelLaunchData base_kernel_launch_data = find_kernel_launch_data(configs, 1, context);
   KernelData &base_kernel_data = base_kernel_launch_data.kernel_data;
@@ -309,12 +310,40 @@ Tensor launch_kernel(
                             num_tokens_padded_, expert_layout_, locks_, top_k, valid_shape_m, should_check_tensor);
 }
 
+void launch_kernel_out(
+    Tensor configs_t,
+    Tensor a,
+    Tensor b,
+    Tensor bs,
+    std::optional<Tensor> bs2_,
+    std::optional<Tensor> as_,
+    std::optional<Tensor> bzp_,
+    std::optional<Tensor> bias_,
+    Tensor c,
+    std::optional<Tensor> sorted_ids_,
+    std::optional<Tensor> expert_ids_,
+    std::optional<Tensor> num_tokens_padded_,
+    std::optional<Tensor> expert_layout_,
+    Tensor locks,
+    int64_t top_k,
+    int64_t valid_shape_m,
+    bool should_check_tensor = true) {
+  if (!a.is_cuda()) return;
+  (void)launch_kernel(configs_t, a, b, bs, bs2_, as_, bzp_, bias_, c, sorted_ids_, expert_ids_,
+                      num_tokens_padded_, expert_layout_, locks, top_k, valid_shape_m, should_check_tensor);
+}
+
 COMMON_TORCH_LIBRARY(humming, m) {
   m.def(
       "launch_kernel(Tensor configs, Tensor a, Tensor b, Tensor bs, "
       "Tensor? bs2, Tensor? as_, Tensor? bzp, Tensor? bias, Tensor? c, "
       "Tensor? sorted_ids, Tensor? expert_ids, Tensor? num_tokens_padded, Tensor? expert_layout, "
       "Tensor? locks, SymInt top_k, SymInt valid_shape_m, bool should_check_tensor = True) -> Tensor");
+  m.def(
+      "launch_kernel.out(Tensor configs, Tensor a, Tensor b, Tensor bs, "
+      "Tensor? bs2, Tensor? as_, Tensor? bzp, Tensor? bias, Tensor(a!) c, "
+      "Tensor? sorted_ids, Tensor? expert_ids, Tensor? num_tokens_padded, Tensor? expert_layout, "
+      "Tensor(b!) locks, SymInt top_k, SymInt valid_shape_m, bool should_check_tensor = True) -> ()");
   m.def("register_kernel(str cubin_path) -> (int, str)");
   m.def("register_process_input_kernel(str cubin_path) -> (int, str)");
   m.def("get_kernel_smem_size(int kernel_id) -> int");
@@ -327,10 +356,15 @@ COMMON_TORCH_LIBRARY(humming, m) {
 COMMON_TORCH_LIBRARY_IMPL(humming, CUDA, m) {
   m.impl("launch_kernel", COMMON_TORCH_BOX(&launch_kernel));
   m.impl("launch_process_input", COMMON_TORCH_BOX(&launch_process_input));
+  m.impl("launch_kernel.out", COMMON_TORCH_BOX(&launch_kernel_out));
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, Undefined, m) {
   m.impl("register_kernel", COMMON_TORCH_BOX(&register_kernel));
   m.impl("register_process_input_kernel", COMMON_TORCH_BOX(&register_process_input_kernel));
   m.impl("get_kernel_smem_size", COMMON_TORCH_BOX(&get_kernel_smem_size));
+};
+
+COMMON_TORCH_LIBRARY_IMPL(humming, Meta, m) {
+  m.impl("launch_kernel.out", COMMON_TORCH_BOX(&launch_kernel_out));
 };
