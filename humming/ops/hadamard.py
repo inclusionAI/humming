@@ -5,6 +5,7 @@ from humming import dtypes
 from humming.kernel.hadamard import HadamardKernel
 from humming.kernel.hadamard_quant import HadamardQuantInputKernel
 from humming.kernel.hadamard_quant_wide import HadamardQuantInputWideKernel
+from humming.ops.utils import register_op
 
 _QUANT_DTYPE_STR_TO_TORCH = {
     "int8": torch.int8,
@@ -23,7 +24,8 @@ _SCALE_DTYPE_TO_TORCH = {
 }
 
 
-def hadamard_transform(
+@register_op("humming::hadamard_transform")
+def _hadamard_transform_op(
     inputs: torch.Tensor,
     block_size: int,
     scale: float = 1.0,
@@ -73,7 +75,8 @@ def hadamard_transform(
     return outputs
 
 
-def hadamard_quant_input(
+@register_op("humming::hadamard_quant_input")
+def _hadamard_quant_input_op(
     inputs: torch.Tensor,
     block_size: int,
     quant_dtype: str,
@@ -202,3 +205,41 @@ def hadamard_quant_input(
         scales = scales.view(torch.float8_e8m0fnu)
 
     return outputs, scales
+
+
+def hadamard_transform(
+    inputs: torch.Tensor,
+    block_size: int,
+    scale: float = 1.0,
+    outputs: torch.Tensor | None = None,
+    use_pdl: bool = False,
+) -> torch.Tensor:
+    return torch.ops.humming.hadamard_transform(inputs, block_size, scale, outputs, use_pdl)
+
+
+def hadamard_quant_input(
+    inputs: torch.Tensor,
+    block_size: int,
+    quant_dtype: str,
+    group_size: int | None = None,
+    scale: float = 1.0,
+    outputs: torch.Tensor | None = None,
+    scales: torch.Tensor | None = None,
+    m_major_scale: bool = False,
+    scale_dtype: str = "float32",
+    global_scale: torch.Tensor | None = None,
+    use_pdl: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.humming.hadamard_quant_input(
+        inputs,
+        block_size,
+        quant_dtype,
+        group_size,
+        scale,
+        outputs,
+        scales,
+        m_major_scale,
+        scale_dtype,
+        global_scale,
+        use_pdl,
+    )

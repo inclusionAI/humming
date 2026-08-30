@@ -4,6 +4,8 @@ import triton.language as tl
 from torch._subclasses.fake_tensor import FakeTensor
 from triton.language.extra.cuda import gdc_wait
 
+from humming.ops.utils import register_op
+
 # Hidden float formats the hardware supports but PTX cannot emit: quantize using
 # the base PTX type below and patch the cubin's cvt to the hidden format.
 _HIDDEN_BASE = {"float8e3m4": "float8e5m2", "float4e0m3": "float4e2m1"}
@@ -234,7 +236,8 @@ def _quant_tensor_kernel(
         gdc_launch_dependents()
 
 
-def quant_input(
+@register_op("humming::quant_input")
+def _quant_input_op(
     inputs: torch.Tensor,
     dtype: str,
     scales: torch.Tensor | None = None,
@@ -385,3 +388,27 @@ def quant_input(
         outputs = outputs.view(torch.uint8)
 
     return outputs, scales
+
+
+def quant_input(
+    inputs: torch.Tensor,
+    dtype: str,
+    scales: torch.Tensor | None = None,
+    outputs: torch.Tensor | None = None,
+    group_size: int | None = None,
+    use_pdl: bool = False,
+    m_major_scale: bool = False,
+    scale_dtype: str = "float32",
+    global_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.humming.quant_input(
+        inputs,
+        dtype,
+        scales,
+        outputs,
+        group_size,
+        use_pdl,
+        m_major_scale,
+        scale_dtype,
+        global_scale,
+    )
