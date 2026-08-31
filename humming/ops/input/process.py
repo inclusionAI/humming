@@ -6,6 +6,8 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
 from humming import dtypes
+from humming.kernel.process_input import ProcessInputKernel
+from humming.ops.utils import init_humming_launcher, register_op
 
 from .enums import ActivationType, GroupScaleLayout, LayoutType, QuantizationMode
 from .plan import select_process_input_plan
@@ -235,9 +237,6 @@ class _ProcessInput:
         elif not self.quant_mode.uses_token_scale:
             assert self.token_scales is None, "token_scales is not used by quant_mode"
 
-    def result(self) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        return self.outputs, self.group_scales, self.token_scales
-
     def select_schedule(self) -> None:
         self.properties = torch.cuda.get_device_properties(self.inputs.device)
         self.capability = (self.properties.major, self.properties.minor)
@@ -348,9 +347,6 @@ class _ProcessInput:
         return kernel_args
 
     def prepare_launch_configs(self, cache_key=None) -> torch.Tensor:
-        from humming.kernel.process_input import ProcessInputKernel
-
-        self.prepare()
         self.select_schedule()
         intervals = self.plan_intervals()
         return ProcessInputKernel.prepare_kernels(
@@ -368,13 +364,104 @@ class _ProcessInput:
         self.allocate_scales()
 
 
+@register_op("humming::prepare_process_input")
+def _prepare_process_input_op(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor | None = None,
+    inplace: bool = False,
+    group_scales: torch.Tensor | None = None,
+    token_scales: torch.Tensor | None = None,
+    quant_mode: str = "none",
+    quant_dtype: str | None = None,
+    quant_group_size: int | None = None,
+    group_scale_dtype: str | None = None,
+    activation_type: str = "none",
+    activation_impl: str | None = None,
+    hadamard_block_size: int | None = None,
+    layout: str = "normal",
+    expert_layout: torch.Tensor | None = None,
+    indices: torch.Tensor | None = None,
+    zero_invalid: bool = False,
+    group_scale_layout: str = "row_major",
+    use_pdl: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    allocate_outputs = outputs is None and not inplace
+    allocate_group_scales = group_scales is None
+    allocate_token_scales = token_scales is None
+    operation = _ProcessInput(
+        inputs=inputs,
+        outputs=outputs,
+        inplace=inplace,
+        quant_mode=quant_mode,
+        quant_dtype=None if quant_dtype is None else dtypes.DataType.from_str(quant_dtype),
+        quant_group_size=quant_group_size,
+        group_scales=group_scales,
+        group_scale_dtype=group_scale_dtype,
+        token_scales=token_scales,
+        activation_type=activation_type,
+        activation_impl=activation_impl,
+        hadamard_block_size=hadamard_block_size,
+        layout=layout,
+        expert_layout=expert_layout,
+        indices=indices,
+        zero_invalid=zero_invalid,
+        group_scale_layout=group_scale_layout,
+        use_pdl=use_pdl,
+    )
+    operation.prepare()
+
+    if isinstance(inputs, FakeTensor):
+        init_humming_launcher()
+        config_size = torch.library.get_ctx().new_dynamic_size(min=4)
+        configs = torch.empty((config_size,), dtype=torch.int64, device="cpu")
+    else:
+        assert inputs.is_cuda
+        output_width = indices.size(1) if layout == "scatter" and indices is not None else 1
+        output_alias = 0 if outputs is None else (1 if outputs is inputs else 2)
+        family_key = (
+            inputs.device.index,
+            inputs.dtype,
+            inputs.size(-1),
+            outputs.dtype if outputs is not None else None,
+            output_alias,
+            group_scales.dtype if group_scales is not None else None,
+            group_scale_dtype,
+            token_scales.dtype if token_scales is not None else None,
+            expert_layout.dtype if expert_layout is not None else None,
+            indices.dtype if indices is not None else None,
+            inplace,
+            quant_mode,
+            quant_dtype,
+            quant_group_size,
+            activation_type,
+            activation_impl,
+            hadamard_block_size,
+            layout,
+            output_width,
+            zero_invalid,
+            group_scale_layout,
+            use_pdl,
+        )
+        configs = ProcessInputKernel._str2kernel_cache.get(family_key)
+        if configs is None:
+            with torch.cuda.device(inputs.device):
+                configs = operation.prepare_launch_configs(family_key)
+
+    return (
+        configs,
+        operation.outputs if allocate_outputs else None,
+        operation.group_scales if allocate_group_scales else None,
+        operation.token_scales if allocate_token_scales else None,
+    )
+
+
 def process_input(
     inputs: torch.Tensor,
     *,
     outputs: torch.Tensor | None = None,
     inplace: bool = False,
     quant_mode: str = "none",
-    quant_dtype: str | dtypes.DataType | None = None,
+    quant_dtype: str | None = None,
     quant_group_size: int | None = None,
     group_scales: torch.Tensor | None = None,
     group_scale_dtype: str | None = None,
@@ -389,85 +476,50 @@ def process_input(
     group_scale_layout: str = "row_major",
     use_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    from humming.kernel.process_input import ProcessInputKernel
-
-    quant_dtype = None if quant_dtype is None else dtypes.DataType.from_str(quant_dtype)
-    layout_type = LayoutType(layout)
-    output_width = 1
-    if layout_type == LayoutType.Scatter and indices is not None:
-        output_width = indices.size(1)
-    # M and ordinary leading dimensions remain runtime values. K and scatter
-    # width change the generated cubin.
-    family_key = (
-        inputs.device.index,
-        inputs.dtype,
-        inputs.size(-1),
-        outputs.dtype if outputs is not None else None,
-        group_scales.dtype if group_scales is not None else None,
-        group_scale_dtype,
-        token_scales.dtype if token_scales is not None else None,
-        expert_layout.dtype if expert_layout is not None else None,
-        indices.dtype if indices is not None else None,
-        inplace,
-        quant_mode,
-        quant_dtype,
-        quant_group_size,
-        activation_type,
-        activation_impl,
-        hadamard_block_size,
-        layout_type,
-        output_width,
-        zero_invalid,
-        group_scale_layout,
-        use_pdl,
+    options = dict(
+        quant_mode=quant_mode,
+        quant_dtype=quant_dtype,
+        quant_group_size=quant_group_size,
+        group_scale_dtype=group_scale_dtype,
+        activation_type=activation_type,
+        activation_impl=activation_impl,
+        hadamard_block_size=hadamard_block_size,
+        layout=layout,
+        expert_layout=expert_layout,
+        indices=indices,
+        zero_invalid=zero_invalid,
+        group_scale_layout=group_scale_layout,
+        use_pdl=use_pdl,
     )
-    fake = isinstance(inputs, FakeTensor)
-    launch_configs = None if fake else ProcessInputKernel._str2kernel_cache.get(family_key)
-    operation = None
-    if launch_configs is None:
-        operation = _ProcessInput(
-            inputs=inputs,
-            outputs=outputs,
-            inplace=inplace,
-            quant_mode=quant_mode,
-            quant_dtype=quant_dtype,
-            quant_group_size=quant_group_size,
-            group_scales=group_scales,
-            group_scale_dtype=group_scale_dtype,
-            token_scales=token_scales,
-            activation_type=activation_type,
-            activation_impl=activation_impl,
-            hadamard_block_size=hadamard_block_size,
-            layout=layout,
-            expert_layout=expert_layout,
-            indices=indices,
-            zero_invalid=zero_invalid,
-            group_scale_layout=group_scale_layout,
-            use_pdl=use_pdl,
-        )
-
-    if fake:
-        operation.prepare()
-        return operation.result()
-
-    assert inputs.is_cuda
-    if operation is not None:
-        with torch.cuda.device(inputs.device):
-            launch_configs = operation.prepare_launch_configs(family_key)
-        outputs = operation.outputs
-        group_scales = operation.group_scales
-        token_scales = operation.token_scales
-    result = torch.ops.humming.launch_process_input(
-        launch_configs,
+    use_ops = torch.compiler.is_compiling() or isinstance(inputs, FakeTensor)
+    prepare = torch.ops.humming.prepare_process_input if use_ops else _prepare_process_input_op
+    prepared = prepare(
         inputs,
         outputs,
+        inplace,
         group_scales,
         token_scales,
+        **options,
+    )
+    configs, allocated_outputs, allocated_group_scales, allocated_token_scales = prepared
+    if inplace:
+        torch.ops.humming.launch_process_input.inplace(configs, inputs, expert_layout, indices)
+        return inputs, None, None
+
+    result_outputs = outputs if outputs is not None else allocated_outputs
+    result_group_scales = group_scales if group_scales is not None else allocated_group_scales
+    result_token_scales = token_scales if token_scales is not None else allocated_token_scales
+    assert result_outputs is not None
+    torch.ops.humming.launch_process_input.default(
+        configs,
+        inputs,
+        result_outputs,
+        result_group_scales,
+        result_token_scales,
         expert_layout,
         indices,
-        inplace,
     )
-    return result
+    return result_outputs, result_group_scales, result_token_scales
 
 
 def quant_input(
@@ -481,13 +533,25 @@ def quant_input(
     scale_dtype: str = "float32",
     global_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if group_size is None or group_size == 0:
+    channelwise = group_size is None or group_size == 0
+    if channelwise and scales is None and scale_dtype == "float32" and global_scale is None:
+        quantized, _, result_token_scales = process_input(
+            inputs,
+            outputs=outputs,
+            quant_mode=QuantizationMode.DynamicToken,
+            quant_dtype=dtype,
+            use_pdl=use_pdl,
+        )
+        assert result_token_scales is not None
+        return quantized, result_token_scales.unsqueeze(-1)
+
+    if channelwise:
         group_size = inputs.size(-1)
 
     group_scale_layout = GroupScaleLayout.RowMajor
     if m_major_scale:
         group_scale_layout = GroupScaleLayout.MMajor
-        if scale_dtype == "float8e8m0":
+        if scale_dtype in ("float8e4m3", "float8e8m0"):
             group_scale_layout = GroupScaleLayout.MxPacked
     quant_mode = (
         QuantizationMode.StaticTensorDynamicGroup

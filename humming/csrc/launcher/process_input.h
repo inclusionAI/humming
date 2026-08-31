@@ -251,19 +251,6 @@ inline std::vector<int64_t> process_input_output_shape(
   return {shape.num_output_rows, columns};
 }
 
-inline std::vector<int64_t> process_input_leading_shape(
-    const ProcessInputKernelData &data, const Tensor &inputs, const ProcessInputShape &shape) {
-  if (data.layout == 0) {
-    std::vector<int64_t> leading_shape;
-    leading_shape.reserve(inputs.dim() - 1);
-    for (int64_t dimension = 0; dimension + 1 < inputs.dim(); dimension++)
-      leading_shape.push_back(inputs.size(dimension));
-    return leading_shape;
-  }
-  if (data.layout == 3) return {shape.num_experts, shape.max_tokens_per_expert};
-  return {shape.num_output_rows};
-}
-
 inline Tensor prepare_process_input_output(
     const ProcessInputKernelData &data,
     const Tensor &inputs,
@@ -278,7 +265,7 @@ inline Tensor prepare_process_input_output(
     ASSERT_CHECK(!outputs.has_value() || outputs->data_ptr() == inputs.data_ptr(), "inplace output must alias inputs");
     outputs = inputs;
   }
-  if (!outputs.has_value()) return torch_empty(expected_shape, dtype, inputs.device());
+  ASSERT_CHECK(outputs.has_value(), "outputs must be allocated by prepare_process_input");
   check_process_input_tensor(*outputs, "outputs", inputs.get_device(), dtype);
   ASSERT_CHECK(outputs->dim() == static_cast<int64_t>(expected_shape.size()), "invalid output rank");
   for (size_t dimension = 0; dimension < expected_shape.size(); dimension++)
@@ -302,18 +289,7 @@ inline std::optional<Tensor> prepare_process_input_group_scales(
   if (data.scale_layout == 2) elements = shape.group_scale_stride * CEIL_DIV(groups, 4) * 4;
   ScalarType dtype = dtype_id_to_tensor_dtype(data.group_scale_dtype_id);
   bool allow_byte = data.group_scale_dtype_id == 20080800;
-  if (!scales.has_value()) {
-    std::vector<int64_t> scale_shape;
-    if (data.scale_layout == 0) {
-      scale_shape = process_input_leading_shape(data, inputs, shape);
-      scale_shape.push_back(groups);
-    } else if (data.scale_layout == 1) {
-      scale_shape = {groups, shape.group_scale_stride};
-    } else {
-      scale_shape = {CEIL_DIV(groups, 4), shape.group_scale_stride, 4};
-    }
-    return torch_empty(scale_shape, dtype, inputs.device());
-  }
+  ASSERT_CHECK(scales.has_value(), "group_scales must be allocated by prepare_process_input");
   check_process_input_tensor(*scales, "group_scales", inputs.get_device(), dtype, allow_byte);
   ASSERT_CHECK(scales->numel() == elements, "invalid group_scales size");
   return scales;
@@ -331,11 +307,7 @@ inline std::optional<Tensor> prepare_process_input_token_scales(
     return std::nullopt;
   }
   int64_t elements = static_scale ? shape.num_experts : shape.num_output_rows;
-  if (!scales.has_value()) {
-    ASSERT_CHECK(dynamic_scale, "static token_scales is required");
-    auto scale_shape = process_input_leading_shape(data, inputs, shape);
-    return torch_empty(scale_shape, ScalarType::Float, inputs.device());
-  }
+  ASSERT_CHECK(scales.has_value(), "token_scales must be allocated by prepare_process_input");
   check_process_input_tensor(*scales, "token_scales", inputs.get_device(), ScalarType::Float);
   ASSERT_CHECK(scales->numel() == elements, "invalid token_scales size");
   return scales;
@@ -457,7 +429,7 @@ inline void launch_process_input_finalizer(
   check_curesult(cuLaunchKernelEx(&config, data.func, kernel_args, nullptr), "cuLaunchKernelEx");
 }
 
-inline std::tuple<Tensor, std::optional<Tensor>, std::optional<Tensor>> launch_process_input(
+inline void launch_process_input_impl(
     Tensor configs_tensor,
     Tensor inputs,
     std::optional<Tensor> outputs,
@@ -524,5 +496,29 @@ inline std::tuple<Tensor, std::optional<Tensor>, std::optional<Tensor>> launch_p
           secondary, intermediate, *group_scales, *token_scales, expert_layout, indices, shape);
     }
   }
-  return std::make_tuple(prepared_output, group_scales, token_scales);
+}
+
+inline void launch_process_input(
+    Tensor configs_tensor,
+    Tensor inputs,
+    Tensor outputs,
+    std::optional<Tensor> group_scales,
+    std::optional<Tensor> token_scales,
+    std::optional<Tensor> expert_layout,
+    std::optional<Tensor> indices) {
+  if (!inputs.is_cuda()) return;
+  launch_process_input_impl(
+      configs_tensor, inputs, outputs, group_scales, token_scales,
+      expert_layout, indices, false);
+}
+
+inline void launch_process_input_inplace(
+    Tensor configs_tensor,
+    Tensor inputs,
+    std::optional<Tensor> expert_layout,
+    std::optional<Tensor> indices) {
+  if (!inputs.is_cuda()) return;
+  launch_process_input_impl(
+      configs_tensor, inputs, inputs, std::nullopt, std::nullopt,
+      expert_layout, indices, true);
 }

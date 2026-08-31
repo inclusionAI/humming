@@ -44,13 +44,26 @@ def hadamard_quant_input(
     global_scale: torch.Tensor | None = None,
     use_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if group_size is None or group_size == 0:
+    channelwise = group_size is None or group_size == 0
+    if channelwise and scales is None and scale_dtype == "float32" and global_scale is None:
+        quantized, _, result_token_scales = process_input(
+            inputs,
+            outputs=outputs,
+            quant_mode=QuantizationMode.DynamicToken,
+            quant_dtype=quant_dtype,
+            hadamard_block_size=block_size,
+            use_pdl=use_pdl,
+        )
+        assert result_token_scales is not None
+        return quantized, result_token_scales.unsqueeze(-1)
+
+    if channelwise:
         group_size = inputs.size(-1)
 
     group_scale_layout = GroupScaleLayout.RowMajor
     if m_major_scale:
         group_scale_layout = GroupScaleLayout.MMajor
-        if scale_dtype == "float8e8m0":
+        if scale_dtype in ("float8e4m3", "float8e8m0"):
             group_scale_layout = GroupScaleLayout.MxPacked
 
     quant_mode = QuantizationMode.DynamicGroup

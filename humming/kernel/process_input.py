@@ -227,16 +227,9 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
                 secondary_id = kernels[spec_key(secondary)].kernel_id
             plan_kernel_ids[plan] = primary_id, secondary_id
 
-        compiled_intervals = []
-        for first, last, plan in intervals:
-            kernel_ids = plan_kernel_ids[plan]
-            if compiled_intervals and compiled_intervals[-1][2] == kernel_ids:
-                compiled_intervals[-1] = compiled_intervals[-1][0], last, kernel_ids
-            else:
-                compiled_intervals.append((first, last, kernel_ids))
-
         launch_configs = []
-        for first, last, (primary_id, secondary_id) in compiled_intervals:
+        for first, last, plan in intervals:
+            primary_id, secondary_id = plan_kernel_ids[plan]
             launch_configs.extend((first - 1, last, primary_id, secondary_id))
         result = torch.tensor(launch_configs, dtype=torch.int64, device="cpu")
         if cache_key is not None:
