@@ -1,6 +1,6 @@
 import torch
 
-from humming.ops.utils import init_humming_launcher
+from humming.ops.utils import _prepare_output_arg, _select_output, init_humming_launcher
 
 
 def register_kernel(cubin_path: str) -> tuple[int, str]:
@@ -35,7 +35,9 @@ def launch_kernel(
     assert weight_scale is not None, "weight_scale is required (a lone scale also rides this slot)"
     if isinstance(configs, list):
         configs = torch.tensor(configs, dtype=torch.int64, device="cpu")
-    if outputs is not None and locks is None:
+
+    outputs = _prepare_output_arg(inputs, outputs, inputs.dtype)
+    if outputs.nelement() > 0 and locks is None:
         locks = inputs.new_empty((0,), dtype=torch.int32)
     launch_args = (
         configs,
@@ -46,7 +48,7 @@ def launch_kernel(
         input_scale,
         zero_point,
         bias,
-        outputs,
+        outputs if outputs.nelement() > 0 else None,
         sorted_ids,
         expert_ids,
         num_tokens_padded,
@@ -55,8 +57,10 @@ def launch_kernel(
         top_k,
         valid_shape_m,
     )
-    if outputs is None:
-        return torch.ops.humming.launch_kernel.default(*launch_args)
+    if outputs.nelement() == 0:
+        returned_outputs = torch.ops.humming.launch_kernel.default(*launch_args)
+    else:
+        torch.ops.humming.launch_kernel.out(*launch_args)
+        returned_outputs = outputs.new_empty((0,))
 
-    torch.ops.humming.launch_kernel.out(*launch_args)
-    return outputs
+    return _select_output(outputs, returned_outputs)

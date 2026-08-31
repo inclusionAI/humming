@@ -4,7 +4,13 @@ import triton.language as tl
 from torch._subclasses.fake_tensor import FakeTensor
 from triton.language.extra.cuda import gdc_wait
 
-from humming.ops.utils import register_op
+from humming.ops.utils import (
+    _prepare_output,
+    _prepare_output_arg,
+    _select_output,
+    _should_use_torch_op,
+    register_op,
+)
 
 # Hidden float formats the hardware supports but PTX cannot emit: quantize using
 # the base PTX type below and patch the cubin's cvt to the hidden format.
@@ -236,12 +242,12 @@ def _quant_tensor_kernel(
         gdc_launch_dependents()
 
 
-@register_op("humming::quant_input")
+@register_op("humming::quant_input", mutates_args=["outputs"])
 def _quant_input_op(
     inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    scales: torch.Tensor,
     dtype: str,
-    scales: torch.Tensor | None = None,
-    outputs: torch.Tensor | None = None,
     group_size: int | None = None,
     use_pdl: bool = False,
     m_major_scale: bool = False,
@@ -264,15 +270,15 @@ def _quant_input_op(
     else:
         raise ValueError("unsupported dtype: " + dtype)
 
-    if outputs is None:
-        outputs = torch.empty(output_shape, dtype=output_dtype, device=inputs.device)
-
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
-    assert outputs.shape == output_shape
-    assert outputs.dtype == output_dtype
-    assert outputs.device == inputs.device
+    outputs, returned_outputs = _prepare_output(
+        outputs,
+        output_shape,
+        output_dtype,
+        inputs.device,
+    )
 
-    is_dynamic = scales is None
+    is_dynamic = scales.nelement() == 0
     inputs = inputs.view(-1, inputs.size(-1))
     if group_size is None or group_size == 0:
         group_size = inputs.size(1)
@@ -302,18 +308,24 @@ def _quant_input_op(
 
     has_global_scale = global_scale is not None
 
-    scales_packed = None
+    returned_scales = scales.new_empty((0,))
     if is_dynamic:
         if mx_pack_m_major:
-            scales_packed = torch.empty(
+            scales_packed, returned_scales = _prepare_output(
+                scales,
                 (num_groups_packed, m_rows_stride),
-                dtype=torch.int32,
-                device=inputs.device,
+                torch.int32,
+                inputs.device,
             )
             scales = scales_packed.view(torch.uint8)
         else:
             shape = (num_groups, m_rows_stride) if m_major_scale else (m_rows, num_groups)
-            scales = torch.empty(shape, dtype=scale_torch_dtype, device=inputs.device)
+            scales, returned_scales = _prepare_output(
+                scales,
+                shape,
+                scale_torch_dtype,
+                inputs.device,
+            )
 
     if not isinstance(inputs, FakeTensor):
         assert inputs.is_cuda
@@ -371,9 +383,7 @@ def _quant_input_op(
 
         _quant_tensor_kernel[(grid_blocks,)](*launch_args, **launch_kwargs)
 
-    if scales is None:
-        scales = torch.empty(0)
-    elif mx_pack_m_major:
+    if mx_pack_m_major:
         scales = scales_packed
     elif m_major_scale:
         scales = scales.view(num_groups, m_rows_stride)
@@ -383,11 +393,16 @@ def _quant_input_op(
     if scale_dtype == "float8e8m0" and scales.numel() > 0 and not mx_pack_m_major:
         scales = scales.view(torch.float8_e8m0fnu)
 
+    if is_dynamic:
+        returned_scales = scales
+
     # Hidden formats are raw bytes reinterpreted by the MMA; expose them as uint8.
     if dtype in _HIDDEN_BASE and outputs.dtype != torch.uint8:
         outputs = outputs.view(torch.uint8)
+        if returned_outputs.nelement() > 0:
+            returned_outputs = outputs
 
-    return outputs, scales
+    return returned_outputs, returned_scales
 
 
 def quant_input(
@@ -401,14 +416,18 @@ def quant_input(
     scale_dtype: str = "float32",
     global_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.humming.quant_input(
+    outputs = _prepare_output_arg(inputs, outputs, inputs.dtype)
+    scales = _prepare_output_arg(inputs, scales, torch.float32)
+    op = torch.ops.humming.quant_input if _should_use_torch_op(inputs) else _quant_input_op
+    returned_outputs, returned_scales = op(
         inputs,
-        dtype,
-        scales,
         outputs,
+        scales,
+        dtype,
         group_size,
         use_pdl,
         m_major_scale,
         scale_dtype,
         global_scale,
     )
+    return _select_output(outputs, returned_outputs), _select_output(scales, returned_scales)

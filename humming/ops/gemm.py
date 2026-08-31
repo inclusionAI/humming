@@ -6,7 +6,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 from humming import dtypes
 from humming.kernel.humming import HummingKernel
 from humming.ops.launcher import launch_kernel
-from humming.ops.utils import init_humming_launcher, register_op
+from humming.ops.utils import _should_use_torch_op, init_humming_launcher, register_op
 
 
 @torch.compiler.assume_constant_result
@@ -56,7 +56,7 @@ def humming_gemm(
     top_k: int = 1,
     valid_shape_m: int = 0,
 ) -> torch.Tensor:
-    use_ops = torch.compiler.is_compiling() or isinstance(inputs, FakeTensor)
+    use_ops = _should_use_torch_op(inputs)
     if use_ops:
         if outputs is None:
             shape_n, output_dtype, is_indexed = _get_humming_gemm_output_meta(layer_config, compute_config)

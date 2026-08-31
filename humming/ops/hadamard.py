@@ -5,7 +5,13 @@ from humming import dtypes
 from humming.kernel.hadamard import HadamardKernel
 from humming.kernel.hadamard_quant import HadamardQuantInputKernel
 from humming.kernel.hadamard_quant_wide import HadamardQuantInputWideKernel
-from humming.ops.utils import register_op
+from humming.ops.utils import (
+    _prepare_output,
+    _prepare_output_arg,
+    _select_output,
+    _should_use_torch_op,
+    register_op,
+)
 
 _QUANT_DTYPE_STR_TO_TORCH = {
     "int8": torch.int8,
@@ -24,12 +30,12 @@ _SCALE_DTYPE_TO_TORCH = {
 }
 
 
-@register_op("humming::hadamard_transform")
+@register_op("humming::hadamard_transform", mutates_args=["outputs"])
 def _hadamard_transform_op(
     inputs: torch.Tensor,
+    outputs: torch.Tensor,
     block_size: int,
     scale: float = 1.0,
-    outputs: torch.Tensor | None = None,
     use_pdl: bool = False,
 ) -> torch.Tensor:
     """Apply a normalized Walsh-Hadamard transform along the last dimension.
@@ -56,12 +62,7 @@ def _hadamard_transform_op(
     )
     assert inputs.dtype in (torch.float16, torch.bfloat16, torch.float32)
 
-    if outputs is None:
-        outputs = torch.empty_like(inputs)
-    else:
-        assert outputs.shape == inputs.shape
-        assert outputs.dtype == inputs.dtype
-        assert outputs.is_contiguous()
+    outputs, returned_outputs = _prepare_output(outputs, inputs.shape, inputs.dtype, inputs.device)
 
     if not isinstance(inputs, FakeTensor):
         kernel = HadamardKernel(
@@ -72,18 +73,18 @@ def _hadamard_transform_op(
         )
         kernel(inputs=inputs, outputs=outputs, extra_scale=scale)
 
-    return outputs
+    return returned_outputs
 
 
-@register_op("humming::hadamard_quant_input")
+@register_op("humming::hadamard_quant_input", mutates_args=["outputs", "scales"])
 def _hadamard_quant_input_op(
     inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    scales: torch.Tensor,
     block_size: int,
     quant_dtype: str,
     group_size: int | None = None,
     scale: float = 1.0,
-    outputs: torch.Tensor | None = None,
-    scales: torch.Tensor | None = None,
     m_major_scale: bool = False,
     scale_dtype: str = "float32",
     global_scale: torch.Tensor | None = None,
@@ -145,23 +146,13 @@ def _hadamard_quant_input_op(
         scales_shape = ((num_groups_total + 3) // 4, m_pad) if mx_pack else (num_groups_total, m_pad)
     else:
         scales_shape = inputs.shape[:-1] + (num_groups_total,)
-    if outputs is None:
-        outputs = torch.empty(out_shape, dtype=out_torch_dtype, device=inputs.device)
-    else:
-        assert outputs.shape == out_shape
-        assert outputs.dtype == out_torch_dtype
-        assert outputs.device == inputs.device
-        assert outputs.is_contiguous()
-    if scales is None:
-        if mx_pack:
-            scales = torch.empty(scales_shape, dtype=torch.int32, device=inputs.device)
-        else:
-            scales = torch.empty(scales_shape, dtype=scale_torch_dtype, device=inputs.device)
-    else:
-        assert scales.shape == scales_shape
-        assert scales.dtype == (torch.int32 if mx_pack else scale_torch_dtype)
-        assert scales.device == inputs.device
-        assert scales.is_contiguous()
+    outputs, returned_outputs = _prepare_output(outputs, out_shape, out_torch_dtype, inputs.device)
+    scales, returned_scales = _prepare_output(
+        scales,
+        scales_shape,
+        torch.int32 if mx_pack else scale_torch_dtype,
+        inputs.device,
+    )
 
     if global_scale is not None:
         assert global_scale.dtype == torch.float32
@@ -203,8 +194,10 @@ def _hadamard_quant_input_op(
 
     if scale_dtype == "float8e8m0" and not mx_pack:
         scales = scales.view(torch.float8_e8m0fnu)
+        if returned_scales.nelement() > 0:
+            returned_scales = scales
 
-    return outputs, scales
+    return returned_outputs, returned_scales
 
 
 def hadamard_transform(
@@ -214,7 +207,10 @@ def hadamard_transform(
     outputs: torch.Tensor | None = None,
     use_pdl: bool = False,
 ) -> torch.Tensor:
-    return torch.ops.humming.hadamard_transform(inputs, block_size, scale, outputs, use_pdl)
+    outputs = _prepare_output_arg(inputs, outputs, inputs.dtype)
+    op = torch.ops.humming.hadamard_transform if _should_use_torch_op(inputs) else _hadamard_transform_op
+    returned_outputs = op(inputs, outputs, block_size, scale, use_pdl)
+    return _select_output(outputs, returned_outputs)
 
 
 def hadamard_quant_input(
@@ -230,16 +226,20 @@ def hadamard_quant_input(
     global_scale: torch.Tensor | None = None,
     use_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.humming.hadamard_quant_input(
+    outputs = _prepare_output_arg(inputs, outputs, inputs.dtype)
+    scales = _prepare_output_arg(inputs, scales, torch.float32)
+    op = torch.ops.humming.hadamard_quant_input if _should_use_torch_op(inputs) else _hadamard_quant_input_op
+    returned_outputs, returned_scales = op(
         inputs,
+        outputs,
+        scales,
         block_size,
         quant_dtype,
         group_size,
         scale,
-        outputs,
-        scales,
         m_major_scale,
         scale_dtype,
         global_scale,
         use_pdl,
     )
+    return _select_output(outputs, returned_outputs), _select_output(scales, returned_scales)

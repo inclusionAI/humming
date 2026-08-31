@@ -8,12 +8,48 @@ from typing import Callable
 import torch
 import torch.utils.cpp_extension
 from filelock import FileLock
+from torch._subclasses.fake_tensor import FakeTensor
 
 import humming.utils.jit as jit_utils
 from humming.utils.cuda import filter_cuda_paths
 
 _libs = {}
 _launcher_inited = False
+
+
+def _prepare_output(
+    outputs: torch.Tensor,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if outputs.nelement() > 0:
+        assert outputs.shape == shape
+        assert outputs.dtype == dtype
+        assert outputs.device == device
+        assert outputs.is_contiguous()
+        returned_outputs = outputs.new_empty((0,))
+    else:
+        outputs = torch.empty(shape, dtype=dtype, device=device)
+        returned_outputs = outputs
+    return outputs, returned_outputs
+
+
+def _prepare_output_arg(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor | None,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    assert outputs is None or outputs.nelement() > 0
+    return inputs.new_empty((0,), dtype=dtype) if outputs is None else outputs
+
+
+def _should_use_torch_op(inputs: torch.Tensor) -> bool:
+    return torch.compiler.is_compiling() or isinstance(inputs, FakeTensor)
+
+
+def _select_output(outputs: torch.Tensor, returned_outputs: torch.Tensor) -> torch.Tensor:
+    return outputs if outputs.nelement() > 0 else returned_outputs
 
 
 def register_op(
