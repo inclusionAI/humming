@@ -41,7 +41,7 @@ class ProcessMxfp4W4A8Kernel(KernelRuntime):
         assert inputs.nelement() == outputs.nelement()
         assert inputs.nelement() == delta_scale_offsets.nelement() * 4
 
-        self.check_context()
+        func = self.load_cubin()
         device = inputs.device
         num_groups = delta_scale_offsets.nelement()
         config = cbd.CUlaunchConfig()
@@ -60,5 +60,5 @@ class ProcessMxfp4W4A8Kernel(KernelRuntime):
             num_groups,
         )
 
-        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, func, (arg_values, self.arg_types), 0)
         return outputs

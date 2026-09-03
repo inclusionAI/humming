@@ -17,6 +17,7 @@ from humming.tune.sm90_h20 import Sm90H20Heuristics
 from humming.tune.sm100 import Sm100Heuristics
 from humming.tune.sm120 import Sm120Heuristics
 from humming.tune.sm121 import Sm121Heuristics
+from humming.utils.device import get_device_index
 
 heuristics_map: dict[int, type[DeviceHeuristics]] = {
     75: Sm75Heuristics,
@@ -78,20 +79,19 @@ def _apply_raster_group_m(config: dict, layer_config, gemm_type) -> None:
 
 
 @functools.lru_cache(maxsize=1024)
-def get_heuristics_config(
-    layer_config: LayerConfig | dict,
+def _get_heuristics_config(
+    layer_config: LayerConfig,
     shape_m: int | None = None,
     use_f16_accum: bool = False,
     use_batch_invariant: bool = False,
     use_m_major_input_scale: bool = False,
     gemm_type: str | GemmType = "dense",
+    device_index: int = 0,
 ):
     if isinstance(gemm_type, str):
         gemm_type = GemmType(gemm_type)
 
-    if isinstance(layer_config, dict):
-        layer_config = LayerConfig(**layer_config)
-    heuristics_cls = get_heuristics_class()
+    heuristics_cls = get_heuristics_class(device=device_index)
     if isinstance(shape_m, int):
         config = heuristics_cls.get_config(
             layer_config=layer_config,
@@ -114,3 +114,28 @@ def get_heuristics_config(
             _apply_m_major_input_scale(entry[2], use_m_major_input_scale, layer_config, gemm_type)
             _apply_raster_group_m(entry[2], layer_config, gemm_type)
         return configs
+
+
+def get_heuristics_config(
+    layer_config: LayerConfig | dict,
+    shape_m: int | None = None,
+    use_f16_accum: bool = False,
+    use_batch_invariant: bool = False,
+    use_m_major_input_scale: bool = False,
+    gemm_type: str | GemmType = "dense",
+    device: int | torch.device | None = None,
+):
+    device_index = get_device_index(device)
+    with torch.cuda.device(device_index):
+        if isinstance(layer_config, dict):
+            layer_config = LayerConfig(**layer_config)
+        layer_config.check_device(device_index)
+        return _get_heuristics_config(
+            layer_config,
+            shape_m,
+            use_f16_accum,
+            use_batch_invariant,
+            use_m_major_input_scale,
+            gemm_type,
+            device_index,
+        )

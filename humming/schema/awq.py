@@ -81,7 +81,7 @@ class AWQWeightSchema(BaseWeightSchema):
 
         return tensor
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],

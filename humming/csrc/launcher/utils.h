@@ -58,9 +58,6 @@ ScalarType dtype_id_to_tensor_dtype(uint32_t dtype_id) {
 };
 
 struct KernelData {
-  CUmodule module;
-  CUfunction func;
-
   uint32_t smem_size;
   uint32_t num_threads;
   uint32_t a_dtype_id;
@@ -107,7 +104,13 @@ struct KernelData {
   bool use_packed_k_layout;
 };
 
+struct LoadedKernel {
+  CUmodule module;
+  CUfunction func;
+};
+
 struct KernelLaunchData {
-  KernelData kernel_data;
+  KernelData metadata;
+  CUfunction func;
   int64_t num_sms;
 };

@@ -260,7 +260,7 @@ class HummingWeightSchema(BaseWeightSchema):
         dequanted_weight = self.dequant_tensors(tensors)
         return self.quant_tensor(dequanted_weight, target_weight_schema, param_dtype)
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],
@@ -345,7 +345,7 @@ class HummingInputSchema(BaseInputSchema):
     ) -> dict[str, dict[str, Any]]:
         return {}
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],

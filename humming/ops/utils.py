@@ -1,4 +1,6 @@
 import contextlib
+import functools
+import inspect
 import os
 import subprocess
 import sys
@@ -59,16 +61,25 @@ def register_op(
     def decorator(impl_func: Callable):
         schema_str = torch.library.infer_schema(impl_func, mutates_args=mutates_args or [])
         lib_name, op_name = name.split("::")
+        first_arg_name = next(iter(inspect.signature(impl_func).parameters))
+
+        @functools.wraps(impl_func)
+        def device_guarded_impl(*args, **kwargs):
+            device_guard = args[0] if args else kwargs[first_arg_name]
+            if isinstance(device_guard, FakeTensor) or not device_guard.is_cuda:
+                return impl_func(*args, **kwargs)
+            with torch.cuda.device(device_guard.device):
+                return impl_func(*args, **kwargs)
 
         if lib_name not in _libs:
             _libs[lib_name] = torch.library.Library(lib_name, "FRAGMENT")
 
         lib = _libs[lib_name]
         lib.define(op_name + schema_str)
-        lib.impl(op_name, impl_func, dispatch_key="CUDA")
+        lib.impl(op_name, device_guarded_impl, dispatch_key="CUDA")
         with _shield_lazy_modules():
             lib._register_fake(op_name, impl_func)
-        return impl_func
+        return device_guarded_impl
 
     return decorator
 
@@ -132,6 +143,8 @@ def init_humming_launcher():
     USE_TORCH_STABLE_API = _resolve_use_torch_stable_api()
     lock_filename = jit_utils.get_humming_lock_filename("launcher")
     with FileLock(lock_filename):
+        if _launcher_inited:
+            return
         precompiled_path = _get_precompiled_launcher_path() if USE_TORCH_STABLE_API else None
         if precompiled_path is not None:
             torch.ops.load_library(str(precompiled_path))

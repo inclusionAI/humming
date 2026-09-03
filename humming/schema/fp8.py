@@ -66,7 +66,7 @@ class Fp8WeightSchema(BaseWeightSchema):
         has_bias = "bias" in tensors
         return shape_n, shape_k, None, has_bias
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],
@@ -128,7 +128,7 @@ class Fp8InputSchema(BaseInputSchema):
             return self._get_input_scale_attrs(num_experts, stack_size)
         return {}
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],

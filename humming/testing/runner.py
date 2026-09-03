@@ -104,6 +104,7 @@ class KernelTestRunner:
         self.test_case = test_case
         self.layer_config = test_case.layer_config
         self.compute_config = test_case.compute_config
+        self.device = torch.cuda.current_device()
         self.weight_ref: torch.Tensor
         self.bias_ref: torch.Tensor | None = None
         self.kernel_tensors: dict[str, torch.Tensor]
@@ -146,6 +147,7 @@ class KernelTestRunner:
             self.layer_config.to_str(),
             self.compute_config.to_str(),
             [(0, 1 << 30, values) for values in tuning_configs],
+            device=self.device,
         ).reshape(-1, 4)
         assert kernel_configs.shape[0] == len(tuning_configs)
         for kernel_id in set(kernel_configs[:, 2].tolist()):
@@ -170,6 +172,7 @@ class KernelTestRunner:
             dtype=config.param_dtype,
             std_scale=self.test_case.weight_std_scale,
             group_size=config.weight_scale_group_size,
+            device=self.device,
         )
 
         schema = HummingWeightSchema(
@@ -192,6 +195,7 @@ class KernelTestRunner:
                 bias_shape,
                 dtype=config.param_dtype,
                 std_scale=self.test_case.bias_std_scale,
+                device=self.device,
             )
             tensors["bias"] = self.bias_ref
         self.kernel_tensors = transform_humming_tensors(config, tensors)
@@ -483,11 +487,12 @@ class KernelTestRunner:
             dtype=self.layer_config.param_dtype,
             std_scale=self.test_case.input_std_scale,
             group_size=self.layer_config.input_scale_group_size,
+            device=self.device,
         )
         base_topk_ids = None
         if self.compute_config.gemm_type != GemmType.DENSE:
             num_experts, top_k = self.layer_config.num_experts, self.test_case.top_k
-            base_topk_ids = generate_random_topk_ids(max_shape_m, num_experts, top_k)
+            base_topk_ids = generate_random_topk_ids(max_shape_m, num_experts, top_k, device=self.device)
 
         max_kernel = kernels[max_shape_m][0]
         base_outputs = None

@@ -84,7 +84,7 @@ class ModeloptNvfp4WeightSchema(ModeloptWeightSchema):
         has_bias = "bias" in tensors
         return shape_n, shape_k, None, has_bias
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],
@@ -171,7 +171,7 @@ class ModeloptMxfp8WeightSchema(ModeloptWeightSchema):
         has_bias = "bias" in tensors
         return shape_n, shape_k, None, has_bias
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],
@@ -239,7 +239,7 @@ class ModeloptNvfp4InputSchema(ModeloptInputSchema):
             return self._get_input_scale_attrs(num_experts, stack_size)
         return {}
 
-    def convert_humming(
+    def _convert_humming(
         self,
         tensors: dict[str, torch.Tensor],
         shape_n_stacks: list[int],

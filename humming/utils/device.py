@@ -42,7 +42,7 @@ def _shutdown_nvml_if_owned() -> None:
 atexit.register(_shutdown_nvml_if_owned)
 
 
-def _device_index(device: int | torch.device | None = None) -> int:
+def get_device_index(device: int | torch.device | None = None) -> int:
     if device is None:
         return torch.cuda.current_device()
     if isinstance(device, int):
@@ -59,7 +59,7 @@ def _get_device_capability(device_index: int) -> tuple[int, int]:
 
 
 def get_device_capability(device: int | torch.device | None = None) -> tuple[int, int]:
-    return _get_device_capability(_device_index(device))
+    return _get_device_capability(get_device_index(device))
 
 
 @functools.lru_cache
@@ -75,7 +75,7 @@ def _get_device_smem_limits(device_index: int) -> tuple[int, int]:
 
 
 def get_device_smem_limits(device: int | torch.device | None = None) -> tuple[int, int]:
-    return _get_device_smem_limits(_device_index(device))
+    return _get_device_smem_limits(get_device_index(device))
 
 
 def fits_device_smem(
@@ -194,4 +194,4 @@ def _get_device_num_sms(device_index: int) -> int:
 
 
 def get_device_num_sms(device: int | torch.device | None = None) -> int:
-    return _get_device_num_sms(_device_index(device))
+    return _get_device_num_sms(get_device_index(device))

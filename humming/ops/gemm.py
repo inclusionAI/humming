@@ -26,13 +26,20 @@ def _prepare_kernels_op(
     compute_config: str | None = None,
     tuning_config: str | None = None,
 ) -> torch.Tensor:
+    device = device_guard.device
     if isinstance(device_guard, FakeTensor):
-        init_humming_launcher()
-        _, _, tuning_obj = HummingKernel._resolve_configs(layer_config, compute_config, tuning_config)
+        with torch.cuda.device(device):
+            init_humming_launcher()
+            _, _, tuning_obj = HummingKernel._resolve_configs(
+                layer_config,
+                compute_config,
+                tuning_config,
+                device,
+            )
         num_configs = len(tuning_obj) if isinstance(tuning_obj, list) else 1
         return torch.empty((num_configs * 4,), dtype=torch.int64, device="cpu")
 
-    return HummingKernel.prepare_kernels(layer_config, compute_config, tuning_config)
+    return HummingKernel.prepare_kernels(layer_config, compute_config, tuning_config, device)
 
 
 def humming_gemm(

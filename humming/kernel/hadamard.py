@@ -73,7 +73,7 @@ class HadamardKernel(KernelRuntime):
         outputs: torch.Tensor,
         extra_scale: float = 1.0,
     ):
-        self.check_context()
+        func = self.load_cubin()
         assert inputs.is_contiguous() and outputs.is_contiguous()
         assert inputs.size(-1) % self.block_size == 0
         assert inputs.dtype == self.torch_dtype
@@ -101,4 +101,4 @@ class HadamardKernel(KernelRuntime):
             num_tiles,
         )
 
-        cbd.cuLaunchKernelEx(config, self.kernel, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, func, (arg_values, self.arg_types), 0)

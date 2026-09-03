@@ -27,7 +27,7 @@ class UnpackWeightKernel(KernelRuntime):
         self.prepare()
 
     def __call__(self, inputs: torch.Tensor, outputs: torch.Tensor):
-        self.check_context()
+        func = self.load_cubin()
         device = inputs.device
         config = cbd.CUlaunchConfig()
         num_elements = outputs.nelement()
@@ -41,5 +41,5 @@ class UnpackWeightKernel(KernelRuntime):
 
         arg_values = (inputs.data_ptr(), outputs.data_ptr(), num_elements)
 
-        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, func, (arg_values, self.arg_types), 0)
         return outputs

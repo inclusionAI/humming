@@ -26,13 +26,14 @@ class KernelRuntime:
 
         args_items = tuple(get_value(x) for x in args)
         kwargs_items = tuple((key, get_value(kwargs[key])) for key in sorted(kwargs.keys()))
-        signature = (cls.__name__, cls.current_context(), args_items + kwargs_items)
+        signature = (cls.__name__, torch.cuda.current_device(), args_items + kwargs_items)
 
         if signature not in cls._instances or not cls._instances[signature].inited:
             instance = super().__new__(cls)
             cls._instances[signature] = instance
             instance.inited = False
-            instance.cubin_loaded = False
+            instance._context_kernels = {}
+            instance._kernel_load_lock = threading.Lock()
         return cls._instances[signature]
 
     def __post_init__(self):
@@ -74,17 +75,19 @@ class KernelRuntime:
                 return NVCCCompiler
 
     @staticmethod
-    def _ensure_cuda_context():
-        torch.cuda.set_device(torch.cuda.current_device())
-
-    @staticmethod
     def current_context():
         result, context = cbd.cuCtxGetCurrent()
         assert result == 0, repr(result)
         return context
 
+    def _ensure_cuda_context(self):
+        context = self.current_context()
+        if context == cbd.CUcontext():
+            torch.cuda.set_device(torch.cuda.current_device())
+            context = self.current_context()
+        return context
+
     def prepare(self):
-        self._ensure_cuda_context()
         compiler_cls = self._get_compiler()
         kernel_expr = getattr(self, "kernel_expr", None)
         kernel_filename = compiler_cls.compile(
@@ -95,32 +98,28 @@ class KernelRuntime:
             postprocess_cubin=self.postprocess_cubin,
         )
         self.kernel_filename = kernel_filename
-        if threading.current_thread() is threading.main_thread():
-            self.load_cubin()
 
     def postprocess_cubin(self, cubin_path: str):
         pass
 
     def load_cubin(self):
-        if self.cubin_loaded:
-            return None
-        kernel_filename = self.kernel_filename
-        result, module = cbd.cuModuleLoad(kernel_filename.encode())
-        assert result == 0, repr(result)
-        matched = [name for name in get_cubin_kernel_names(kernel_filename) if self.name in name]
-        assert len(matched) == 1, (kernel_filename, self.name, matched)
-        self.kernel_name = matched[0]
-        result, func = cbd.cuModuleGetFunction(module, self.kernel_name.encode())
-        assert result == 0, repr(result)
-        self.module = module
-        self.func = func
-        self.kernel = func
-        self.cubin_loaded = True
+        context = self._ensure_cuda_context()
+        if context in self._context_kernels:
+            return self._context_kernels[context][1]
 
-    def check_context(self):
-        assert threading.current_thread() is threading.main_thread()
-        if not self.cubin_loaded:
-            self.load_cubin()
+        with self._kernel_load_lock:
+            if context in self._context_kernels:
+                return self._context_kernels[context][1]
+            kernel_filename = self.kernel_filename
+            result, module = cbd.cuModuleLoad(kernel_filename.encode())
+            assert result == 0, repr(result)
+            matched = [name for name in get_cubin_kernel_names(kernel_filename) if self.name in name]
+            assert len(matched) == 1, (kernel_filename, self.name, matched)
+            self.kernel_name = matched[0]
+            result, func = cbd.cuModuleGetFunction(module, self.kernel_name.encode())
+            assert result == 0, repr(result)
+            self._context_kernels[context] = (module, func)
+            return func
 
     def set_pdl_launch_attribute(self, config: cbd.CUlaunchConfig, enabled: bool) -> None:
         if not enabled or self.sm_version < 90:
