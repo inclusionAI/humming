@@ -1,4 +1,3 @@
-import dataclasses
 import os
 from pathlib import Path
 
@@ -10,7 +9,6 @@ os.environ.setdefault("HUMMING_DISABLE_PARALLEL_BUILD", "1")
 import humming.jit.compiler as compiler_module  # noqa: E402
 import humming.utils.jit as jit_utils  # noqa: E402
 from humming.jit.compiler import Compiler  # noqa: E402
-from humming.jit.runtime import KernelRuntime  # noqa: E402
 
 
 class _FakeCompiler(Compiler):
@@ -108,84 +106,38 @@ def test_precompiled_manifest_uses_content_hashes(tmp_path, monkeypatch):
     assert jit_utils.get_precompiled_artifact_path(source, artifact.name) is None
 
 
-def test_kernel_runtime_instances_are_separated_by_context(monkeypatch):
-    current_context = [object()]
-    monkeypatch.setattr(
-        KernelRuntime,
-        "current_context",
-        staticmethod(lambda: current_context[0]),
-    )
-
-    @dataclasses.dataclass(kw_only=True)
-    class DummyKernel(KernelRuntime):
-        value: int
-
-        def init_sm_version(self):
-            self.sm_version = 90
-            self.sm_version_str = "90a"
-
-        def init_kernel(self):
-            pass
-
-    first_kernel = DummyKernel(value=1)
-    current_context[0] = object()
-    second_kernel = DummyKernel(value=1)
-
-    assert first_kernel is not second_kernel
-
-
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
-def test_launcher_loads_the_same_kernel_in_each_cuda_context():
+def test_launcher_runs_device_local_kernels():
     from humming import dtypes
     from humming.config import ComputeConfig, GemmType, LayerConfig
     from humming.testing import KernelTestCase, KernelTestRunner
 
-    case = KernelTestCase(
-        name="multi-context-smoke",
-        layer_config=LayerConfig(
-            shape_n=64,
-            shape_k=32,
-            a_dtype=dtypes.bfloat16,
-            b_dtype=dtypes.uint4,
-            c_dtype=dtypes.bfloat16,
-            bs_dtype=dtypes.bfloat16,
-        ),
-        compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
-        seed=2026,
-    )
+    def make_case():
+        return KernelTestCase(
+            name="multi-device-smoke",
+            layer_config=LayerConfig(
+                shape_n=64,
+                shape_k=32,
+                a_dtype=dtypes.bfloat16,
+                b_dtype=dtypes.uint4,
+                c_dtype=dtypes.bfloat16,
+                bs_dtype=dtypes.bfloat16,
+            ),
+            compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+            seed=2026,
+        )
 
-    with torch.cuda.device(0):
-        runner = KernelTestRunner(case)
-        kernel_config = runner.prepare_kernels((1,))[1][0][0]
-        inputs_orig = torch.randn((1, 32), dtype=torch.bfloat16, device="cuda:0")
-        _, inputs, input_scale = runner.prepare_inputs(inputs_orig)
-        launch_tensors = {
-            "inputs": inputs,
-            "input_scale": input_scale,
-            "sorted_ids": None,
-            "expert_ids": None,
-            "num_tokens_padded": None,
-            "expert_layout": None,
-        }
-        output0 = runner._launch_kernel(1, launch_tensors, kernel_config)
-        torch.cuda.synchronize(0)
-
-        with torch.cuda.device(1):
-            kernel_config = runner.prepare_kernels((1,))[1][0][0]
-            runner.kernel_tensors = {
-                key: value.cpu().to("cuda:1") if isinstance(value, torch.Tensor) else value
-                for key, value in runner.kernel_tensors.items()
-            }
-            launch_tensors = {
-                key: value.cpu().to("cuda:1") if isinstance(value, torch.Tensor) else value
-                for key, value in launch_tensors.items()
-            }
-
-        with torch.cuda.device(1):
-            output1 = runner._launch_kernel(1, launch_tensors, kernel_config)
-            torch.cuda.synchronize(1)
-
-        torch.testing.assert_close(output0.cpu(), output1.cpu(), rtol=0, atol=0)
+    for device_index in range(2):
+        with torch.cuda.device(device_index):
+            runner = KernelTestRunner(make_case())
+            result = runner.run((1,))[0]
+            torch.cuda.synchronize(device_index)
+            torch.testing.assert_close(
+                result.outputs,
+                result.outputs_ref,
+                rtol=runner.test_case.rtol,
+                atol=runner.test_case.atol,
+            )
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")

@@ -17,6 +17,35 @@ inline void check_curesult(const CUresult res, const char *func_name) {
   }
 }
 
+class DeviceContextGuard {
+public:
+  explicit DeviceContextGuard(int64_t dev) {
+    check_curesult(cuDeviceGet(&device_, dev), "cuDeviceGet");
+    CUcontext current_context;
+    check_curesult(cuCtxGetCurrent(&current_context), "cuCtxGetCurrent");
+    if (current_context != nullptr) {
+      CUdevice current_device;
+      check_curesult(cuCtxGetDevice(&current_device), "cuCtxGetDevice");
+      if (current_device == device_) return;
+    }
+    check_curesult(cuDevicePrimaryCtxRetain(&context_, device_), "cuDevicePrimaryCtxRetain");
+    check_curesult(cuCtxPushCurrent(context_), "cuCtxPushCurrent");
+    active_ = true;
+  }
+
+  ~DeviceContextGuard() {
+    if (!active_) return;
+    CUcontext context;
+    cuCtxPopCurrent(&context);
+    cuDevicePrimaryCtxRelease(device_);
+  }
+
+private:
+  CUdevice device_;
+  CUcontext context_;
+  bool active_ = false;
+};
+
 inline CUcontext get_current_context() {
   CUcontext context;
   check_curesult(cuCtxGetCurrent(&context), "cuCtxGetCurrent");
@@ -79,9 +108,6 @@ ScalarType dtype_id_to_tensor_dtype(uint32_t dtype_id) {
 };
 
 struct KernelData {
-  CUmodule module;
-  CUfunction func;
-
   uint32_t smem_size;
   uint32_t num_threads;
   uint32_t a_dtype_id;
@@ -128,7 +154,13 @@ struct KernelData {
   bool use_packed_k_layout;
 };
 
+struct LoadedKernel {
+  CUmodule module;
+  CUfunction func;
+};
+
 struct KernelLaunchData {
-  KernelData kernel_data;
+  KernelData metadata;
+  CUfunction func;
   int64_t num_sms;
 };

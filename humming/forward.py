@@ -42,6 +42,7 @@ def may_quant_input(
     quanted_input: torch.Tensor | None = None,
     use_pdl: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    config.check_device(inputs.device)
     if config.a_dtype.num_bits == 16:
         return inputs, None
     if input_scale is not None:
@@ -69,6 +70,7 @@ def may_hadamard_quant_input(
     m_major_scale: bool = False,
     use_pdl: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    config.check_device(inputs.device)
     should_rotate = hadamard_block_size is not None and hadamard_block_size > 1
     should_quant = config.a_dtype.num_bits != 16
 

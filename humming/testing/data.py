@@ -11,6 +11,7 @@ def generate_random_tensor(
     dtype: torch.dtype,
     std_scale: float = 1.0,
     group_size: int = 0,
+    device: torch.device | str | int = "cuda:0",
 ) -> torch.Tensor:
     assert shape, "shape must not be empty"
 
@@ -24,7 +25,7 @@ def generate_random_tensor(
     grouped_shape = (*shape[:-1], num_groups, group_size)
     stat_shape = (*shape[:-1], num_groups, 1)
 
-    values = torch.randn(grouped_shape, dtype=dtype, device="cuda:0")
+    values = torch.randn(grouped_shape, dtype=dtype, device=device)
     val = 256 / max(group_size, 256)
     group_mean = torch.empty(stat_shape, dtype=dtype, device=values.device).uniform_(-val, val)
     group_std = torch.empty(stat_shape, dtype=dtype, device=values.device).uniform_(0.9, 1.1)
@@ -51,6 +52,7 @@ def generate_random_topk_ids(
     num_experts: int,
     top_k: int,
     balanced: bool = False,
+    device: torch.device | str | int = "cuda:0",
 ) -> torch.Tensor:
     if balanced:
         quotient, remainder = divmod(shape_m * top_k, num_experts)
@@ -67,9 +69,9 @@ def generate_random_topk_ids(
                 remaining[expert_id] -= 1
             rows.append(row)
         assert not any(remaining)
-        return torch.tensor(rows, dtype=torch.int32, device="cuda:0")
+        return torch.tensor(rows, dtype=torch.int32, device=device)
 
-    scores = torch.randn((shape_m, num_experts), dtype=torch.float32, device="cuda:0")
+    scores = torch.randn((shape_m, num_experts), dtype=torch.float32, device=device)
     return scores.topk(top_k, 1).indices.int()
 
 

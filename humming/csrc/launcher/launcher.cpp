@@ -2,16 +2,31 @@
 
 #include <cuda.h>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "./elf.h"
+#include "./mapped_file.h"
 #include "./process_input.h"
 #include "./tensor.h"
 #include "./torch_api.h"
 #include "./utils.h"
 
-static std::unordered_map<CUcontext, std::unordered_map<int64_t, KernelData>> g_kernel_data;
+struct RegisteredKernel {
+  std::shared_ptr<const MappedFile> cubin;
+  std::string cubin_path;
+  std::string kernel_name;
+  KernelData metadata;
+};
+
+static std::shared_mutex g_kernel_mutex;
+static std::unordered_map<std::string, std::tuple<int64_t, std::string>> g_path_ids;
+static std::unordered_map<int64_t, RegisteredKernel> g_registered_kernels;
+static std::unordered_map<CUcontext, std::unordered_map<int64_t, LoadedKernel>> g_loaded_kernels;
 
 inline int64_t find_kernel_configs_target_index(IntArrayRef &configs, int64_t shape_m) {
   size_t n = configs.size();
@@ -30,16 +45,57 @@ inline int64_t find_kernel_configs_target_index(IntArrayRef &configs, int64_t sh
   ASSERT_CHECK(false, "configs length must be 1-2 or a non-zero multiple of 4.");
 };
 
-inline KernelLaunchData find_kernel_launch_data(
-    IntArrayRef &configs, int64_t shape_m, CUcontext context) {
+inline KernelData find_registered_kernel_data(int64_t kernel_id) {
+  std::shared_lock lock(g_kernel_mutex);
+  auto it = g_registered_kernels.find(kernel_id);
+  ASSERT_CHECK(it != g_registered_kernels.end(), "kernel not registered.");
+  return it->second.metadata;
+}
+
+inline LoadedKernel get_or_load_kernel(int64_t kernel_id, CUcontext context) {
+  std::shared_ptr<const MappedFile> cubin;
+  std::string kernel_name;
+  {
+    std::shared_lock lock(g_kernel_mutex);
+    auto context_it = g_loaded_kernels.find(context);
+    if (context_it != g_loaded_kernels.end()) {
+      auto kernel_it = context_it->second.find(kernel_id);
+      if (kernel_it != context_it->second.end()) return kernel_it->second;
+    }
+
+    auto registered_it = g_registered_kernels.find(kernel_id);
+    ASSERT_CHECK(registered_it != g_registered_kernels.end(), "kernel not registered.");
+    cubin = registered_it->second.cubin;
+    kernel_name = registered_it->second.kernel_name;
+  }
+
+  LoadedKernel kernel = {};
+  check_curesult(cuModuleLoadData(&kernel.module, cubin->data()), "cuModuleLoadData");
+  check_curesult(
+      cuModuleGetFunction(&kernel.func, kernel.module, kernel_name.c_str()),
+      "cuModuleGetFunction");
+
+  std::unique_lock lock(g_kernel_mutex);
+  auto &context_data = g_loaded_kernels[context];
+  auto [it, inserted] = context_data.emplace(kernel_id, kernel);
+  if (!inserted) check_curesult(cuModuleUnload(kernel.module), "cuModuleUnload");
+  return it->second;
+}
+
+inline KernelData find_registered_kernel_data(IntArrayRef &configs, int64_t shape_m) {
+  int64_t index = find_kernel_configs_target_index(configs, shape_m);
+  int64_t kernel_id = configs[index];
+  return find_registered_kernel_data(kernel_id);
+}
+
+inline KernelLaunchData find_kernel_launch_data(IntArrayRef &configs, int64_t shape_m, CUcontext context) {
   auto n = configs.size();
   int64_t index = find_kernel_configs_target_index(configs, shape_m);
   int64_t kernel_id = configs[index];
   int64_t num_sms = n < 2 ? 0 : configs[index + 1];
-  auto &context_data = g_kernel_data[context];
-  ASSERT_CHECK(context_data.find(kernel_id) != context_data.end(), "kernel not existed.");
-  KernelData &kernel_data = context_data[kernel_id];
-  KernelLaunchData kernel_launch_data = {kernel_data, num_sms};
+  KernelData metadata = find_registered_kernel_data(kernel_id);
+  LoadedKernel kernel = get_or_load_kernel(kernel_id, context);
+  KernelLaunchData kernel_launch_data = {metadata, kernel.func, num_sms};
   return kernel_launch_data;
 };
 
@@ -74,17 +130,17 @@ Tensor launch_kernel_impl(
     bool should_check_tensor = true) {
 
   if (locks_.has_value() && locks_->numel() == 0) locks_.reset();
-  CUcontext context = get_current_context();
-  KernelLaunchData base_kernel_launch_data = find_kernel_launch_data(configs, 1, context);
-  KernelData &base_kernel_data = base_kernel_launch_data.kernel_data;
-
   int64_t dev = a.get_device();
+  DeviceContextGuard context_guard(dev);
+  CUcontext context = get_current_context();
+  KernelData base_kernel_data = find_registered_kernel_data(configs, 1);
+
   int64_t shape_m = a.size(0);
   if (valid_shape_m <= 0) {
     valid_shape_m = shape_m * (base_kernel_data.gemm_type_id == 1 ? top_k : 1);
   }
   KernelLaunchData kernel_launch_data = find_kernel_launch_data(configs, valid_shape_m, context);
-  KernelData &kernel_data = kernel_launch_data.kernel_data;
+  KernelData &kernel_data = kernel_launch_data.metadata;
   int64_t &num_sms = kernel_launch_data.num_sms;
   Tensor c = may_make_tensor_c(c_, a, kernel_data, top_k);
   uint32_t num_ctas = kernel_data.num_ctas_per_sm * get_num_sms(num_sms, dev);
@@ -187,7 +243,7 @@ Tensor launch_kernel_impl(
   config.sharedMemBytes = kernel_data.smem_size;
   config.hStream = get_current_cuda_stream(dev);
 
-  CUfunction &func = kernel_data.func;
+  CUfunction &func = kernel_launch_data.func;
   constexpr auto SMEM_SIZE_ATTR = CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES;
   check_curesult(cuFuncSetAttribute(func, SMEM_SIZE_ATTR, kernel_data.smem_size), "cuFuncSetAttribute");
   check_curesult(cuLaunchKernelEx(&config, func, kernel_args, nullptr), "cuLaunchKernelEx");
@@ -196,12 +252,13 @@ Tensor launch_kernel_impl(
 };
 
 std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) {
-  static std::unordered_map<CUcontext, std::unordered_map<std::string, std::tuple<int64_t, std::string>>> g_path_ids;
-  CUcontext context = get_current_context();
-  auto &context_path_ids = g_path_ids[context];
-  auto it = context_path_ids.find(cubin_path);
-  if (it != context_path_ids.end()) return it->second;
+  {
+    std::shared_lock lock(g_kernel_mutex);
+    auto it = g_path_ids.find(cubin_path);
+    if (it != g_path_ids.end()) return it->second;
+  }
 
+  auto cubin = std::make_shared<MappedFile>(cubin_path);
   auto reader = CubinReader(cubin_path);
   std::string kernel_name;
   for (const auto &name : reader.getKernelNames()) {
@@ -211,76 +268,71 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
   }
   ASSERT_CHECK(!kernel_name.empty(), "no humming kernel found in ", cubin_path);
 
-  CUmodule module;
-  check_curesult(cuModuleLoad(&module, cubin_path.c_str()), "cuModuleLoad");
-  CUfunction func;
-  check_curesult(cuModuleGetFunction(&func, module, kernel_name.c_str()), "cuModuleGetFunction");
+  KernelData metadata = {
+      reader.getUint32("SMEM_SIZE"),
+      reader.getUint32("NUM_THREADS"),
+      reader.getUint32("A_DTYPE_ID"),
+      reader.getUint32("B_DTYPE_ID"),
+      reader.getUint32("C_DTYPE_ID"),
+      reader.getUint32("BS_DTYPE_ID"),
+      reader.getUint32("PROBLEM_SHAPE_N"),
+      reader.getUint32("PROBLEM_SHAPE_K"),
+      reader.getUint32("BLOCK_SHAPE_M"),
+      reader.getUint32("BLOCK_SHAPE_N"),
+      reader.getUint32("BLOCK_SHAPE_K"),
+      reader.getUint32("PAD_SHAPE_N"),
+      reader.getUint32("PAD_SHAPE_K"),
+      reader.getUint32("NUM_EXPERTS"),
+      reader.getUint32("INPUT_SCALE_GROUP_SIZE"),
+      reader.getUint32("WEIGHT_SCALE_GROUP_SIZE"),
+      reader.getUint32("WEIGHT_SCALE_GROUP_SIZE_N"),
+      reader.getUint32("NUM_CTAS_PER_SM"),
+      reader.getUint32("MULTI_CAST_SIZE_A"),
+      reader.getUint32("MULTI_CAST_SIZE_B"),
+      reader.getUint32("GEMM_TYPE_ID"),
+      reader.getUint32("MMA_TYPE_ID"),
+
+      reader.getBool("USE_STREAM_K"),
+      reader.getBool("IS_FP_ZERO_POINT"),
+      reader.getBool("IS_CHANNEL_WEIGHT_SCALE"),
+      reader.getBool("IS_GROUP_WEIGHT_SCALE"),
+      reader.getBool("IS_BLOCK_WEIGHT_SCALE"),
+      reader.getBool("IS_TENSOR_WEIGHT_SCALE"),
+      reader.getBool("IS_CHANNEL_WEIGHT_SCALE_2"),
+      reader.getBool("IS_TENSOR_WEIGHT_SCALE_2"),
+      reader.getBool("HAS_ZERO_POINT"),
+      reader.getBool("HAS_BIAS"),
+      reader.getBool("USE_M_MAJOR_INPUT_SCALE"),
+      reader.getBool("USE_TMA_A"),
+      reader.getBool("USE_TMA_AS"),
+      reader.getBool("USE_TMA_B"),
+      reader.getBool("USE_TMA_C"),
+      reader.getBool("USE_TMA_BS"),
+      reader.getBool("USE_TMA_BS2"),
+      reader.getBool("USE_TMA_BZP"),
+      reader.getBool("USE_TMA_BIAS"),
+      reader.getBool("USE_PDL"),
+      reader.getBool("USE_PACKED_K_LAYOUT")};
+
+  std::unique_lock lock(g_kernel_mutex);
+  auto path_it = g_path_ids.find(cubin_path);
+  if (path_it != g_path_ids.end()) return path_it->second;
 
   int64_t hash_id = manual_crc32(cubin_path);
   hash_id = (hash_id << 30) + manual_crc32(kernel_name);
-
-  auto &context_data = g_kernel_data[context];
-  if (context_data.find(hash_id) == context_data.end()) {
-    context_data[hash_id] = {
-        module,
-        func,
-
-        reader.getUint32("SMEM_SIZE"),
-        reader.getUint32("NUM_THREADS"),
-        reader.getUint32("A_DTYPE_ID"),
-        reader.getUint32("B_DTYPE_ID"),
-        reader.getUint32("C_DTYPE_ID"),
-        reader.getUint32("BS_DTYPE_ID"),
-        reader.getUint32("PROBLEM_SHAPE_N"),
-        reader.getUint32("PROBLEM_SHAPE_K"),
-        reader.getUint32("BLOCK_SHAPE_M"),
-        reader.getUint32("BLOCK_SHAPE_N"),
-        reader.getUint32("BLOCK_SHAPE_K"),
-        reader.getUint32("PAD_SHAPE_N"),
-        reader.getUint32("PAD_SHAPE_K"),
-        reader.getUint32("NUM_EXPERTS"),
-        reader.getUint32("INPUT_SCALE_GROUP_SIZE"),
-        reader.getUint32("WEIGHT_SCALE_GROUP_SIZE"),
-        reader.getUint32("WEIGHT_SCALE_GROUP_SIZE_N"),
-        reader.getUint32("NUM_CTAS_PER_SM"),
-        reader.getUint32("MULTI_CAST_SIZE_A"),
-        reader.getUint32("MULTI_CAST_SIZE_B"),
-        reader.getUint32("GEMM_TYPE_ID"),
-        reader.getUint32("MMA_TYPE_ID"),
-
-        reader.getBool("USE_STREAM_K"),
-        reader.getBool("IS_FP_ZERO_POINT"),
-        reader.getBool("IS_CHANNEL_WEIGHT_SCALE"),
-        reader.getBool("IS_GROUP_WEIGHT_SCALE"),
-        reader.getBool("IS_BLOCK_WEIGHT_SCALE"),
-        reader.getBool("IS_TENSOR_WEIGHT_SCALE"),
-        reader.getBool("IS_CHANNEL_WEIGHT_SCALE_2"),
-        reader.getBool("IS_TENSOR_WEIGHT_SCALE_2"),
-        reader.getBool("HAS_ZERO_POINT"),
-        reader.getBool("HAS_BIAS"),
-        reader.getBool("USE_M_MAJOR_INPUT_SCALE"),
-        reader.getBool("USE_TMA_A"),
-        reader.getBool("USE_TMA_AS"),
-        reader.getBool("USE_TMA_B"),
-        reader.getBool("USE_TMA_C"),
-        reader.getBool("USE_TMA_BS"),
-        reader.getBool("USE_TMA_BS2"),
-        reader.getBool("USE_TMA_BZP"),
-        reader.getBool("USE_TMA_BIAS"),
-        reader.getBool("USE_PDL"),
-        reader.getBool("USE_PACKED_K_LAYOUT")};
-  };
-
+  auto kernel_it = g_registered_kernels.find(hash_id);
+  bool no_collision = kernel_it == g_registered_kernels.end() || kernel_it->second.cubin_path == cubin_path;
+  ASSERT_CHECK(no_collision, "kernel id collision for ", cubin_path);
+  if (kernel_it == g_registered_kernels.end()) {
+    g_registered_kernels.emplace(hash_id, RegisteredKernel{cubin, cubin_path, kernel_name, metadata});
+  }
   auto result = std::make_tuple(hash_id, kernel_name);
-  context_path_ids[cubin_path] = result;
+  g_path_ids[cubin_path] = result;
   return result;
 }
 
 int64_t get_kernel_smem_size(int64_t kernel_id) {
-  auto &context_data = g_kernel_data[get_current_context()];
-  auto it = context_data.find(kernel_id);
-  ASSERT_CHECK(it != context_data.end(), "kernel not existed.");
-  return static_cast<int64_t>(it->second.smem_size);
+  return static_cast<int64_t>(find_registered_kernel_data(kernel_id).smem_size);
 }
 
 Tensor launch_kernel(

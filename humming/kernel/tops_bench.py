@@ -75,7 +75,8 @@ class TopsBenchKernel(KernelRuntime):
         self.ops_per_call = self.ops_per_mma_per_warp * self.num_warps * self.num_ctas
 
     def __call__(self):
-        self.check_context()
+        func = self.load_cubin()
+        device = torch.cuda.current_device()
         config = cbd.CUlaunchConfig()
         config.gridDimX = self.num_ctas
         config.gridDimY = 1
@@ -83,9 +84,9 @@ class TopsBenchKernel(KernelRuntime):
         config.blockDimX = self.num_warps * 32
         config.blockDimY = 1
         config.blockDimZ = 1
-        config.hStream = torch.cuda.current_stream().cuda_stream
+        config.hStream = torch.cuda.current_stream(device).cuda_stream
 
-        tensor = torch.empty((1,), dtype=torch.uint32, device="cuda:0")
+        tensor = torch.empty((1,), dtype=torch.uint32, device=device)
         arg_values = (tensor.data_ptr(),)
 
-        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, func, (arg_values, self.arg_types), 0)

@@ -1,7 +1,6 @@
 import dataclasses
 import functools
 import json
-import os
 from typing import ClassVar
 
 import jinja2
@@ -19,6 +18,7 @@ from humming.config import (
 )
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
+from humming.utils.device import get_device_index
 from humming.utils.smem import estimate_smem_size_config
 
 CODE_TEMPLATE = jinja2.Template("""
@@ -155,17 +155,14 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         )
 
         self.prepare()
+        self.register_kernel()
 
-    def load_cubin(self):
+    def register_kernel(self):
         from humming import ops
 
-        if self.cubin_loaded:
-            return None
         kernel_filename = self.kernel_filename
         self.kernel_id, self.kernel_name = ops.register_kernel(kernel_filename)
         self._id2kernel[self.kernel_id] = self
-        self.kernel_dirname = os.path.dirname(kernel_filename)
-        self.cubin_loaded = True
 
     @property
     def estimated_smem_size(self) -> int:
@@ -479,13 +476,18 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         return json.loads(config) if isinstance(config, str) else config
 
     @classmethod
-    def _resolve_configs(cls, layer_config, compute_config, tuning_config):
+    def _resolve_configs(cls, layer_config, compute_config, tuning_config, device=None):
+        device_index = get_device_index(device)
         layer_obj = dict(cls._prepare_config_obj(layer_config))
         compute_obj = dict(cls._prepare_config_obj(compute_config))
         tuning_obj = cls._prepare_config_obj(tuning_config)
         layer_obj.pop("sublayer_name", None)
-        if not tuning_obj:
-            tuning_obj = get_heuristics_config(LayerConfig(**layer_obj), **compute_obj)
+        with torch.cuda.device(device_index):
+            layer_config_obj = LayerConfig(**layer_obj)
+            layer_config_obj.check_device(device_index)
+            layer_obj["sm_version"] = layer_config_obj.sm_version
+            if not tuning_obj:
+                tuning_obj = get_heuristics_config(layer_config_obj, **compute_obj, device=device_index)
         return layer_obj, compute_obj, tuning_obj
 
     @classmethod
@@ -494,7 +496,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         layer_config: str | dict,
         compute_config: str | dict | None = None,
         tuning_config: str | dict | list | None = None,
+        device: int | torch.device | None = None,
     ) -> "torch.Tensor":
+        device_index = get_device_index(device)
         layer_config_str = cls._prepare_config_str(layer_config)
         compute_config_str = cls._prepare_config_str(compute_config)
         tuning_config_str = cls._prepare_config_str(tuning_config)
@@ -502,18 +506,19 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             layer_config_str,
             compute_config_str,
             tuning_config_str,
-            cls.current_context(),
+            device_index,
         )
         if cache_key in cls._str2kernel_cache:
             return cls._str2kernel_cache[cache_key]
 
-        config_objs = cls._resolve_configs(layer_config, compute_config, tuning_config)
+        config_objs = cls._resolve_configs(layer_config, compute_config, tuning_config, device_index)
         layer_config_obj, compute_config_obj, tuning_config_obj = config_objs
 
         if isinstance(tuning_config_obj, dict):
             config = layer_config_obj | compute_config_obj | tuning_config_obj
             num_sms = config.pop("num_sms", 0)
-            kernel = HummingKernel(**config)
+            with torch.cuda.device(device_index):
+                kernel = HummingKernel(**config)
             res = torch.tensor(
                 [0, 1 << 30, kernel.kernel_id, num_sms],
                 dtype=torch.int64,
@@ -532,7 +537,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             interval_configs.append((interval_config, num_sms))
 
         res = []
-        kernels = cls.compile_many(kernel_specs)
+        kernels = cls.compile_many(kernel_specs, device_index)
         for (config, num_sms), kernel in zip(interval_configs, kernels, strict=True):
             res += [config[0], config[1], kernel.kernel_id, num_sms]
 

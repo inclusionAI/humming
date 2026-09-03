@@ -121,16 +121,13 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
         self.scale_layout = GroupScaleLayout(self.scale_layout)
         super().__post_init__()
 
-    def load_cubin(self):
-        if self.cubin_loaded:
-            return None
+    def register_kernel(self):
         from humming.ops import register_process_input_kernel
 
         kernel_id, kernel_name = register_process_input_kernel(self.kernel_filename)
         assert self.name in kernel_name
         self.kernel_id = kernel_id
         self.kernel_name = kernel_name
-        self.cubin_loaded = True
 
     def init_kernel(self):
         is_finalizer = isinstance(self, ProcessInputScaleKernel)
@@ -165,6 +162,7 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
         self.code = CODE_TEMPLATE.render(**template_args)
         self.kernel_expr = kernel_expr
         self.prepare()
+        self.register_kernel()
 
     def postprocess_cubin(self, cubin_path: str):
         from humming.utils.cubin import patch_cubin

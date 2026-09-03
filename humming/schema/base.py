@@ -103,6 +103,24 @@ class BaseWeightSchema:
         shape_k_stacks: list[int],
         param_dtype: torch.dtype,
         num_experts: int | None = None,
+        device: int | torch.device | None = None,
+    ) -> tuple["HummingWeightSchema", dict[str, torch.Tensor]]:
+        with torch.cuda.device(device):
+            return self._convert_humming(
+                tensors,
+                shape_n_stacks,
+                shape_k_stacks,
+                param_dtype,
+                num_experts,
+            )
+
+    def _convert_humming(
+        self,
+        tensors: dict[str, torch.Tensor],
+        shape_n_stacks: list[int],
+        shape_k_stacks: list[int],
+        param_dtype: torch.dtype,
+        num_experts: int | None = None,
     ) -> tuple["HummingWeightSchema", dict[str, torch.Tensor]]:
         raise NotImplementedError
 
@@ -287,6 +305,27 @@ class BaseInputSchema:
         shape_k_stacks: list[int],
         param_dtype: torch.dtype,
         num_experts: int | None = None,
+        sm_version: int | tuple[int, int] | None = None,
+        device: int | torch.device | None = None,
+    ) -> tuple["HummingInputSchema", dict[str, torch.Tensor]]:
+        with torch.cuda.device(device):
+            return self._convert_humming(
+                tensors,
+                shape_n_stacks,
+                shape_k_stacks,
+                param_dtype,
+                num_experts,
+                sm_version,
+            )
+
+    def _convert_humming(
+        self,
+        tensors: dict[str, torch.Tensor],
+        shape_n_stacks: list[int],
+        shape_k_stacks: list[int],
+        param_dtype: torch.dtype,
+        num_experts: int | None = None,
+        sm_version: int | tuple[int, int] | None = None,
     ) -> tuple["HummingInputSchema", dict[str, torch.Tensor]]:
         raise NotImplementedError
 

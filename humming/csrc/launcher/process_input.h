@@ -1,12 +1,16 @@
 #pragma once
 
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
 
 #include "./elf.h"
+#include "./mapped_file.h"
 #include "./utils.h"
 
 enum class QuantizationMode : uint32_t {
@@ -35,8 +39,6 @@ inline QuantizationPhase process_input_quantization_phase(uint32_t id) {
 }
 
 struct ProcessInputKernelData {
-  CUmodule module;
-  CUfunction func;
   uint32_t num_threads;
   uint32_t source_dtype_id;
   uint32_t target_dtype_id;
@@ -62,6 +64,18 @@ struct ProcessInputKernelData {
   bool is_finalizer;
 };
 
+struct RegisteredProcessInputKernel {
+  std::shared_ptr<const MappedFile> cubin;
+  std::string cubin_path;
+  std::string kernel_name;
+  ProcessInputKernelData metadata;
+};
+
+struct ProcessInputKernelLaunchData {
+  ProcessInputKernelData metadata;
+  CUfunction func;
+};
+
 struct ProcessInputShape {
   int64_t num_input_rows;
   int64_t num_output_rows;
@@ -71,24 +85,67 @@ struct ProcessInputShape {
   int64_t group_scale_stride;
 };
 
-static std::unordered_map<CUcontext, std::unordered_map<int64_t, ProcessInputKernelData>>
-    g_process_input_kernel_data;
+static std::shared_mutex g_process_input_kernel_mutex;
+static std::unordered_map<std::string, std::tuple<int64_t, std::string>>
+    g_process_input_path_ids;
+static std::unordered_map<int64_t, RegisteredProcessInputKernel>
+    g_registered_process_input_kernels;
+static std::unordered_map<CUcontext, std::unordered_map<int64_t, LoadedKernel>>
+    g_loaded_process_input_kernels;
 
-inline ProcessInputKernelData &get_process_input_kernel(int64_t kernel_id, CUcontext context) {
-  auto &context_data = g_process_input_kernel_data[context];
-  auto it = context_data.find(kernel_id);
-  ASSERT_CHECK(it != context_data.end(), "process-input kernel not found: ", kernel_id);
-  return it->second;
+inline ProcessInputKernelData find_process_input_kernel_data(int64_t kernel_id) {
+  std::shared_lock lock(g_process_input_kernel_mutex);
+  auto it = g_registered_process_input_kernels.find(kernel_id);
+  ASSERT_CHECK(it != g_registered_process_input_kernels.end(), "process-input kernel not found: ", kernel_id);
+  return it->second.metadata;
+}
+
+inline ProcessInputKernelLaunchData get_or_load_process_input_kernel(
+    int64_t kernel_id, CUcontext context) {
+  std::shared_ptr<const MappedFile> cubin;
+  std::string kernel_name;
+  ProcessInputKernelData metadata;
+  {
+    std::shared_lock lock(g_process_input_kernel_mutex);
+    auto context_it = g_loaded_process_input_kernels.find(context);
+    if (context_it != g_loaded_process_input_kernels.end()) {
+      auto kernel_it = context_it->second.find(kernel_id);
+      if (kernel_it != context_it->second.end()) {
+        auto registered_it = g_registered_process_input_kernels.find(kernel_id);
+        ASSERT_CHECK(registered_it != g_registered_process_input_kernels.end(), "process-input kernel not found: ", kernel_id);
+        return {registered_it->second.metadata, kernel_it->second.func};
+      }
+    }
+
+    auto registered_it = g_registered_process_input_kernels.find(kernel_id);
+    ASSERT_CHECK(registered_it != g_registered_process_input_kernels.end(), "process-input kernel not found: ", kernel_id);
+    cubin = registered_it->second.cubin;
+    kernel_name = registered_it->second.kernel_name;
+    metadata = registered_it->second.metadata;
+  }
+
+  LoadedKernel kernel = {};
+  check_curesult(cuModuleLoadData(&kernel.module, cubin->data()), "cuModuleLoadData");
+  check_curesult(
+      cuModuleGetFunction(&kernel.func, kernel.module, kernel_name.c_str()),
+      "cuModuleGetFunction");
+
+  std::unique_lock lock(g_process_input_kernel_mutex);
+  auto &context_data = g_loaded_process_input_kernels[context];
+  auto [it, inserted] = context_data.emplace(kernel_id, kernel);
+  if (!inserted) check_curesult(cuModuleUnload(kernel.module), "cuModuleUnload");
+  return {metadata, it->second.func};
 }
 
 inline std::tuple<int64_t, std::string> register_process_input_kernel(const std::string &cubin_path) {
   using Registration = std::tuple<int64_t, std::string>;
-  static std::unordered_map<CUcontext, std::unordered_map<std::string, Registration>> path_ids;
-  CUcontext context = get_current_context();
-  auto &context_path_ids = path_ids[context];
-  auto registered = context_path_ids.find(cubin_path);
-  if (registered != context_path_ids.end()) return registered->second;
+  {
+    std::shared_lock lock(g_process_input_kernel_mutex);
+    auto registered = g_process_input_path_ids.find(cubin_path);
+    if (registered != g_process_input_path_ids.end()) return registered->second;
+  }
 
+  auto cubin = std::make_shared<MappedFile>(cubin_path);
   CubinReader reader(cubin_path);
   std::string kernel_name;
   bool is_finalizer = false;
@@ -102,47 +159,47 @@ inline std::tuple<int64_t, std::string> register_process_input_kernel(const std:
   }
   ASSERT_CHECK(!kernel_name.empty(), "no process-input kernel found in ", cubin_path);
 
-  CUmodule module;
-  check_curesult(cuModuleLoad(&module, cubin_path.c_str()), "cuModuleLoad");
-  CUfunction func;
-  check_curesult(cuModuleGetFunction(&func, module, kernel_name.c_str()), "cuModuleGetFunction");
-
   int64_t kernel_id = manual_crc32(cubin_path);
   kernel_id = (kernel_id << 30) + manual_crc32(kernel_name);
-  auto &context_data = g_process_input_kernel_data[context];
-  if (context_data.find(kernel_id) == context_data.end()) {
-    context_data.emplace(
-        kernel_id,
-        ProcessInputKernelData{
-            module,
-            func,
-            reader.getUint32("NUM_THREADS"),
-            reader.getUint32("SOURCE_DTYPE_ID"),
-            reader.getUint32("TARGET_DTYPE_ID"),
-            reader.getUint32("GROUP_SCALE_DTYPE_ID"),
-            reader.getUint32("INPUT_ROW_SIZE"),
-            reader.getUint32("HIDDEN_SIZE"),
-            reader.getUint32("QUANT_GROUP_SIZE"),
-            reader.getUint32("TILE_SIZE"),
-            reader.getUint32("TILES_PER_BLOCK"),
-            reader.getUint32("TOKENS_PER_BLOCK"),
-            reader.getUint32("LAYOUT"),
-            reader.getUint32("LAYOUT_WIDTH"),
-            reader.getBool("USE_TILE_PARTITION"),
-            process_input_quantization_mode(reader.getUint32("QUANT_MODE")),
-            process_input_quantization_phase(reader.getUint32("QUANTIZATION_PHASE")),
-            reader.getUint32("SCALE_LAYOUT"),
-            reader.getUint32("OUTPUT_PACKING"),
-            reader.getUint32("FINALIZE_TOKENS_PER_BLOCK"),
-            reader.getBool("SCATTER_SINGLE_OUTPUT"),
-            reader.getBool("EXPERT_LAYOUT_INT64"),
-            reader.getBool("INDEX_INT64"),
-            reader.getBool("USE_PDL"),
-            is_finalizer});
-  }
+  ProcessInputKernelData metadata = {
+      reader.getUint32("NUM_THREADS"),
+      reader.getUint32("SOURCE_DTYPE_ID"),
+      reader.getUint32("TARGET_DTYPE_ID"),
+      reader.getUint32("GROUP_SCALE_DTYPE_ID"),
+      reader.getUint32("INPUT_ROW_SIZE"),
+      reader.getUint32("HIDDEN_SIZE"),
+      reader.getUint32("QUANT_GROUP_SIZE"),
+      reader.getUint32("TILE_SIZE"),
+      reader.getUint32("TILES_PER_BLOCK"),
+      reader.getUint32("TOKENS_PER_BLOCK"),
+      reader.getUint32("LAYOUT"),
+      reader.getUint32("LAYOUT_WIDTH"),
+      reader.getBool("USE_TILE_PARTITION"),
+      process_input_quantization_mode(reader.getUint32("QUANT_MODE")),
+      process_input_quantization_phase(reader.getUint32("QUANTIZATION_PHASE")),
+      reader.getUint32("SCALE_LAYOUT"),
+      reader.getUint32("OUTPUT_PACKING"),
+      reader.getUint32("FINALIZE_TOKENS_PER_BLOCK"),
+      reader.getBool("SCATTER_SINGLE_OUTPUT"),
+      reader.getBool("EXPERT_LAYOUT_INT64"),
+      reader.getBool("INDEX_INT64"),
+      reader.getBool("USE_PDL"),
+      is_finalizer};
 
   Registration result = std::make_tuple(kernel_id, kernel_name);
-  context_path_ids[cubin_path] = result;
+  std::unique_lock lock(g_process_input_kernel_mutex);
+  auto path_it = g_process_input_path_ids.find(cubin_path);
+  if (path_it != g_process_input_path_ids.end()) return path_it->second;
+  auto kernel_it = g_registered_process_input_kernels.find(kernel_id);
+  bool no_collision = kernel_it == g_registered_process_input_kernels.end() ||
+                      kernel_it->second.cubin_path == cubin_path;
+  ASSERT_CHECK(no_collision, "process-input kernel id collision for ", cubin_path);
+  if (kernel_it == g_registered_process_input_kernels.end()) {
+    g_registered_process_input_kernels.emplace(
+        kernel_id,
+        RegisteredProcessInputKernel{cubin, cubin_path, kernel_name, metadata});
+  }
+  g_process_input_path_ids[cubin_path] = result;
   return result;
 }
 
@@ -315,6 +372,7 @@ inline std::optional<Tensor> prepare_process_input_token_scales(
 
 inline void launch_process_input_main(
     const ProcessInputKernelData &data,
+    CUfunction func,
     const Tensor &inputs,
     const Tensor &outputs,
     const std::optional<Tensor> &group_scales,
@@ -376,11 +434,12 @@ inline void launch_process_input_main(
     config.attrs = &attribute;
     config.numAttrs = 1;
   }
-  check_curesult(cuLaunchKernelEx(&config, data.func, kernel_args, nullptr), "cuLaunchKernelEx");
+  check_curesult(cuLaunchKernelEx(&config, func, kernel_args, nullptr), "cuLaunchKernelEx");
 }
 
 inline void launch_process_input_finalizer(
     const ProcessInputKernelData &data,
+    CUfunction func,
     const Tensor &intermediate,
     const Tensor &group_scales,
     const Tensor &token_scales,
@@ -426,7 +485,7 @@ inline void launch_process_input_finalizer(
     config.attrs = &attribute;
     config.numAttrs = 1;
   }
-  check_curesult(cuLaunchKernelEx(&config, data.func, kernel_args, nullptr), "cuLaunchKernelEx");
+  check_curesult(cuLaunchKernelEx(&config, func, kernel_args, nullptr), "cuLaunchKernelEx");
 }
 
 inline void launch_process_input_impl(
@@ -438,17 +497,19 @@ inline void launch_process_input_impl(
     std::optional<Tensor> expert_layout,
     std::optional<Tensor> indices,
     bool inplace) {
-  CudaDeviceGuard device_guard(inputs.get_device());
+  DeviceContextGuard context_guard(inputs.get_device());
   ASSERT_CHECK(configs_tensor.scalar_type() == ScalarType::Long, "configs must be int64");
   ASSERT_CHECK(configs_tensor.is_contiguous() && configs_tensor.get_device() < 0, "configs must be CPU");
   IntArrayRef configs(static_cast<int64_t *>(configs_tensor.data_ptr()), configs_tensor.numel());
   ASSERT_CHECK(configs.size() >= 4 && configs.size() % 4 == 0, "invalid process-input configs");
   CUcontext context = get_current_context();
-  ProcessInputKernelData &base = get_process_input_kernel(configs[2], context);
+  ProcessInputKernelData base = find_process_input_kernel_data(configs[2]);
   check_process_input_tensor(inputs, "inputs", inputs.get_device(), dtype_id_to_tensor_dtype(base.source_dtype_id));
   ProcessInputShape shape = process_input_shape(base, inputs, outputs, expert_layout, indices);
   int64_t config_index = process_input_config_index(configs, shape.num_work_rows);
-  ProcessInputKernelData &primary = get_process_input_kernel(configs[config_index + 2], context);
+  ProcessInputKernelLaunchData primary_kernel =
+      get_or_load_process_input_kernel(configs[config_index + 2], context);
+  ProcessInputKernelData &primary = primary_kernel.metadata;
   ASSERT_CHECK(!primary.is_finalizer, "primary process-input kernel cannot be a finalizer");
   int64_t secondary_id = configs[config_index + 3];
 
@@ -469,18 +530,22 @@ inline void launch_process_input_impl(
     bool token_scale = primary.quant_mode == QuantizationMode::DynamicToken;
     void *output_scales = token_scale ? public_token_scales : public_group_scales;
     launch_process_input_main(
-        primary, inputs, prepared_output, group_scales, token_scales, expert_layout, indices, shape, output_scales);
+        primary, primary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+        expert_layout, indices, shape, output_scales);
   } else {
-    ProcessInputKernelData &secondary = get_process_input_kernel(secondary_id, context);
+    ProcessInputKernelLaunchData secondary_kernel = get_or_load_process_input_kernel(secondary_id, context);
+    ProcessInputKernelData &secondary = secondary_kernel.metadata;
     if (primary.quant_mode == QuantizationMode::DynamicToken) {
       ASSERT_CHECK(
           primary.quantization_phase == QuantizationPhase::CollectAbsmax &&
               secondary.quantization_phase == QuantizationPhase::Quantize,
           "invalid dynamic-token phases");
       launch_process_input_main(
-          primary, inputs, prepared_output, group_scales, token_scales, expert_layout, indices, shape, public_token_scales);
+          primary, primary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+          expert_layout, indices, shape, public_token_scales);
       launch_process_input_main(
-          secondary, inputs, prepared_output, group_scales, token_scales, expert_layout, indices, shape, public_token_scales);
+          secondary, secondary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+          expert_layout, indices, shape, public_token_scales);
     } else {
       bool valid_finalizer = primary.quant_mode == QuantizationMode::DynamicGroupToken;
       valid_finalizer = valid_finalizer && primary.quantization_phase == QuantizationPhase::Fused;
@@ -490,10 +555,12 @@ inline void launch_process_input_impl(
       int64_t groups = primary.hidden_size / primary.quant_group_size;
       Tensor intermediate = torch_empty({shape.num_output_rows * groups * 2}, ScalarType::Byte, inputs.device());
       launch_process_input_main(
-          primary, inputs, prepared_output, group_scales, token_scales, expert_layout, indices, shape,
+          primary, primary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+          expert_layout, indices, shape,
           intermediate.data_ptr());
       launch_process_input_finalizer(
-          secondary, intermediate, *group_scales, *token_scales, expert_layout, indices, shape);
+          secondary, secondary_kernel.func, intermediate, *group_scales, *token_scales,
+          expert_layout, indices, shape);
     }
   }
 }

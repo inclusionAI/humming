@@ -79,7 +79,7 @@ class RepackWeightKernel(KernelRuntime):
         padded_shape_k: int | None = None,
         interleave_mode: int = 3,
     ):
-        self.check_context()
+        func = self.load_cubin()
         num_experts = 1 if inputs.ndim == 2 else inputs.size(0)
         shape_n = inputs.size(-2)
         shape_k = inputs.size(-1)
@@ -109,4 +109,4 @@ class RepackWeightKernel(KernelRuntime):
             interleave_mode,
         )
 
-        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, func, (arg_values, self.arg_types), 0)

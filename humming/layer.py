@@ -97,6 +97,7 @@ class HummingLayerMethod:
         torch_dtype: torch.dtype | None = None,
         sublayer_name: str = "",
     ) -> HummingLayerMeta:
+        device = next((param.device for param in layer.parameters() if param.is_cuda), None)
         config = prepare_layer_config(
             shape_n=shape_n,
             shape_k=shape_k,
@@ -107,6 +108,7 @@ class HummingLayerMethod:
             pad_k_to_multiple=pad_k_to_multiple,
             has_bias=has_bias,
             torch_dtype=torch_dtype,
+            device=device,
         )
         meta = HummingLayerMeta.from_layer_config(config, sublayer_name)
 
@@ -150,12 +152,14 @@ class HummingLayerMethod:
         gemm_type: GemmType | str = GemmType.DENSE,
         sublayer_name: str = "",
     ) -> list[Any]:
+        device = next((param.device for param in layer.parameters() if param.is_cuda), None)
         return get_heuristics_config(
             layer_config=cls._get_meta(layer, sublayer_name),
             use_f16_accum=use_f16_accum,
             use_batch_invariant=use_batch_invariant,
             use_m_major_input_scale=use_m_major_input_scale,
             gemm_type=gemm_type,
+            device=device,
         )
 
     @classmethod
@@ -492,6 +496,7 @@ class HummingLayer(torch.nn.Module):
         return layer
 
     def transform(self):
+        device = next((param.device for param in self.parameters() if param.is_cuda), None)
         if not isinstance(self.weight_schema, HummingWeightSchema):
             assert self.torch_dtype is not None
             self.weight_schema, tensors = self.weight_schema.convert_humming(
@@ -499,6 +504,7 @@ class HummingLayer(torch.nn.Module):
                 shape_n_stacks=[self.shape_n],
                 shape_k_stacks=[self.shape_k],
                 param_dtype=self.torch_dtype,
+                device=device,
             )
 
             self.input_schema, _ = self.input_schema.convert_humming(
@@ -506,6 +512,7 @@ class HummingLayer(torch.nn.Module):
                 shape_n_stacks=[self.shape_n],
                 shape_k_stacks=[self.shape_k],
                 param_dtype=self.torch_dtype,
+                device=device,
             )
 
             for name, _ in list(self.named_parameters()):
@@ -527,6 +534,7 @@ class HummingLayer(torch.nn.Module):
             pad_k_to_multiple=self.pad_k_to_multiple,
             torch_dtype=self.torch_dtype,
             has_bias=self.has_bias,
+            device=device,
         )
         self._humming_metas = {}
 

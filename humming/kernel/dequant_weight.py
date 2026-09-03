@@ -40,7 +40,7 @@ class DequantKernel(KernelRuntime):
         mantissa_bits: int,
         is_signed: bool,
     ):
-        self.check_context()
+        func = self.load_cubin()
         device = inputs.device
         total_size = inputs.nelement()
         config = cbd.CUlaunchConfig()
@@ -61,5 +61,5 @@ class DequantKernel(KernelRuntime):
             is_signed,
         )
 
-        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, func, (arg_values, self.arg_types), 0)
         return outputs

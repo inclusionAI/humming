@@ -60,7 +60,7 @@ class QuantWeightKernel(KernelRuntime):
         scales: torch.Tensor | None,
         zero_point: torch.Tensor | None,
     ):
-        self.check_context()
+        func = self.load_cubin()
         group_size = self.group_size
         group_size = inputs.size(-1) if group_size <= 0 else group_size
 
@@ -81,4 +81,4 @@ class QuantWeightKernel(KernelRuntime):
             0 if zero_point is None else zero_point.data_ptr(),
         )
 
-        cbd.cuLaunchKernelEx(config, self.func, (arg_values, self.arg_types), 0)
+        cbd.cuLaunchKernelEx(config, func, (arg_values, self.arg_types), 0)

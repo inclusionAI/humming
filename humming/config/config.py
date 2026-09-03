@@ -18,6 +18,8 @@ def _cuda_compiler_version(compiler_cls):
 
 @dataclasses.dataclass(kw_only=True, unsafe_hash=True)
 class LayerConfig(BaseHummingConfig):
+    sm_version: int | None = None
+
     # shape config
     shape_n: int
     shape_k: int
@@ -71,15 +73,14 @@ class LayerConfig(BaseHummingConfig):
         from humming.jit.runtime import KernelRuntime
 
         cuda_version = _cuda_compiler_version(KernelRuntime._get_compiler())
-        major, minor = torch.cuda.get_device_capability()
-        sm = major * 10 + minor
-        native_low_bit_sm = sm >= 100
+        assert self.sm_version is not None
+        native_low_bit_sm = self.sm_version >= 100
         if self.mma_type != MmaType.MMA:
             return False
 
         accepted_b_dtype = tuple()
         if self.a_dtype == dtypes.float16:
-            if sm >= 89 and cuda_version >= (11, 8):
+            if self.sm_version >= 89 and cuda_version >= (11, 8):
                 accepted_b_dtype += (dtypes.float8e4m3, dtypes.float8e5m2)
             if native_low_bit_sm and cuda_version >= (12, 7):
                 accepted_b_dtype += (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
@@ -97,7 +98,8 @@ class LayerConfig(BaseHummingConfig):
 
     @property
     def mxmma_supported(self):
-        if torch.cuda.get_device_capability()[0] != 12:
+        assert self.sm_version is not None
+        if self.sm_version // 10 != 12:
             return False
         if not (self.is_group_weight_scale or self.is_channel_weight_scale):
             return False
@@ -128,6 +130,10 @@ class LayerConfig(BaseHummingConfig):
         return False
 
     def __post_init__(self):
+        if self.sm_version is None:
+            major, minor = torch.cuda.get_device_capability()
+            self.sm_version = major * 10 + minor
+
         self.problem_shape = (0, self.shape_n, self.shape_k)
         self.pad_shape = (0, self.pad_shape_n, self.pad_shape_k)
 
@@ -181,8 +187,8 @@ class LayerConfig(BaseHummingConfig):
         if isinstance(self.mma_type, str):
             self.mma_type = MmaType(self.mma_type)
         elif self.mma_type is None:
-            sm_version = torch.cuda.get_device_capability()[0]
-            if sm_version == 9:
+            assert self.sm_version is not None
+            if self.sm_version // 10 == 9:
                 self.mma_type = MmaType.WGMMA
             elif self.mxmma_supported:
                 self.mma_type = MmaType.MXMMA
@@ -275,6 +281,15 @@ class LayerConfig(BaseHummingConfig):
         if hasattr(self, "_config_str"):
             raise AttributeError(f"Instance is frozen, cannot set {name}")
         super().__setattr__(name, value)
+
+    def check_device(self, device: int | torch.device) -> None:
+        major, minor = torch.cuda.get_device_capability(device)
+        actual_sm = major * 10 + minor
+        if actual_sm != self.sm_version:
+            raise RuntimeError(
+                f"LayerConfig targets sm{self.sm_version}, but the input is on sm{actual_sm}; "
+                "transform the layer separately for each GPU architecture"
+            )
 
     def estimate_bound_min_shape_m(self, use_f16_accum: bool = False):
         from humming.utils.device import estimate_compute_bound_threshold
