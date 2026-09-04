@@ -5,8 +5,9 @@ import torch
 import triton
 from tqdm import tqdm
 
-from humming import dtypes, ops
-from humming.config import GemmType, MmaType
+from humming import dtypes
+from humming.config import GemmType
+from humming.forward import _prepare_input_scale, may_process_input
 from humming.layer import HummingLayer
 from humming.testing import (
     generate_random_moe_tensors,
@@ -74,18 +75,17 @@ def bench_humming(
         inputs = torch.randn((actual_shape_m, shape_k), dtype=torch_dtype, device="cuda:0")
         input_scale: torch.Tensor | None = None
         if a_dtype not in ["float16", "bfloat16"]:
-            is_mxmma = layer_config.mma_type == MmaType.MXMMA
             m_major = use_m_major_input_scale and not layer_config.use_fused_e8m0_scale
-            scale_dtype = bs_dtype if is_mxmma else "float32"
-            inputs, input_scale = ops.quant_input(
+            inputs, group_scales, token_scales = may_process_input(
+                layer_config,
                 inputs,
-                a_dtype,
-                group_size=input_scale_group_size,
-                scale_dtype=scale_dtype,
                 m_major_scale=m_major,
             )
-            if is_mxmma and not m_major:
-                input_scale = input_scale.view(torch.int32).contiguous()
+            if token_scales is not None:
+                token_scales = token_scales.unsqueeze(-1)
+            input_scale = group_scales if group_scales is not None else token_scales
+            assert input_scale is not None
+            input_scale = _prepare_input_scale(layer_config, input_scale)
 
         tuning_config = get_heuristics_config(
             layer_config=layer_config,

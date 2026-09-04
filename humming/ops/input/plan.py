@@ -49,11 +49,11 @@ def _finalize_rows(rows: int) -> int:
 
 
 def _valid_values(operation, values: int, block_size: int) -> bool:
-    if operation.quantized and values < 2:
+    if operation.should_quantize and values < 2:
         return False
     if operation.hidden_size % values or operation.tile_size % values or block_size % values:
         return False
-    return not operation.quantized or values * operation.target_bits % 8 == 0
+    return not operation.should_quantize or values * operation.target_bits % 8 == 0
 
 
 def _fits_shared_memory(operation, device, block_size: int, threads: int, values: int, tokens: int) -> bool:
@@ -114,7 +114,7 @@ def _tile_candidates(operation, device, block_size: int):
     num_tiles = operation.num_tiles
     first_tile_count = max(1, block_size // operation.tile_size)
     divisors = [count for count in _divisors(num_tiles) if count >= first_tile_count]
-    pure_hadamard = not operation.quantized and operation.activation_type == ActivationType.None_
+    pure_hadamard = not operation.should_quantize and operation.activation_type == ActivationType.None_
     pure_hadamard &= operation.hadamard_block_size > 1
     if pure_hadamard:
         powers = [count for count in _powers(num_tiles) if count >= first_tile_count]
@@ -240,9 +240,9 @@ def _partitioned_tile_score(operation, device, plan: ProcessInputPlan):
         ActivationType.BinarySplit,
         ActivationType.BinaryInterleaved,
     )
-    natural_values = 8 if binary_activation or not operation.quantized else 16
+    natural_values = 8 if binary_activation or not operation.should_quantize else 16
     natural_threads = _ceil_div(operation.hidden_size // natural_values, 32) * 32
-    raw_unary = operation.activation_type == ActivationType.Unary and not operation.quantized
+    raw_unary = operation.activation_type == ActivationType.Unary and not operation.should_quantize
     binary_lowbit = binary_activation and operation.target_bits == 4
     resident_blocks = 4 if raw_unary or binary_lowbit else 1
     thread_limit = device.max_threads_per_sm // resident_blocks
@@ -335,7 +335,7 @@ def _raw_tile_score(operation, device, plan: ProcessInputPlan):
         )
     if device.sm_major >= 10 and not underfilled and operation.activation_type != ActivationType.Unary:
         target_threads = device.max_threads_per_block
-        if operation.quantized:
+        if operation.should_quantize:
             preferred_values = 16
     return idle, abs(plan.values_per_thread - preferred_values), abs(plan.threads - target_threads)
 
@@ -404,9 +404,9 @@ def select_process_input_plan(operation, device) -> ProcessInputPlan:
         return min(token_plans, key=lambda plan: _token_score(operation, device, plan))
 
     assert tile_plans
-    pure_hadamard = not operation.quantized and operation.activation_type == ActivationType.None_
+    pure_hadamard = not operation.should_quantize and operation.activation_type == ActivationType.None_
     pure_hadamard &= operation.hadamard_block_size > 1
-    direct_group = operation.quantized and operation.hadamard_block_size <= 1
+    direct_group = operation.should_quantize and operation.hadamard_block_size <= 1
     direct_group &= dynamic_scale_mode == "group"
     if pure_hadamard:
         plan = min(tile_plans, key=lambda item: _pure_hadamard_score(operation, device, item))

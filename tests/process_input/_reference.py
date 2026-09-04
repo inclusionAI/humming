@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from humming import ops
-from humming.ops.input import hadamard_transform
 
 SCALE_DTYPES = {
     "float32": torch.float32,
@@ -30,7 +29,7 @@ def _empty_group_scales(
 
 
 def _source_after_transform(x: torch.Tensor, block_size: int | None) -> torch.Tensor:
-    return x if block_size is None else hadamard_transform(x, block_size)
+    return x if block_size is None else _hadamard_reference(x, block_size).to(x.dtype)
 
 
 def _quantize_int8_reference(

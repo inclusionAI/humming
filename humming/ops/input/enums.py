@@ -10,7 +10,7 @@ class QuantizationMode(str, Enum):
     DynamicGroupToken = "dynamic_group_token"
 
     @property
-    def quantized(self) -> bool:
+    def should_quantize(self) -> bool:
         return self != QuantizationMode.Disabled
 
     @property

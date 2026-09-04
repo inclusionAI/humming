@@ -213,25 +213,33 @@ class KernelTestRunner:
             inputs = inputs_orig.to(dtypes.torch_dtype_map[config.a_dtype])
             return inputs.float(), inputs, None
 
-        input_tensors = ops.quant_input(
-            inputs_orig,
-            str(config.a_dtype),
-            group_size=config.input_scale_group_size,
-            scale_dtype=str(config.as_dtype),
-        )
-        inputs, scale_ref = input_tensors
+        def process(m_major_scale: bool = False):
+            scale_layout = "row_major"
+            if m_major_scale and config.input_scale_group_size > 0:
+                scale_layout = "m_major"
+                if str(config.as_dtype) in ("float8e4m3", "float8e8m0"):
+                    scale_layout = "mx_packed"
+            quant_mode = "dynamic_group" if config.input_scale_group_size > 0 else "dynamic_token"
+            result = ops.process_input(
+                inputs_orig,
+                quant_mode=quant_mode,
+                quant_dtype=str(config.a_dtype),
+                quant_group_size=config.input_scale_group_size or None,
+                group_scale_dtype=str(config.as_dtype),
+                group_scale_layout=scale_layout,
+            )
+            scale = result[1]
+            if scale is None:
+                assert result[2] is not None
+                scale = result[2].unsqueeze(-1)
+            return result[0], scale
+
+        inputs, scale_ref = process()
         use_m_major_input_layout = self.test_case.uses_m_major_input_scale and (
             config.input_scale_group_size > 0 or config.mma_type == MmaType.MXMMA
         )
         if use_m_major_input_layout:
-            m_major_input_tensors = ops.quant_input(
-                inputs_orig,
-                str(config.a_dtype),
-                group_size=config.input_scale_group_size,
-                scale_dtype=str(config.as_dtype),
-                m_major_scale=True,
-            )
-            _, input_scale = m_major_input_tensors
+            _, input_scale = process(m_major_scale=True)
         elif config.mma_type == MmaType.MXMMA and config.input_scale_group_size > 0:
             input_scale = scale_ref.view(torch.int32).contiguous()
         else:

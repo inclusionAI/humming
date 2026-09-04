@@ -28,7 +28,6 @@ QUANT_DTYPE_MIN_SM_VERSION = {
 class _ProcessInput:
     inputs: torch.Tensor
     outputs: torch.Tensor | None = None
-    inplace: bool = False
     quant_mode: QuantizationMode | str = "none"
     quant_dtype: dtypes.DataType | None = None
     quant_group_size: int | None = None
@@ -61,9 +60,9 @@ class _ProcessInput:
         self.layout = LayoutType(self.layout)
         self.group_scale_layout = GroupScaleLayout(self.group_scale_layout)
         self.quant_mode = QuantizationMode(self.quant_mode)
-        self.quantized = self.quant_mode.quantized
-        assert self.quantized == (self.quant_dtype is not None), "quant_dtype must match quant_mode"
-        valid_quant_dtype = not self.quantized or self.quant_dtype in QUANT_DTYPE_MIN_SM_VERSION
+        self.should_quantize = self.quant_mode.should_quantize
+        assert self.should_quantize == (self.quant_dtype is not None), "quant_dtype must match quant_mode"
+        valid_quant_dtype = not self.should_quantize or self.quant_dtype in QUANT_DTYPE_MIN_SM_VERSION
         assert valid_quant_dtype, f"unsupported quant_dtype: {self.quant_dtype}"
 
         self.input_row_size = self.inputs.size(-1)
@@ -80,10 +79,8 @@ class _ProcessInput:
             assert self.input_row_size % 2 == 0
         self.hidden_size = self.input_row_size // (2 if binary else 1)
 
-        if self.inplace:
-            valid_output = self.outputs is None or self.outputs is self.inputs
-            assert valid_output, "inplace does not accept a separate output tensor"
-            assert not self.quantized, "inplace does not support quantization"
+        if self.outputs is self.inputs:
+            assert not self.should_quantize, "inplace does not support quantization"
             unary_activation = self.activation_type in (ActivationType.None_, ActivationType.Unary)
             assert unary_activation, "inplace does not support binary activation"
             allowed_layouts = (LayoutType.Normal, LayoutType.Grouped, LayoutType.GroupedPadded)
@@ -113,7 +110,7 @@ class _ProcessInput:
         else:
             self.quant_group_size = self.hidden_size
             default_tile_size = min(self.hidden_size & -self.hidden_size, 256)
-            if not self.quantized and has_hadamard:
+            if not self.should_quantize and has_hadamard:
                 self.tile_size = self.hadamard_block_size
             else:
                 self.tile_size = default_tile_size
@@ -249,7 +246,7 @@ class _ProcessInput:
         tensors += (self.expert_layout, self.indices)
         self.working_set_bytes = sum(t.numel() * t.element_size() for t in tensors if t is not None)
         self.source_bits = self.inputs.element_size() * 8
-        if self.quantized:
+        if self.should_quantize:
             self.target_bits = self.quant_dtype.num_bits
         else:
             self.target_bits = self.source_bits
@@ -368,7 +365,6 @@ class _ProcessInput:
 def _prepare_process_input_op(
     inputs: torch.Tensor,
     outputs: torch.Tensor | None = None,
-    inplace: bool = False,
     group_scales: torch.Tensor | None = None,
     token_scales: torch.Tensor | None = None,
     quant_mode: str = "none",
@@ -385,13 +381,12 @@ def _prepare_process_input_op(
     group_scale_layout: str = "row_major",
     use_pdl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-    allocate_outputs = outputs is None and not inplace
+    allocate_outputs = outputs is None
     allocate_group_scales = group_scales is None
     allocate_token_scales = token_scales is None
     operation = _ProcessInput(
         inputs=inputs,
         outputs=outputs,
-        inplace=inplace,
         quant_mode=quant_mode,
         quant_dtype=None if quant_dtype is None else dtypes.DataType.from_str(quant_dtype),
         quant_group_size=quant_group_size,
@@ -429,7 +424,6 @@ def _prepare_process_input_op(
             token_scales.dtype if token_scales is not None else None,
             expert_layout.dtype if expert_layout is not None else None,
             indices.dtype if indices is not None else None,
-            inplace,
             quant_mode,
             quant_dtype,
             quant_group_size,
@@ -459,7 +453,6 @@ def process_input(
     inputs: torch.Tensor,
     *,
     outputs: torch.Tensor | None = None,
-    inplace: bool = False,
     quant_mode: str = "none",
     quant_dtype: str | None = None,
     quant_group_size: int | None = None,
@@ -493,16 +486,9 @@ def process_input(
     )
     use_ops = torch.compiler.is_compiling() or isinstance(inputs, FakeTensor)
     prepare = torch.ops.humming.prepare_process_input if use_ops else _prepare_process_input_op
-    prepared = prepare(
-        inputs,
-        outputs,
-        inplace,
-        group_scales,
-        token_scales,
-        **options,
-    )
+    prepared = prepare(inputs, outputs, group_scales, token_scales, **options)
     configs, allocated_outputs, allocated_group_scales, allocated_token_scales = prepared
-    if inplace:
+    if outputs is inputs:
         torch.ops.humming.launch_process_input.inplace(configs, inputs, expert_layout, indices)
         return inputs, None, None
 
@@ -520,55 +506,3 @@ def process_input(
         indices,
     )
     return result_outputs, result_group_scales, result_token_scales
-
-
-def quant_input(
-    inputs: torch.Tensor,
-    dtype: str,
-    scales: torch.Tensor | None = None,
-    outputs: torch.Tensor | None = None,
-    group_size: int | None = None,
-    use_pdl: bool = False,
-    m_major_scale: bool = False,
-    scale_dtype: str = "float32",
-    global_scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    channelwise = group_size is None or group_size == 0
-    if channelwise and scales is None and scale_dtype == "float32" and global_scale is None:
-        quantized, _, result_token_scales = process_input(
-            inputs,
-            outputs=outputs,
-            quant_mode=QuantizationMode.DynamicToken,
-            quant_dtype=dtype,
-            use_pdl=use_pdl,
-        )
-        assert result_token_scales is not None
-        return quantized, result_token_scales.unsqueeze(-1)
-
-    if channelwise:
-        group_size = inputs.size(-1)
-
-    group_scale_layout = GroupScaleLayout.RowMajor
-    if m_major_scale:
-        group_scale_layout = GroupScaleLayout.MMajor
-        if scale_dtype in ("float8e4m3", "float8e8m0"):
-            group_scale_layout = GroupScaleLayout.MxPacked
-    quant_mode = (
-        QuantizationMode.StaticTensorDynamicGroup
-        if global_scale is not None
-        else QuantizationMode.DynamicGroup
-    )
-    quantized, result_group_scales, _ = process_input(
-        inputs,
-        outputs=outputs,
-        quant_mode=quant_mode,
-        quant_dtype=dtype,
-        quant_group_size=group_size,
-        group_scales=scales,
-        group_scale_dtype=scale_dtype,
-        token_scales=global_scale,
-        group_scale_layout=group_scale_layout,
-        use_pdl=use_pdl,
-    )
-    assert result_group_scales is not None
-    return quantized, result_group_scales

@@ -1,10 +1,11 @@
 import pytest
 import torch
 
-from humming.ops.input import hadamard_transform, process_input
+from humming.ops.input import process_input
 
 from ._reference import (
     _empty_group_scales,
+    _hadamard_reference,
     _quantize_int8_reference,
     _round_positive_m3_rne,
 )
@@ -229,7 +230,7 @@ def test_moe_grouped_padded_invalid_write_policy(zero_invalid):
     invalid_tokens = torch.cat((result[2][0, 3:].flatten(), result[2][1, 1:].flatten()))
 
     valid_mask = torch.arange(4, device="cuda")[None, :] < valid_tokens[:, None]
-    transformed = hadamard_transform(x, 128)[valid_mask]
+    transformed = _hadamard_reference(x, 128).to(x.dtype)[valid_mask]
     grouped = transformed.reshape(-1, 2, 128)
     raw = grouped.abs().amax(-1) / 127.0
     m3 = _round_positive_m3_rne(raw)

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from humming.ops.input import hadamard_quant_input, process_input, quant_input
+from humming.ops.input import process_input
 
 from ._reference import (
     _empty_group_scales,
@@ -195,55 +195,3 @@ def test_dynamic_group_e4_token_centric_m_major(packed):
         expected = row_major[1]
     torch.testing.assert_close(unpacked, expected, rtol=0, atol=0)
     torch.testing.assert_close(m_major[0].float(), row_major[0].float(), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("hidden_size", [384, 1024])
-@pytest.mark.parametrize("hadamard_block_size", [None, 128])
-def test_legacy_channelwise_uses_dynamic_token_scale(hidden_size, hadamard_block_size):
-    torch.manual_seed(25)
-    inputs = torch.randn((3, hidden_size), device="cuda", dtype=torch.float32)
-    if hadamard_block_size is None:
-        quantized, scales = quant_input(inputs, dtype="int8")
-    else:
-        quantized, scales = hadamard_quant_input(
-            inputs,
-            block_size=hadamard_block_size,
-            quant_dtype="int8",
-        )
-
-    reference = process_input(
-        inputs,
-        quant_mode="dynamic_token",
-        quant_dtype="int8",
-        hadamard_block_size=hadamard_block_size,
-    )
-    assert scales.shape == (3, 1)
-    torch.testing.assert_close(quantized, reference[0], rtol=0, atol=0)
-    torch.testing.assert_close(scales.squeeze(-1), reference[2], rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("hadamard", [False, True], ids=["quant", "hadamard_quant"])
-@pytest.mark.parametrize("scale_dtype", ["float32", "float8e4m3", "float8e8m0"])
-def test_legacy_m_major_scale_layout(scale_dtype, hadamard):
-    torch.manual_seed(18)
-    inputs = torch.randn((3, 512), device="cuda", dtype=torch.float32)
-    kwargs = {
-        "inputs": inputs,
-        "group_size": 128,
-        "scale_dtype": scale_dtype,
-    }
-    if hadamard:
-        kwargs.update(block_size=128, quant_dtype="float8e4m3")
-        legacy_quant = hadamard_quant_input
-    else:
-        kwargs.update(dtype="float8e4m3")
-        legacy_quant = quant_input
-    _, row_major = legacy_quant(**kwargs)
-    _, m_major = legacy_quant(**kwargs, m_major_scale=True)
-
-    if scale_dtype in ("float8e4m3", "float8e8m0"):
-        assert m_major.shape == (1, 4, 4)
-        unpacked = m_major.view(torch.uint8).reshape(1, 4, 4)[0, :3]
-        torch.testing.assert_close(unpacked, row_major.view(torch.uint8), rtol=0, atol=0)
-    else:
-        torch.testing.assert_close(m_major[:, :3].T.float(), row_major.float(), rtol=0, atol=0)

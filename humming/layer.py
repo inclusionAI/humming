@@ -9,7 +9,7 @@ import torch
 from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import current_device
-from humming.forward import humming_forward, may_hadamard_quant_input, may_quant_input
+from humming.forward import humming_forward, may_process_input, may_quant_input
 from humming.schema import BaseInputSchema, BaseWeightSchema, HummingInputSchema, HummingWeightSchema
 from humming.transform import (
     check_and_pad_tensors,
@@ -203,23 +203,38 @@ class HummingLayerMethod:
         )
 
     @classmethod
-    def may_hadamard_quant_input(
+    def may_process_input(
         cls,
         layer: torch.nn.Module,
         inputs: torch.Tensor,
+        *,
+        outputs: torch.Tensor | None = None,
+        group_scales: torch.Tensor | None = None,
+        token_scales: torch.Tensor | None = None,
+        activation_type: str = "none",
+        activation_impl: str | None = None,
         hadamard_block_size: int | None = None,
-        input_scale: torch.Tensor | None = None,
-        quanted_input: torch.Tensor | None = None,
+        layout: str = "normal",
+        expert_layout: torch.Tensor | None = None,
+        indices: torch.Tensor | None = None,
+        zero_invalid: bool = False,
         m_major_scale: bool = False,
         sublayer_name: str = "",
         use_pdl: bool | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return may_hadamard_quant_input(
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        return may_process_input(
             cls._get_meta(layer, sublayer_name),
             inputs=inputs,
+            outputs=outputs,
+            group_scales=group_scales,
+            token_scales=token_scales,
+            activation_type=activation_type,
+            activation_impl=activation_impl,
             hadamard_block_size=hadamard_block_size,
-            input_scale=input_scale,
-            quanted_input=quanted_input,
+            layout=layout,
+            expert_layout=expert_layout,
+            indices=indices,
+            zero_invalid=zero_invalid,
             m_major_scale=m_major_scale,
             use_pdl=use_pdl,
         )

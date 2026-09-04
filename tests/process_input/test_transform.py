@@ -2,9 +2,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from humming.ops.input import hadamard_transform, process_input
+from humming.ops.input import process_input
 
-from ._reference import _quantize_int8_reference
+from ._reference import _hadamard_reference, _quantize_int8_reference
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
@@ -60,7 +60,7 @@ def test_unquantized_hadamard_and_activation():
         activation_impl="a > 0.f ? a : 0.f",
         hadamard_block_size=128,
     )
-    expected = hadamard_transform(F.relu(x), 128)
+    expected = _hadamard_reference(F.relu(x), 128)
     torch.testing.assert_close(result[0], expected, rtol=0, atol=0)
 
 
@@ -77,7 +77,7 @@ def test_unquantized_unary_inplace(layout):
 
     result = process_input(
         x,
-        inplace=True,
+        outputs=x,
         activation_type="unary",
         activation_impl="a > 0.f ? a : 0.f",
         layout=layout,
@@ -94,8 +94,8 @@ def test_unquantized_unary_inplace(layout):
 
 def test_unquantized_hadamard_inplace():
     x = torch.randn(5, 512, device="cuda", dtype=torch.bfloat16)
-    expected = hadamard_transform(x, 128)
-    result = process_input(x, inplace=True, hadamard_block_size=128)
+    expected = _hadamard_reference(x, 128).to(x.dtype)
+    result = process_input(x, outputs=x, hadamard_block_size=128)
     assert result[0] is x
     torch.testing.assert_close(x, expected, rtol=0, atol=0)
 
@@ -103,8 +103,8 @@ def test_unquantized_hadamard_inplace():
 def test_inplace_cache_hit_keeps_input_storage():
     first = torch.randn(5, 512, device="cuda", dtype=torch.bfloat16)
     second = torch.randn_like(first)
-    process_input(first, inplace=True)
-    result = process_input(second, inplace=True)
+    process_input(first, outputs=first)
+    result = process_input(second, outputs=second)
     assert result[0] is second
 
 
@@ -123,7 +123,7 @@ def test_custom_binary_activation_hadamard_and_quantization():
     )
 
     activated = a.float() * a.float() + b.float()
-    source = hadamard_transform(activated, 128)
+    source = _hadamard_reference(activated, 128)
     grouped = source.reshape(3, 2, 128)
     expected_scales = grouped.abs().amax(-1) / 127.0
     expected = _quantize_int8_reference(source, expected_scales, 128)
@@ -153,6 +153,6 @@ def test_multiline_activation_impl():
 def test_hadamard_involution(block_size):
     torch.manual_seed(0)
     inputs = torch.randn((4, block_size * 2), device="cuda", dtype=torch.float32)
-    transformed = hadamard_transform(inputs, block_size=block_size)
-    restored = hadamard_transform(transformed, block_size=block_size)
+    transformed = process_input(inputs, hadamard_block_size=block_size)[0]
+    restored = process_input(transformed, hadamard_block_size=block_size)[0]
     torch.testing.assert_close(restored, inputs, rtol=1e-5, atol=1e-5)

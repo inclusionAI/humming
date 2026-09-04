@@ -1,11 +1,6 @@
 from humming.ops.bench import tops_bench
 from humming.ops.gemm import humming_gemm
-from humming.ops.input import (
-    hadamard_quant_input,
-    hadamard_transform,
-    process_input,
-    quant_input,
-)
+from humming.ops.input import process_input
 from humming.ops.launcher import (
     get_kernel_smem_size,
     launch_kernel,
@@ -26,9 +21,6 @@ __all__ = [
     "register_process_input_kernel",
     "get_kernel_smem_size",
     "launch_kernel",
-    "hadamard_transform",
-    "hadamard_quant_input",
-    "quant_input",
     "process_input",
     "quant_weight",
     "dequant_weight",

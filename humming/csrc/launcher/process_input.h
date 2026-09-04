@@ -250,7 +250,7 @@ inline bool has_dynamic_group_scale(QuantizationMode mode) {
 inline ProcessInputShape process_input_shape(
     const ProcessInputKernelData &data,
     const Tensor &inputs,
-    const std::optional<Tensor> &outputs,
+    const Tensor &outputs,
     const std::optional<Tensor> &expert_layout,
     const std::optional<Tensor> &indices) {
   ASSERT_CHECK(inputs.dim() >= 1 && inputs.size(-1) == data.input_row_size, "invalid input shape");
@@ -285,7 +285,7 @@ inline ProcessInputShape process_input_shape(
     ASSERT_CHECK(!expert_layout.has_value() && indices.has_value(), "scatter requires indices only");
     ASSERT_CHECK(indices->dim() == 2 && indices->size(0) == inputs.size(0), "invalid scatter indices");
     ASSERT_CHECK(indices->size(1) == data.layout_width, "scatter width changed after preparation");
-    shape.num_output_rows = outputs.has_value() ? outputs->size(0) : indices->numel();
+    shape.num_output_rows = outputs.size(0);
     shape.num_work_rows = inputs.size(0);
   }
   shape.group_scale_stride = data.scale_layout == 0 ? shape.num_output_rows : CEIL_DIV(shape.num_output_rows, 4) * 4;
@@ -308,26 +308,19 @@ inline std::vector<int64_t> process_input_output_shape(
   return {shape.num_output_rows, columns};
 }
 
-inline Tensor prepare_process_input_output(
+inline void check_process_input_output(
     const ProcessInputKernelData &data,
     const Tensor &inputs,
     const ProcessInputShape &shape,
-    std::optional<Tensor> outputs,
-    bool inplace) {
+    const Tensor &outputs) {
   auto expected_shape = process_input_output_shape(data, inputs, shape);
   ScalarType dtype = dtype_id_to_tensor_dtype(data.source_dtype_id);
   if (data.quant_mode != QuantizationMode::Disabled)
     dtype = dtype_id_to_tensor_dtype(data.target_dtype_id);
-  if (inplace) {
-    ASSERT_CHECK(!outputs.has_value() || outputs->data_ptr() == inputs.data_ptr(), "inplace output must alias inputs");
-    outputs = inputs;
-  }
-  ASSERT_CHECK(outputs.has_value(), "outputs must be allocated by prepare_process_input");
-  check_process_input_tensor(*outputs, "outputs", inputs.get_device(), dtype);
-  ASSERT_CHECK(outputs->dim() == static_cast<int64_t>(expected_shape.size()), "invalid output rank");
+  check_process_input_tensor(outputs, "outputs", inputs.get_device(), dtype);
+  ASSERT_CHECK(outputs.dim() == static_cast<int64_t>(expected_shape.size()), "invalid output rank");
   for (size_t dimension = 0; dimension < expected_shape.size(); dimension++)
-    ASSERT_CHECK(outputs->size(dimension) == expected_shape[dimension], "invalid output shape");
-  return *outputs;
+    ASSERT_CHECK(outputs.size(dimension) == expected_shape[dimension], "invalid output shape");
 }
 
 inline std::optional<Tensor> prepare_process_input_group_scales(
@@ -491,12 +484,11 @@ inline void launch_process_input_finalizer(
 inline void launch_process_input_impl(
     Tensor configs_tensor,
     Tensor inputs,
-    std::optional<Tensor> outputs,
+    Tensor outputs,
     std::optional<Tensor> group_scales,
     std::optional<Tensor> token_scales,
     std::optional<Tensor> expert_layout,
-    std::optional<Tensor> indices,
-    bool inplace) {
+    std::optional<Tensor> indices) {
   DeviceContextGuard context_guard(inputs.get_device());
   ASSERT_CHECK(configs_tensor.scalar_type() == ScalarType::Long, "configs must be int64");
   ASSERT_CHECK(configs_tensor.is_contiguous() && configs_tensor.get_device() < 0, "configs must be CPU");
@@ -517,7 +509,7 @@ inline void launch_process_input_impl(
     check_process_input_index(*expert_layout, "expert_layout", inputs.get_device(), primary.expert_layout_int64);
   if (indices.has_value())
     check_process_input_index(*indices, "indices", inputs.get_device(), primary.index_int64);
-  Tensor prepared_output = prepare_process_input_output(primary, inputs, shape, outputs, inplace);
+  check_process_input_output(primary, inputs, shape, outputs);
   group_scales = prepare_process_input_group_scales(primary, inputs, shape, group_scales);
   token_scales = prepare_process_input_token_scales(primary, inputs, shape, token_scales);
 
@@ -530,7 +522,7 @@ inline void launch_process_input_impl(
     bool token_scale = primary.quant_mode == QuantizationMode::DynamicToken;
     void *output_scales = token_scale ? public_token_scales : public_group_scales;
     launch_process_input_main(
-        primary, primary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+        primary, primary_kernel.func, inputs, outputs, group_scales, token_scales,
         expert_layout, indices, shape, output_scales);
   } else {
     ProcessInputKernelLaunchData secondary_kernel = get_or_load_process_input_kernel(secondary_id, context);
@@ -541,10 +533,10 @@ inline void launch_process_input_impl(
               secondary.quantization_phase == QuantizationPhase::Quantize,
           "invalid dynamic-token phases");
       launch_process_input_main(
-          primary, primary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+          primary, primary_kernel.func, inputs, outputs, group_scales, token_scales,
           expert_layout, indices, shape, public_token_scales);
       launch_process_input_main(
-          secondary, secondary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+          secondary, secondary_kernel.func, inputs, outputs, group_scales, token_scales,
           expert_layout, indices, shape, public_token_scales);
     } else {
       bool valid_finalizer = primary.quant_mode == QuantizationMode::DynamicGroupToken;
@@ -555,7 +547,7 @@ inline void launch_process_input_impl(
       int64_t groups = primary.hidden_size / primary.quant_group_size;
       Tensor intermediate = torch_empty({shape.num_output_rows * groups * 2}, ScalarType::Byte, inputs.device());
       launch_process_input_main(
-          primary, primary_kernel.func, inputs, prepared_output, group_scales, token_scales,
+          primary, primary_kernel.func, inputs, outputs, group_scales, token_scales,
           expert_layout, indices, shape,
           intermediate.data_ptr());
       launch_process_input_finalizer(
@@ -576,7 +568,7 @@ inline void launch_process_input(
   if (!inputs.is_cuda()) return;
   launch_process_input_impl(
       configs_tensor, inputs, outputs, group_scales, token_scales,
-      expert_layout, indices, false);
+      expert_layout, indices);
 }
 
 inline void launch_process_input_inplace(
@@ -587,5 +579,5 @@ inline void launch_process_input_inplace(
   if (!inputs.is_cuda()) return;
   launch_process_input_impl(
       configs_tensor, inputs, inputs, std::nullopt, std::nullopt,
-      expert_layout, indices, true);
+      expert_layout, indices);
 }

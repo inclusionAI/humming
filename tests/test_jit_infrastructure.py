@@ -144,7 +144,7 @@ def test_launcher_runs_device_local_kernels():
 def test_kernel_runtime_instances_are_context_local():
     from humming import dtypes
     from humming.kernel.process_input import ProcessInputKernel
-    from humming.ops import hadamard_transform
+    from humming.ops import process_input
 
     def make_kernel():
         return ProcessInputKernel(
@@ -165,10 +165,10 @@ def test_kernel_runtime_instances_are_context_local():
     input1 = values.to("cuda:1")
 
     with torch.cuda.device(0):
-        output0 = hadamard_transform(input0, block_size=32)
+        output0 = process_input(input0, hadamard_block_size=32)[0]
         kernel0 = make_kernel()
     with torch.cuda.device(1):
-        output1 = hadamard_transform(input1, block_size=32)
+        output1 = process_input(input1, hadamard_block_size=32)[0]
         kernel1 = make_kernel()
 
     assert kernel0 is not kernel1

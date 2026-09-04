@@ -195,7 +195,7 @@ class HummingWeightSchema(BaseWeightSchema):
         if schema.hadamard_block_size > 1:
             from humming import ops
 
-            tensor = ops.hadamard_transform(tensor, schema.hadamard_block_size)
+            tensor = ops.process_input(tensor, hadamard_block_size=schema.hadamard_block_size)[0]
         is_tensor_only = schema.weight_scale_type == WeightScaleType.TENSOR
         if schema.weight_scale_2_type == WeightScale2Type.TENSOR:
             scale_2_type = "tensor"
