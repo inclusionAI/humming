@@ -2,6 +2,7 @@ name: Build Wheels
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -48,8 +49,8 @@ jobs:
               "$PYTHON" tools/build_native.py
               "$PYTHON" -m build --wheel --no-isolation
               "$PYTHON" -m wheel tags --remove \
-                --python-tag py3 \
-                --abi-tag none \
+                --python-tag cp310 \
+                --abi-tag abi3 \
                 --platform-tag manylinux_2_28_${{ matrix.arch }} \
                 dist/*.whl
             '
@@ -65,6 +66,7 @@ jobs:
           expected = {
               "humming/_native/${{ matrix.arch }}/libhumming_launcher.so",
               "humming/_native/${{ matrix.arch }}/libcubinpatch.so",
+              "humming/_native/${{ matrix.arch }}/_device_info.abi3.so",
               "humming/_native/${{ matrix.arch }}/manifest.json",
               "humming/_native/${{ matrix.arch }}/nvrtc_compile",
           }

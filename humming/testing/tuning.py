@@ -1,5 +1,4 @@
 import dataclasses
-import functools
 import hashlib
 import itertools
 import json
@@ -7,11 +6,10 @@ import math
 import os
 import random
 
-import torch
-
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
+from humming.device import current_device
 from humming.tune import get_heuristics_config
-from humming.utils.device import fits_device_smem, get_device_num_sms
+from humming.utils.smem import fits_device_smem
 
 NUM_SAMPLED_TUNING_CONFIGS = 100
 TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
@@ -55,19 +53,6 @@ def create_tuning_config(values: dict) -> TuningConfig:
 def _generate_cartesian(*names: str):
     for values in itertools.product(*(SAMPLED_TUNING_VALUES[name] for name in names)):
         yield dict(zip(names, values, strict=True))
-
-
-@functools.lru_cache
-def _get_device_resource_limits(device_index: int) -> tuple[int, int]:
-    properties = torch.cuda.get_device_properties(device_index)
-    return properties.max_threads_per_multi_processor, properties.regs_per_multiprocessor
-
-
-def _get_base_config(compute_config: ComputeConfig) -> dict:
-    return {
-        "num_sms": get_device_num_sms(),
-        "use_f16_accum": compute_config.use_f16_accum,
-    }
 
 
 def _is_legal_geometry(
@@ -115,7 +100,7 @@ def _generate_geometry_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
 ) -> list[tuple[dict, dict]]:
-    base = _get_base_config(compute_config)
+    base = {"num_sms": current_device.sm_count, "use_f16_accum": compute_config.use_f16_accum}
     names = (
         "warp_iters",
         "k_warps",
@@ -191,7 +176,7 @@ def _generate_transfer_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
 ) -> list[tuple[dict, dict]]:
-    base = _get_base_config(compute_config)
+    base = {"num_sms": current_device.sm_count, "use_f16_accum": compute_config.use_f16_accum}
     candidates = []
     names = (
         "use_tma",
@@ -202,8 +187,7 @@ def _generate_transfer_candidates(
         "multi_cast_size_b",
     )
     seed = _get_seed(layer_config, compute_config)
-    major, minor = torch.cuda.get_device_capability()
-    sm_version = major * 10 + minor
+    sm_version = current_device.sm_version
     for signature in _generate_cartesian(*names):
         use_tma, tma_values = _resolve_tma_values(signature["use_tma"], seed)
         if sm_version < 90 and (use_tma or signature["use_warp_spec"]):
@@ -231,7 +215,7 @@ def _generate_scheduling_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
 ) -> list[tuple[dict, dict]]:
-    base = _get_base_config(compute_config)
+    base = {"num_sms": current_device.sm_count, "use_f16_accum": compute_config.use_f16_accum}
     candidates = []
     names = (
         "num_stages",
@@ -296,7 +280,8 @@ def _fits_device_resources(
     num_math_threads = m_warps * n_warps * k_warps * 32
     num_threads = num_math_threads + (128 if config["use_warp_spec"] else 0)
     num_ctas_per_sm = config["num_ctas_per_sm"]
-    max_threads, registers_per_sm = _get_device_resource_limits(torch.cuda.current_device())
+    max_threads = current_device.max_threads_per_sm
+    registers_per_sm = current_device.max_registers_per_sm
     if num_threads * num_ctas_per_sm > max_threads:
         return False
 

@@ -4,16 +4,13 @@ import pytest
 
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType
+from humming.device import DeviceInfo
 from humming.tune.sm90 import Sm90Heuristics
 
 
 @pytest.fixture(autouse=True)
 def _mock_h200_sm_count(monkeypatch):
-    monkeypatch.setattr(
-        Sm90Heuristics,
-        "get_num_sms",
-        classmethod(lambda cls: 132),
-    )
+    monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: 132))
 
 
 def _layer(
@@ -96,14 +93,10 @@ def test_migrated_policies_own_proposal_generation(
 
 
 def test_grouped_and_legacy_selection_work_without_a_live_device(monkeypatch):
-    def fail_device_query(cls):
+    def fail_device_query(self):
         raise AssertionError("unexpected live device query")
 
-    monkeypatch.setattr(
-        Sm90Heuristics,
-        "get_num_sms",
-        classmethod(fail_device_query),
-    )
+    monkeypatch.setattr(DeviceInfo, "sm_count", property(fail_device_query))
 
     grouped = Sm90Heuristics.get_config(
         _layer(6144, 3584, num_experts=0),

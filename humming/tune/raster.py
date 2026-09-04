@@ -1,7 +1,6 @@
-import functools
 import math
 
-import torch
+from humming.device import current_device
 
 
 def raster_group_m(
@@ -40,16 +39,8 @@ def raster_group_m(
     return max(1, g)
 
 
-@functools.lru_cache(maxsize=8)
-def _device_l2_sms(device_index: int) -> tuple[int, int]:
-    p = torch.cuda.get_device_properties(device_index)
-    l2 = getattr(p, "L2_cache_size", None) or getattr(p, "l2_cache_size", 40 * 1024 * 1024)
-    return l2, p.multi_processor_count
-
-
 def raster_group_m_for_config(layer_config, block_shape, multicast_a: int = 1) -> int:
     block_m, block_n = block_shape[0], block_shape[1]
-    l2_bytes, num_sms = _device_l2_sms(torch.cuda.current_device())
     return raster_group_m(
         shape_m=block_m * 4096,
         shape_n=layer_config.shape_n,
@@ -58,7 +49,7 @@ def raster_group_m_for_config(layer_config, block_shape, multicast_a: int = 1) -
         block_n=block_n,
         a_dtype_bits=layer_config.a_dtype.num_bits,
         b_dtype_bits=layer_config.b_dtype.num_bits,
-        l2_bytes=l2_bytes,
-        num_sms=num_sms,
+        l2_bytes=current_device.l2_cache_size,
+        num_sms=current_device.sm_count,
         multicast_a=multicast_a,
     )

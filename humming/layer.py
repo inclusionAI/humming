@@ -8,17 +8,9 @@ import torch
 
 from humming import dtypes
 from humming.config import GemmType, LayerConfig
-from humming.forward import (
-    humming_forward,
-    may_hadamard_quant_input,
-    may_quant_input,
-)
-from humming.schema import (
-    BaseInputSchema,
-    BaseWeightSchema,
-    HummingInputSchema,
-    HummingWeightSchema,
-)
+from humming.device import current_device
+from humming.forward import humming_forward, may_hadamard_quant_input, may_quant_input
+from humming.schema import BaseInputSchema, BaseWeightSchema, HummingInputSchema, HummingWeightSchema
 from humming.transform import (
     check_and_pad_tensors,
     prepare_layer_config,
@@ -301,9 +293,7 @@ class HummingLayer(torch.nn.Module):
         if self.torch_dtype is None:
             self.torch_dtype = torch.get_default_dtype()
             if self.torch_dtype not in [torch.float16, torch.bfloat16]:
-                self.torch_dtype = (
-                    torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-                )
+                self.torch_dtype = torch.bfloat16 if current_device.sm_major >= 8 else torch.float16
         assert self.torch_dtype in [torch.float16, torch.bfloat16], self.torch_dtype
 
         self.input_config = self.input_config or {}

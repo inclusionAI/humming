@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from humming import ops
-from humming.utils.device import calculate_gpu_bandwidth, get_device_name
+from humming.device import current_device
 
 
 def save_benchmark_result(result, args, packages: list[str] | None = None) -> None:
@@ -39,8 +39,8 @@ def save_benchmark_result(result, args, packages: list[str] | None = None) -> No
     data = {
         "problem": vars(args),
         "device": {
-            "device_name": get_device_name(),
-            "memory_gbps": calculate_gpu_bandwidth(),
+            "device_name": current_device.name,
+            "memory_gbps": current_device.memory_bandwidth_gbps,
             "compute_tops": ops.tops_bench(dtype, use_f16_accum=use_f16_accum),
         },
         "packages": versions,

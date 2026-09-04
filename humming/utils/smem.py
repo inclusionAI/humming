@@ -1,5 +1,7 @@
 import math
 
+import torch
+
 from humming.config import (
     ComputeConfig,
     GemmType,
@@ -7,6 +9,7 @@ from humming.config import (
     MmaType,
     TuningConfig,
 )
+from humming.device import DeviceInfo
 
 _INT4 = 16
 
@@ -185,3 +188,13 @@ def estimate_smem_size_config(
         num_write_splits=tuning_config.num_write_splits,
         mma_accum_bits=16 if compute_config.use_f16_accum else 32,
     )
+
+
+def fits_device_smem(
+    layer_config: LayerConfig,
+    compute_config: ComputeConfig,
+    tuning_config: TuningConfig,
+    device: int | torch.device | None = None,
+) -> bool:
+    estimated = estimate_smem_size_config(layer_config, compute_config, tuning_config)
+    return estimated <= DeviceInfo(device).max_smem_size

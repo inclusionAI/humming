@@ -5,7 +5,6 @@ import torch
 from humming import ops
 from humming.config import LayerConfig, MmaType
 from humming.tune import get_heuristics_class
-from humming.utils.device import get_device_capability
 
 
 def _resolve_use_pdl(
@@ -18,8 +17,7 @@ def _resolve_use_pdl(
     if not inputs.is_cuda:
         return False
 
-    capability = get_device_capability(inputs.device)
-    heuristics = get_heuristics_class(sm_version=capability, device=inputs.device)
+    heuristics = get_heuristics_class(inputs.device)
     shape_m = inputs.numel() // inputs.size(-1)
     return heuristics.should_use_pdl_for_input(config, shape_m)
 

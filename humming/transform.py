@@ -4,8 +4,8 @@ import torch
 
 from humming import dtypes, ops
 from humming.config import LayerConfig, MmaType, WeightScale2Type, WeightScaleType
+from humming.device import DeviceInfo
 from humming.schema import HummingInputSchema, HummingWeightSchema
-from humming.utils.device import get_device_capability
 
 
 def prepare_layer_config(
@@ -20,12 +20,12 @@ def prepare_layer_config(
     torch_dtype: torch.dtype | None = None,
     device: int | torch.device | None = None,
 ) -> LayerConfig:
-    major, minor = get_device_capability(device)
-    sm_version = major * 10 + minor
+    info = DeviceInfo(device)
+    sm_version = info.sm_version
     if torch_dtype is None:
         torch_dtype = torch.get_default_dtype()
         if torch_dtype not in [torch.float16, torch.bfloat16]:
-            torch_dtype = torch.bfloat16 if major >= 8 else torch.float16
+            torch_dtype = torch.bfloat16 if info.sm_major >= 8 else torch.float16
 
     f16_dtype = dtypes.DataType.from_torch_dtype(torch_dtype)
     pad_shape_n = math.ceil(shape_n / pad_n_to_multiple) * pad_n_to_multiple - shape_n

@@ -5,11 +5,11 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-import torch
 from cuda.bindings import nvrtc
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
+from humming.device import current_device
 from humming.utils.cuda import filter_cuda_paths
 from humming.utils.nvrtc import get_nvrtc_library_path, may_build_nvrtc_compile_binary
 
@@ -25,8 +25,7 @@ class Compiler:
         )
         flags = [f"-DHUMMING_DEBUG_KERNEL={int(enabled)}"]
         if enabled:
-            clock_rate_khz = torch.cuda.get_device_properties().clock_rate
-            timeout_clocks = int(clock_rate_khz) * 1000 * 10
+            timeout_clocks = current_device.sm_clock_khz * 1000 * 10
             flags.append(f"-DHUMMING_DEBUG_KERNEL_TIMEOUT_CLOCKS={timeout_clocks}")
             flags.append("-lineinfo")
         return flags
