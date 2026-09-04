@@ -91,8 +91,8 @@ class IntegerType(DataType):
 
     def id(self):
         dtype_id = 1 * 1e7  # int type
-        dtype_id += self.num_bits * 1e5  # num_bits
-        dtype_id += self.is_signed * 1e4  # is_sign
+        dtype_id += self.is_signed * 1e6  # is_sign
+        dtype_id += self.num_bits * 1e4  # num_bits
         return int(dtype_id)
 
 
@@ -159,11 +159,11 @@ class FloatingPointType(DataType):
         return cls.from_str(dtype_str)
 
     def id(self):
-        dtype_id = 2 * 1e7  # int type
-        dtype_id += self.num_bits * 1e5  # num_bits
-        dtype_id += self.is_signed * 1e4  # is_sign
+        dtype_id = 2 * 1e7  # floating-point type
+        dtype_id += self.is_signed * 1e6  # is_sign
+        dtype_id += self.num_bits * 1e4  # num_bits
         dtype_id += self.exponent_bits * 1e2  # exp_bits
-        dtype_id += self.mantissa_bits  # num_bits
+        dtype_id += self.mantissa_bits  # mantissa bits
         return int(dtype_id)
 
 
@@ -198,6 +198,7 @@ float32 = FloatingPointType.from_str("float32")
 
 
 torch_dtype_map = {
+    int8: torch.int8,
     float8e8m0: torch.float8_e8m0fnu,
     float8e4m3: torch.float8_e4m3fn,
     float8e5m2: torch.float8_e5m2,

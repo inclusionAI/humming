@@ -4,6 +4,8 @@ import inspect
 import os
 import subprocess
 import sys
+import types
+import typing
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +19,67 @@ from humming.utils.cuda import filter_cuda_paths
 
 _libs = {}
 _launcher_inited = False
+
+
+def _is_optional_tensor(annotation) -> bool:
+    args = typing.get_args(annotation)
+    return len(args) == 2 and torch.Tensor in args and type(None) in args
+
+
+def _infer_op_schema(impl_func: Callable, mutates_args: list[str]) -> str:
+    """Infer an op schema, adding Optional[Tensor] output support missing in PyTorch."""
+    signature = inspect.signature(impl_func)
+    return_annotation = typing.get_type_hints(impl_func).get(
+        "return",
+        signature.return_annotation,
+    )
+    tuple_args = typing.get_args(return_annotation)
+    tuple_return = typing.get_origin(return_annotation) is tuple
+    optional_outputs = (
+        [_is_optional_tensor(arg) for arg in tuple_args]
+        if tuple_return
+        else [_is_optional_tensor(return_annotation)]
+    )
+    if not any(optional_outputs):
+        return torch.library.infer_schema(impl_func, mutates_args=mutates_args)
+
+    normalized_return = torch.Tensor
+    if tuple_return:
+        normalized_args = tuple(
+            torch.Tensor if optional else arg
+            for arg, optional in zip(tuple_args, optional_outputs, strict=True)
+        )
+        normalized_return = tuple[normalized_args]
+
+    def schema_prototype():
+        pass
+
+    prototype = types.FunctionType(
+        schema_prototype.__code__,
+        impl_func.__globals__,
+        impl_func.__name__,
+    )
+    prototype.__signature__ = signature.replace(return_annotation=normalized_return)
+    schema = torch.library.infer_schema(prototype, mutates_args=mutates_args)
+    arguments, returns = schema.rsplit(" -> ", 1)
+
+    if not tuple_return:
+        assert returns == "Tensor"
+        return f"{arguments} -> Tensor?"
+
+    if len(optional_outputs) == 1:
+        assert returns.startswith("((") and returns.endswith("))")
+        return_types = [returns[2:-2]]
+    else:
+        assert returns.startswith("(") and returns.endswith(")")
+        return_types = returns[1:-1].split(", ")
+    for index, optional in enumerate(optional_outputs):
+        if optional:
+            assert return_types[index] == "Tensor"
+            return_types[index] = "Tensor?"
+    if len(return_types) == 1:
+        return f"{arguments} -> (({return_types[0]}))"
+    return f"{arguments} -> ({', '.join(return_types)})"
 
 
 def _prepare_output(
@@ -59,7 +122,7 @@ def register_op(
     mutates_args: list[str] | None = None,
 ):
     def decorator(impl_func: Callable):
-        schema_str = torch.library.infer_schema(impl_func, mutates_args=mutates_args or [])
+        schema_str = _infer_op_schema(impl_func, mutates_args or [])
         lib_name, op_name = name.split("::")
         first_arg_name = next(iter(inspect.signature(impl_func).parameters))
 

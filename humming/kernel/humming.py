@@ -1,8 +1,6 @@
 import dataclasses
 import functools
 import json
-import os
-from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
 import jinja2
@@ -122,8 +120,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         self.mma_op_class = self.select_mma_op_class()
 
         assert self.bs_dtype is not None
-        self.code = CODE_TEMPLATE.render(
-            use_warp_spec=int(self.use_warp_spec or False),
+        template_args = self.to_template_args()
+        template_args.update(
             mma_op_class=self.mma_op_class.to_cpp_str(),
             problem_shape=self.problem_shape,
             pad_shape=self.pad_shape,
@@ -138,11 +136,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             layer_config_macro=self.to_macro_cpp_str(LayerConfig),
             compute_config_macro=self.to_macro_cpp_str(ComputeConfig),
             tuning_config_macro=self.to_macro_cpp_str(TuningConfig),
-            a_dtype=self.a_dtype.to_cpp_str(),
-            b_dtype=self.b_dtype.to_cpp_str(),
-            c_dtype=self.c_dtype.to_cpp_str(),
-            bs_dtype=self.bs_dtype.to_cpp_str(),
         )
+        self.code = CODE_TEMPLATE.render(**template_args)
         self.kernel_expr = (
             f"humming<\n"
             f"    MmaOpClass,\n"
@@ -527,23 +522,19 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             cls._str2kernel_cache[cache_key] = res
             return res
 
-        def prepare_kernel(data):
-            _, _, tuning_config_obj_single = data
+        kernel_specs = []
+        interval_configs = []
+        for interval_config in tuning_config_obj:
+            _, _, tuning_config_obj_single = interval_config
             kernel_config = layer_config_obj | compute_config_obj | tuning_config_obj_single
             num_sms = kernel_config.pop("num_sms", 0)
-            with torch.cuda.device(device_index):
-                kernel = HummingKernel(**kernel_config)
-            return data, kernel, num_sms
+            kernel_specs.append((cls, kernel_config))
+            interval_configs.append((interval_config, num_sms))
 
         res = []
-        if os.environ.get("HUMMING_DISABLE_PARALLEL_BUILD", "0") != "1":
-            with ThreadPoolExecutor(max_workers=16) as executor:
-                for config, kernel, num_sms in executor.map(prepare_kernel, tuning_config_obj):
-                    res += [config[0], config[1], kernel.kernel_id, num_sms]
-        else:
-            for config in tuning_config_obj:
-                _, kernel, num_sms = prepare_kernel(config)
-                res += [config[0], config[1], kernel.kernel_id, num_sms]
+        kernels = cls.compile_many(kernel_specs, device_index)
+        for (config, num_sms), kernel in zip(interval_configs, kernels, strict=True):
+            res += [config[0], config[1], kernel.kernel_id, num_sms]
 
         res = torch.tensor(res, dtype=torch.int64, device="cpu")
         cls._str2kernel_cache[cache_key] = res

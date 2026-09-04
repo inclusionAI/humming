@@ -11,6 +11,7 @@
 
 #include "./elf.h"
 #include "./mapped_file.h"
+#include "./process_input.h"
 #include "./tensor.h"
 #include "./torch_api.h"
 #include "./utils.h"
@@ -26,41 +27,6 @@ static std::shared_mutex g_kernel_mutex;
 static std::unordered_map<std::string, std::tuple<int64_t, std::string>> g_path_ids;
 static std::unordered_map<int64_t, RegisteredKernel> g_registered_kernels;
 static std::unordered_map<CUcontext, std::unordered_map<int64_t, LoadedKernel>> g_loaded_kernels;
-
-class DeviceContextGuard {
- public:
-  explicit DeviceContextGuard(int64_t dev) {
-    check_curesult(cuDeviceGet(&device_, dev), "cuDeviceGet");
-    CUcontext current_context;
-    check_curesult(cuCtxGetCurrent(&current_context), "cuCtxGetCurrent");
-    if (current_context != nullptr) {
-      CUdevice current_device;
-      check_curesult(cuCtxGetDevice(&current_device), "cuCtxGetDevice");
-      if (current_device == device_) return;
-    }
-    check_curesult(cuDevicePrimaryCtxRetain(&context_, device_), "cuDevicePrimaryCtxRetain");
-    check_curesult(cuCtxPushCurrent(context_), "cuCtxPushCurrent");
-    active_ = true;
-  }
-
-  ~DeviceContextGuard() {
-    if (!active_) return;
-    CUcontext context;
-    cuCtxPopCurrent(&context);
-    cuDevicePrimaryCtxRelease(device_);
-  }
-
- private:
-  CUdevice device_;
-  CUcontext context_;
-  bool active_ = false;
-};
-
-inline CUcontext get_current_context() {
-  CUcontext context;
-  check_curesult(cuCtxGetCurrent(&context), "cuCtxGetCurrent");
-  return context;
-}
 
 inline int64_t find_kernel_configs_target_index(IntArrayRef &configs, int64_t shape_m) {
   size_t n = configs.size();
@@ -132,16 +98,6 @@ inline KernelLaunchData find_kernel_launch_data(IntArrayRef &configs, int64_t sh
   KernelLaunchData kernel_launch_data = {metadata, kernel.func, num_sms};
   return kernel_launch_data;
 };
-
-inline CUstream get_current_cuda_stream(int64_t dev) {
-#if USE_TORCH_STABLE_API
-  void *stream_ptr = nullptr;
-  aoti_torch_get_current_cuda_stream(dev, &stream_ptr);
-  return static_cast<CUstream>(stream_ptr);
-#else
-  return at::cuda::getCurrentCUDAStream(dev);
-#endif
-}
 
 inline int64_t get_num_sms(int64_t num_sms, int64_t dev) {
   if (num_sms > 0) return num_sms;
@@ -441,19 +397,32 @@ COMMON_TORCH_LIBRARY(humming, m) {
       "Tensor? sorted_ids, Tensor? expert_ids, Tensor? num_tokens_padded, Tensor? expert_layout, "
       "Tensor(b!) locks, SymInt top_k, SymInt valid_shape_m, bool should_check_tensor = True) -> ()");
   m.def("register_kernel(str cubin_path) -> (int, str)");
+  m.def("register_process_input_kernel(str cubin_path) -> (int, str)");
   m.def("get_kernel_smem_size(int kernel_id) -> int");
+  m.def(
+      "launch_process_input(Tensor configs, Tensor inputs, Tensor(a!) outputs, "
+      "Tensor(b!)? group_scales, Tensor(c!)? token_scales, Tensor? expert_layout, "
+      "Tensor? indices) -> ()");
+  m.def(
+      "launch_process_input.inplace(Tensor configs, Tensor(a!) inputs, "
+      "Tensor? expert_layout, Tensor? indices) -> ()");
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, CUDA, m) {
   m.impl("launch_kernel", COMMON_TORCH_BOX(&launch_kernel));
+  m.impl("launch_process_input", COMMON_TORCH_BOX(&launch_process_input));
+  m.impl("launch_process_input.inplace", COMMON_TORCH_BOX(&launch_process_input_inplace));
   m.impl("launch_kernel.out", COMMON_TORCH_BOX(&launch_kernel_out));
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, Undefined, m) {
   m.impl("register_kernel", COMMON_TORCH_BOX(&register_kernel));
+  m.impl("register_process_input_kernel", COMMON_TORCH_BOX(&register_process_input_kernel));
   m.impl("get_kernel_smem_size", COMMON_TORCH_BOX(&get_kernel_smem_size));
 };
 
 COMMON_TORCH_LIBRARY_IMPL(humming, Meta, m) {
   m.impl("launch_kernel.out", COMMON_TORCH_BOX(&launch_kernel_out));
+  m.impl("launch_process_input", COMMON_TORCH_BOX(&launch_process_input));
+  m.impl("launch_process_input.inplace", COMMON_TORCH_BOX(&launch_process_input_inplace));
 };

@@ -1,6 +1,7 @@
 import dataclasses
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ClassVar
 
 import cuda.bindings.driver as cbd
@@ -97,6 +98,28 @@ class KernelRuntime:
             postprocess_cubin=self.postprocess_cubin,
         )
         self.kernel_filename = kernel_filename
+
+    @staticmethod
+    def compile_many(kernel_specs, device=None):
+        device = torch.cuda.current_device() if device is None else device
+
+        def compile_kernel(spec):
+            kernel_type, kernel_args = spec
+            with torch.cuda.device(device):
+                return kernel_type(**kernel_args)
+
+        kernel_specs = list(kernel_specs)
+        parallel = len(kernel_specs) > 1
+        parallel &= os.environ.get("HUMMING_DISABLE_PARALLEL_BUILD", "0") != "1"
+        if parallel:
+            workers = min(16, len(kernel_specs))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+            ) as executor:
+                kernels = list(executor.map(compile_kernel, kernel_specs))
+        else:
+            kernels = [compile_kernel(spec) for spec in kernel_specs]
+        return kernels
 
     def postprocess_cubin(self, cubin_path: str):
         pass

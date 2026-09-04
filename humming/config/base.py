@@ -25,6 +25,8 @@ def name_value_to_google_cpp_const_style(name: str, value: Any, keep_name: bool 
         value = str(value) + "f"
     elif isinstance(value, int):
         value = str(value) + "u"
+    elif isinstance(value, Enum):
+        value = f"{value.__class__.__name__}::{value.name.removesuffix('_')}"
     else:
         value = str(value).replace(".", "::")
 
@@ -54,6 +56,19 @@ class BaseHummingConfig:
 
     def __post_init__(self):
         pass
+
+    def to_template_args(self) -> dict[str, Any]:
+        template_args = {}
+        for field in dataclasses.fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, bool):
+                value = int(value)
+            elif isinstance(value, Enum):
+                value = value.name
+            elif isinstance(value, dtypes.DataType):
+                value = value.to_cpp_str()
+            template_args[field.name] = value
+        return template_args
 
     def to_cpp_str(
         self,

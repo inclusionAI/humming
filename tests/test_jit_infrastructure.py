@@ -142,19 +142,34 @@ def test_launcher_runs_device_local_kernels():
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
 def test_kernel_runtime_instances_are_context_local():
-    from humming.kernel.hadamard import HadamardKernel
-    from humming.ops import hadamard_transform
+    from humming import dtypes
+    from humming.kernel.process_input import ProcessInputKernel
+    from humming.ops import process_input
+
+    def make_kernel():
+        return ProcessInputKernel(
+            source_dtype=dtypes.float32,
+            target_dtype=dtypes.float32,
+            hidden_size=32,
+            quant_group_size=32,
+            hadamard_block_size=32,
+            threads_per_task=32,
+            values_per_thread=1,
+            quant_mode="none",
+            use_tile_partition=True,
+            tile_size=32,
+        )
 
     values = torch.randn((2, 32), dtype=torch.float32)
     input0 = values.to("cuda:0")
     input1 = values.to("cuda:1")
 
     with torch.cuda.device(0):
-        output0 = hadamard_transform(input0, block_size=32)
-        kernel0 = HadamardKernel(torch_dtype=torch.float32, block_size=32, has_scale=False)
+        output0 = process_input(input0, hadamard_block_size=32)[0]
+        kernel0 = make_kernel()
     with torch.cuda.device(1):
-        output1 = hadamard_transform(input1, block_size=32)
-        kernel1 = HadamardKernel(torch_dtype=torch.float32, block_size=32, has_scale=False)
+        output1 = process_input(input1, hadamard_block_size=32)[0]
+        kernel1 = make_kernel()
 
     assert kernel0 is not kernel1
     torch.testing.assert_close(output0.cpu(), output1.cpu(), rtol=0, atol=0)

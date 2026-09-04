@@ -6,7 +6,8 @@ import vllm._custom_ops as vllm_ops
 from tqdm import tqdm
 from vllm.scalar_type import scalar_types
 
-from humming import dtypes, ops
+from humming import dtypes
+from humming.forward import may_quant_input
 from humming.layer import HummingLayer
 from humming.testing import (
     generate_random_moe_tensors,
@@ -79,7 +80,8 @@ def bench_marlin(
 
         input_scale: torch.Tensor | None = None
         if a_dtype not in ["float16", "bfloat16"]:
-            inputs, input_scale = ops.quant_input(inputs, a_dtype)
+            assert layer.humming_config is not None
+            inputs, input_scale = may_quant_input(layer.humming_config, inputs)
 
         if num_experts is not None:
             for block_size_m in [8, 16, 32, 48, 64]:
