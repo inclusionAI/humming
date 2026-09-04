@@ -7,6 +7,7 @@ import cuda.bindings.driver as cbd
 import torch
 
 from humming import dtypes
+from humming.device import current_device
 from humming.jit.compiler import NVCCCompiler, NVRTCCompiler
 from humming.utils.cubin import get_cubin_kernel_names
 
@@ -26,7 +27,7 @@ class KernelRuntime:
 
         args_items = tuple(get_value(x) for x in args)
         kwargs_items = tuple((key, get_value(kwargs[key])) for key in sorted(kwargs.keys()))
-        signature = (cls.__name__, torch.cuda.current_device(), args_items + kwargs_items)
+        signature = (cls.__name__, current_device.index, args_items + kwargs_items)
 
         if signature not in cls._instances or not cls._instances[signature].inited:
             instance = super().__new__(cls)
@@ -52,10 +53,8 @@ class KernelRuntime:
         raise NotImplementedError
 
     def init_sm_version(self):
-        device_props = torch.cuda.get_device_properties()
-        sm_version = device_props.major * 10 + device_props.minor
-        self.sm_version = sm_version
-        self.sm_version_str = str(sm_version)
+        self.sm_version = current_device.sm_version
+        self.sm_version_str = str(self.sm_version)
         if self.sm_version >= 90:
             self.sm_version_str += "a"
 

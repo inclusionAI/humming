@@ -3,6 +3,7 @@ import functools
 import torch
 
 from humming.config import GemmType, LayerConfig
+from humming.device import DeviceInfo, get_device_index
 from humming.tune.base import DeviceHeuristics
 from humming.tune.raster import raster_group_m_for_config
 from humming.tune.sm8x import (
@@ -17,7 +18,6 @@ from humming.tune.sm90_h20 import Sm90H20Heuristics
 from humming.tune.sm100 import Sm100Heuristics
 from humming.tune.sm120 import Sm120Heuristics
 from humming.tune.sm121 import Sm121Heuristics
-from humming.utils.device import get_device_index
 
 heuristics_map: dict[int, type[DeviceHeuristics]] = {
     75: Sm75Heuristics,
@@ -28,26 +28,25 @@ heuristics_map: dict[int, type[DeviceHeuristics]] = {
     90: Sm90Heuristics,
     100: Sm100Heuristics,
     103: Sm100Heuristics,
+    110: Sm100Heuristics,
     120: Sm120Heuristics,
     121: Sm121Heuristics,
 }
 
 
-def get_heuristics_class(
-    sm_version: int | tuple[int, int] | None = None,
-    device: int | torch.device | None = None,
-) -> type[DeviceHeuristics]:
-    if sm_version is None:
-        sm_version = torch.cuda.get_device_capability(device)
-    if isinstance(sm_version, tuple):
-        sm_version = sm_version[0] * 10 + sm_version[1]
-    assert isinstance(sm_version, int)
+def get_heuristics_class(device: int | torch.device | None = None) -> type[DeviceHeuristics]:
+    info = DeviceInfo(device)
+    sm_version = info.sm_version
     if sm_version == 90:
-        name = torch.cuda.get_device_name(device)
-        if "H20" in name and "H200" not in name:
+        if "H20" in info.name and "H200" not in info.name:
             return Sm90H20Heuristics
 
-    return heuristics_map[sm_version]
+    if sm_version in heuristics_map:
+        return heuristics_map[sm_version]
+
+    sm_version_base = sm_version // 10 * 10
+
+    return heuristics_map[sm_version_base]
 
 
 def _apply_m_major_input_scale(

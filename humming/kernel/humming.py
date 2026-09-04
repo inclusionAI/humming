@@ -18,9 +18,9 @@ from humming.config import (
     MmaType,
     TuningConfig,
 )
+from humming.device import get_device_index
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
-from humming.utils.device import get_device_index
 from humming.utils.smem import estimate_smem_size_config
 
 CODE_TEMPLATE = jinja2.Template("""
@@ -507,12 +507,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         layer_config_str = cls._prepare_config_str(layer_config)
         compute_config_str = cls._prepare_config_str(compute_config)
         tuning_config_str = cls._prepare_config_str(tuning_config)
-        cache_key = (
-            layer_config_str,
-            compute_config_str,
-            tuning_config_str,
-            device_index,
-        )
+        cache_key = (layer_config_str, compute_config_str, tuning_config_str, device_index)
         if cache_key in cls._str2kernel_cache:
             return cls._str2kernel_cache[cache_key]
 

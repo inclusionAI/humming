@@ -14,7 +14,6 @@ dependencies = [
     "numpy",
     "safetensors",
     "jinja2",
-    "nvidia-ml-py",
     "cuda-bindings",
     "tqdm",
     "tabulate"
@@ -45,7 +44,18 @@ include-package-data = true
 packages = {find = {include = ["humming", "humming.*"]}}
 
 [tool.setuptools.package-data]
-"*" = ["**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cc", "**/*.so", "_native/*/nvrtc_compile", "_native/*/manifest.json"]
+"*" = [
+    "**/*.cu",
+    "**/*.cuh",
+    "**/*.cpp",
+    "**/*.h",
+    "**/*.hpp",
+    "**/*.cc",
+    "**/*.so",
+    "**/*.pyi",
+    "_native/*/nvrtc_compile",
+    "_native/*/manifest.json",
+]
 
 [tool.ruff]
 line-length = 110

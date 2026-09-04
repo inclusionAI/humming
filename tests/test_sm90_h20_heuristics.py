@@ -2,12 +2,13 @@ import pytest
 
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType
+from humming.device import DeviceInfo
 from humming.tune.sm90_h20 import Sm90H20Heuristics
 
 
 @pytest.fixture(autouse=True)
 def _h20_num_sms(monkeypatch):
-    monkeypatch.setattr(Sm90H20Heuristics, "get_num_sms", classmethod(lambda cls: 78))
+    monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: 78))
 
 
 def _layer(shape_n: int, shape_k: int, num_experts: int = 0) -> LayerConfig:

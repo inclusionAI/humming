@@ -1,5 +1,6 @@
 from humming import dtypes
 from humming.config import GemmType, LayerConfig
+from humming.device import current_device
 from humming.tune.base import DeviceHeuristics
 from humming.tune.candidate import (
     DeviceProfile,
@@ -33,7 +34,7 @@ class Sm90Heuristics(DeviceHeuristics):
         return DeviceProfile(
             name=f"sm{cls.sm_version}",
             sm_version=cls.sm_version,
-            num_sms=cls.get_num_sms() if include_grid_size else None,
+            num_sms=current_device.sm_count if include_grid_size else None,
             max_smem_size=cls.max_smem_size,
         )
 

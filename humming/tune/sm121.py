@@ -1,3 +1,4 @@
+from humming.device import current_device
 from humming.tune.sm120 import Sm120Heuristics
 
 
@@ -21,7 +22,7 @@ class Sm121Heuristics(Sm120Heuristics):
         num_n_blocks = (layer_config.shape_n + block_n - 1) // block_n
         num_m_blocks = (shape_m + block_m - 1) // block_m
         num_output_tiles = num_n_blocks * num_m_blocks
-        num_sms = cls.get_num_sms()
+        num_sms = current_device.sm_count
         if num_output_tiles * 3 < num_sms or num_output_tiles >= num_sms:
             return True
         if block_m <= 16 and num_output_tiles * 3 >= num_sms * 2:

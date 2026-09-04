@@ -1,18 +1,20 @@
-import torch
 import triton
 
 from humming import dtypes
+from humming.device import current_device
 from humming.kernel.tops_bench import TopsBenchKernel
 
 
 def tops_bench(dtype: str, mma_type: str | None = None, use_f16_accum: bool = False) -> int:
     if mma_type is None:
-        mma_type = "wgmma" if torch.cuda.get_device_capability()[0] == 9 else "mma"
+        mma_type = "wgmma" if current_device.sm_major == 9 else "mma"
 
     if mma_type == "mma":
-        mma_shape_m = 16
+        mma_shape_m = 8 if current_device.sm_version == 75 and dtype != "float16" else 16
         mma_shape_n = 8
-        mma_shape_k = 256 // dtypes.DataType.from_str(dtype).num_bits
+        mma_k_bits = 128 if current_device.sm_version == 75 else 256
+        dtype_bits = dtypes.DataType.from_str(dtype).num_bits
+        mma_shape_k = mma_k_bits // dtype_bits
     else:
         mma_shape_m = 64
         mma_shape_n = 256

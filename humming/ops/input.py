@@ -4,6 +4,7 @@ import triton.language as tl
 from torch._subclasses.fake_tensor import FakeTensor
 from triton.language.extra.cuda import gdc_wait
 
+from humming.device import DeviceInfo
 from humming.ops.utils import (
     _prepare_output,
     _prepare_output_arg,
@@ -361,7 +362,7 @@ def _quant_input_op(
             mx_pack_m_major,
         )
 
-        effective_use_pdl = use_pdl and torch.cuda.get_device_capability(inputs.device)[0] >= 9
+        effective_use_pdl = use_pdl and DeviceInfo(inputs.device).sm_major >= 9
         launch_kwargs = dict(
             num_warps=num_warps,
             num_stages=num_stages,

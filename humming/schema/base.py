@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import torch
 
 from humming import dtypes
+from humming.device import current_device
 
 if TYPE_CHECKING:
     from humming.schema.humming import HummingInputSchema, HummingWeightSchema
@@ -235,7 +236,7 @@ class BaseInputSchema:
         sm_version: int | tuple[int, int] | None = None,
     ) -> dtypes.DataType | None:
         if sm_version is None:
-            sm_version = torch.cuda.get_device_capability()
+            sm_version = current_device.sm_version
         if isinstance(sm_version, tuple):
             sm_version = sm_version[0] * 10 + sm_version[1]
         assert isinstance(sm_version, int)

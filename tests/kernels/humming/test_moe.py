@@ -2,6 +2,7 @@ import pytest
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
+from humming.device import DeviceInfo
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -129,11 +130,7 @@ def test_sm90_indexed_a16_fits_ctas_to_resources_and_grid(monkeypatch):
         weight_scale_group_size=128,
         mma_type=MmaType.WGMMA,
     )
-    monkeypatch.setattr(
-        Sm90Heuristics,
-        "get_num_sms",
-        classmethod(lambda cls: 132),
-    )
+    monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: 132))
 
     config = Sm90Heuristics.get_config(
         layer_config,

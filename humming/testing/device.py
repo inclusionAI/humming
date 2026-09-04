@@ -1,6 +1,7 @@
 import torch
 
 from humming import dtypes
+from humming.device import current_device
 
 _A_DTYPE_MIN_SM = {
     dtypes.int4: 80,
@@ -13,16 +14,6 @@ _A_DTYPE_MIN_SM = {
     dtypes.bfloat16: 80,
     dtypes.float16: 75,
 }
-
-
-def _current_sm_version() -> int:
-    import pytest
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-    major, minor = torch.cuda.get_device_capability()
-    return major * 10 + minor
-
 
 def _coerce_dtype(value):
     if value is None or isinstance(value, dtypes.DataType):
@@ -41,7 +32,10 @@ def skip_if_unsupported(
     """Skip a test whose hardware requirements aren't met by the current GPU."""
     import pytest
 
-    sm = _current_sm_version()
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    sm = current_device.sm_version
 
     if mma_type == "wgmma" and sm != 90:
         pytest.skip(f"wgmma requires SM90, current SM is {sm}")

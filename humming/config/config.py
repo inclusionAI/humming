@@ -8,6 +8,7 @@ import torch
 from humming import dtypes
 from humming.config.base import BaseHummingConfig
 from humming.config.enum import GemmType, MmaType, WeightScale2Type, WeightScaleType
+from humming.device import DeviceInfo, current_device
 
 
 @functools.cache
@@ -131,8 +132,7 @@ class LayerConfig(BaseHummingConfig):
 
     def __post_init__(self):
         if self.sm_version is None:
-            major, minor = torch.cuda.get_device_capability()
-            self.sm_version = major * 10 + minor
+            self.sm_version = current_device.sm_version
 
         self.problem_shape = (0, self.shape_n, self.shape_k)
         self.pad_shape = (0, self.pad_shape_n, self.pad_shape_k)
@@ -283,24 +283,12 @@ class LayerConfig(BaseHummingConfig):
         super().__setattr__(name, value)
 
     def check_device(self, device: int | torch.device) -> None:
-        major, minor = torch.cuda.get_device_capability(device)
-        actual_sm = major * 10 + minor
+        actual_sm = DeviceInfo(device).sm_version
         if actual_sm != self.sm_version:
             raise RuntimeError(
                 f"LayerConfig targets sm{self.sm_version}, but the input is on sm{actual_sm}; "
                 "transform the layer separately for each GPU architecture"
             )
-
-    def estimate_bound_min_shape_m(self, use_f16_accum: bool = False):
-        from humming.utils.device import estimate_compute_bound_threshold
-
-        return estimate_compute_bound_threshold(
-            weight_nbytes=self.weight_nbytes // (self.num_experts or 1),
-            shape_n=self.shape_n,
-            shape_k=self.shape_k,
-            dtype=str(self.a_dtype),
-            use_f16_accum=use_f16_accum,
-        )
 
     @property
     def mma_type_id(self):
@@ -442,8 +430,7 @@ class TuningConfig(BaseHummingConfig):
             self.use_mbarrier = self.use_tma or self.use_warp_spec
 
         if self.use_cp_async is None:
-            sm_version = torch.cuda.get_device_capability()
-            self.use_cp_async = sm_version[0] >= 8
+            self.use_cp_async = current_device.sm_major >= 8
 
         self.num_math_threads = math.prod(self.block_shape) // math.prod(self.warp_shape) * 32
         if self.use_warp_spec:

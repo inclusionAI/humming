@@ -1,7 +1,5 @@
 """Build native artifacts shipped in Humming wheels."""
 
-from __future__ import annotations
-
 import os
 import shutil
 import subprocess
@@ -13,6 +11,7 @@ import torch
 from torch.utils.cpp_extension import include_paths
 
 from humming.utils.cubin import build_cubin_patcher
+from humming.utils.device import build_device_info_extension
 from humming.utils.jit import get_native_arch, write_precompiled_artifact_manifest
 from humming.utils.nvrtc import build_nvrtc_compile_binary
 
@@ -52,44 +51,43 @@ def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
-def build_launcher(output: Path, compiler: str) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
+def _build_cuda_stub(output_dir: Path) -> None:
+    empty_source = output_dir / "empty.c"
+    cuda_stub = output_dir / "libcuda.so"
+    empty_source.write_text("void humming_cuda_stub(void) {}\n")
+    _run(["cc", "-shared", str(empty_source), "-Wl,-soname,libcuda.so.1", "-o", str(cuda_stub)])
+
+
+def build_launcher(output: Path, compiler: str, cuda_library_dir: Path) -> None:
     cuda_include = _find_cuda_include()
     torch_cpu = _torch_library("libtorch_cpu.so")
     torch_cuda = _torch_library("libtorch_cuda.so")
 
-    with tempfile.TemporaryDirectory(prefix="humming-link-") as temporary_dir:
-        temporary = Path(temporary_dir)
-        empty_source = temporary / "empty.c"
-        cuda_stub = temporary / "libcuda.so"
-        empty_source.write_text("void humming_cuda_stub(void) {}\n")
-        _run(["cc", "-shared", str(empty_source), "-Wl,-soname,libcuda.so.1", "-o", str(cuda_stub)])
-
-        command = [
-            compiler,
-            "-std=c++17",
-            "-O3",
-            "-fPIC",
-            "-shared",
-            "-DUSE_TORCH_STABLE_API=1",
-            f"-DTORCH_TARGET_VERSION={TARGET_TORCH_VERSION}",
-            str(ROOT / "humming/csrc/launcher/launcher.cpp"),
-            "-o",
-            str(output),
-        ]
-        command.extend(f"-I{path}" for path in include_paths())
-        command.extend((f"-I{cuda_include}", f"-L{temporary}"))
-        command.extend(
-            (
-                "-Wl,--no-as-needed",
-                "-lcuda",
-                str(torch_cpu),
-                str(torch_cuda),
-                "-Wl,-rpath,$ORIGIN/../../../torch/lib",
-                "-Wl,--as-needed",
-            )
+    command = [
+        compiler,
+        "-std=c++17",
+        "-O3",
+        "-fPIC",
+        "-shared",
+        "-DUSE_TORCH_STABLE_API=1",
+        f"-DTORCH_TARGET_VERSION={TARGET_TORCH_VERSION}",
+        str(ROOT / "humming/csrc/launcher/launcher.cpp"),
+        "-o",
+        str(output),
+    ]
+    command.extend(f"-I{path}" for path in include_paths())
+    command.extend((f"-I{cuda_include}", f"-L{cuda_library_dir}"))
+    command.extend(
+        (
+            "-Wl,--no-as-needed",
+            "-lcuda",
+            str(torch_cpu),
+            str(torch_cuda),
+            "-Wl,-rpath,$ORIGIN/../../../torch/lib",
+            "-Wl,--as-needed",
         )
-        _run(command)
+    )
+    _run(command)
 
     print(f"Built {output} for {_architecture()} with torch {torch.__version__}")
 
@@ -103,7 +101,12 @@ def build_native(output_dir: str | Path | None = None) -> Path:
         if output_dir is not None
         else ROOT / "humming" / "_native" / _architecture()
     )
-    build_launcher(native_dir / "libhumming_launcher.so", compiler)
+    native_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="humming-link-") as temporary_dir:
+        cuda_library_dir = Path(temporary_dir)
+        _build_cuda_stub(cuda_library_dir)
+        build_launcher(native_dir / "libhumming_launcher.so", compiler, cuda_library_dir)
+        build_device_info_extension(native_dir / "_device_info.abi3.so", compiler, cuda_library_dir)
     build_cubin_patcher(native_dir / "libcubinpatch.so", compiler=compiler)
     build_nvrtc_compile_binary(native_dir / "nvrtc_compile", compiler=compiler)
     write_precompiled_artifact_manifest(
@@ -112,6 +115,7 @@ def build_native(output_dir: str | Path | None = None) -> Path:
             "libhumming_launcher.so": ROOT / "humming/csrc/launcher",
             "libcubinpatch.so": ROOT / "humming/csrc/patch_cubin.cpp",
             "nvrtc_compile": ROOT / "humming/csrc/nvrtc_compile.cpp",
+            "_device_info.abi3.so": ROOT / "humming/csrc/device_info.cpp",
         },
     )
     return native_dir

@@ -11,6 +11,7 @@ from filelock import FileLock
 import humming.utils.jit as jit_utils
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
+from humming.device import current_device
 from humming.kernel.humming import HummingKernel
 from humming.schema import HummingWeightSchema
 from humming.testing.data import (
@@ -560,7 +561,7 @@ class KernelTestRunner:
             "tuning_source": os.environ.get(TEST_TUNING_SOURCE_ENV, "heuristic"),
             "tuning_index": tuning_index,
             "tuning_config": tuning_values,
-            "device": torch.cuda.get_device_name(),
+            "device": current_device.name,
             "error": str(error),
         }
         line = json.dumps(record, default=str, sort_keys=True)
@@ -576,5 +577,5 @@ class KernelTestRunner:
             f"\nlayer_config={self.layer_config.to_str()}"
             f"\ncompute_config={self.compute_config.to_str()}"
             f"\ntuning_config={json.dumps(tuning_values)}"
-            f"\ndevice={torch.cuda.get_device_name()}"
+            f"\ndevice={current_device.name}"
         )
