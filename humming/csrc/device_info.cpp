@@ -212,24 +212,21 @@ bool query_device_data(int64_t device_index, DeviceData *info) {
   info->index = device_index;
 
   CUdevice device;
-  bool success = check_cuda(cuDeviceGet(&device, device_index), "cuDeviceGet");
-  success = success && check_cuda(cuDeviceGetName(info->name, sizeof(info->name), device), "cuDeviceGetName");
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, &info->sm_count);
-  success = success &&
-      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK, &info->max_threads_per_block);
-  success = success &&
-      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, &info->max_threads_per_sm);
-  success = success &&
-      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, &info->max_registers_per_sm);
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, &info->sm_major);
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, &info->sm_minor);
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE, &info->l2_cache_size);
-  success = success &&
-      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, &info->default_smem_size);
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, &info->max_smem_size);
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, &info->memory_clock_khz);
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH, &info->memory_bus_width);
-  success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, &info->sm_clock_khz);
+  bool success =
+      check_cuda(cuDeviceGet(&device, device_index), "cuDeviceGet") &&
+      check_cuda(cuDeviceGetName(info->name, sizeof(info->name), device), "cuDeviceGetName") &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, &info->sm_count) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK, &info->max_threads_per_block) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, &info->max_threads_per_sm) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, &info->max_registers_per_sm) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, &info->sm_major) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, &info->sm_minor) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE, &info->l2_cache_size) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, &info->default_smem_size) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, &info->max_smem_size) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, &info->memory_clock_khz) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH, &info->memory_bus_width) &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, &info->sm_clock_khz);
   if (!success) return false;
 
   int64_t sm_version = info->sm_major * 10 + info->sm_minor;
@@ -238,8 +235,7 @@ bool query_device_data(int64_t device_index, DeviceData *info) {
   // memory clock and require the usual DDR factor of two.
   int64_t memory_clock_multiplier = sm_version == 121 ? 1 : 2;
   info->memory_bandwidth_gbps = info->memory_clock_khz * memory_clock_multiplier * info->memory_bus_width / 8.0 / 1e6;
-  info->base_tensorcore_tops =
-      info->sm_count * get_fp16_tensorcore_ops_per_clock(sm_version) * info->sm_clock_khz / 1e9;
+  info->base_tensorcore_tops = info->sm_count * get_fp16_tensorcore_ops_per_clock(sm_version) * info->sm_clock_khz / 1e9;
   return true;
 }
 
