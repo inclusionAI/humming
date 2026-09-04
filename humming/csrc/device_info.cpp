@@ -11,12 +11,14 @@ struct DeviceData {
   int64_t index;
   char name[256];
   int64_t sm_count;
+  int64_t max_threads_per_block;
   int64_t max_threads_per_sm;
   int64_t max_registers_per_sm;
   int64_t sm_major;
   int64_t sm_minor;
   int64_t l2_cache_size;
   int64_t l1_cache_size;
+  int64_t default_smem_size;
   int64_t max_smem_size;
   int64_t memory_clock_khz;
   int64_t memory_bus_width;
@@ -29,6 +31,7 @@ enum DeviceAttribute : uint32_t {
   INDEX,
   NAME,
   SM_COUNT,
+  MAX_THREADS_PER_BLOCK,
   MAX_THREADS_PER_SM,
   MAX_REGISTERS_PER_SM,
   SM_MAJOR,
@@ -38,6 +41,7 @@ enum DeviceAttribute : uint32_t {
   L2_CACHE_SIZE_MB,
   L1_CACHE_SIZE,
   L1_CACHE_SIZE_KB,
+  DEFAULT_SMEM_SIZE,
   MAX_SMEM_SIZE,
   MAX_SMEM_SIZE_KB,
   MEMORY_CLOCK_KHZ,
@@ -212,12 +216,16 @@ bool query_device_data(int64_t device_index, DeviceData *info) {
   success = success && check_cuda(cuDeviceGetName(info->name, sizeof(info->name), device), "cuDeviceGetName");
   success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, &info->sm_count);
   success = success &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK, &info->max_threads_per_block);
+  success = success &&
       get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, &info->max_threads_per_sm);
   success = success &&
       get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, &info->max_registers_per_sm);
   success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, &info->sm_major);
   success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, &info->sm_minor);
   success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE, &info->l2_cache_size);
+  success = success &&
+      get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, &info->default_smem_size);
   success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, &info->max_smem_size);
   success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, &info->memory_clock_khz);
   success = success && get_attribute(device, CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH, &info->memory_bus_width);
@@ -240,6 +248,7 @@ PyObject *make_attribute_value(const DeviceData &info, DeviceAttribute attribute
     case INDEX: return PyLong_FromLongLong(info.index);
     case NAME: return PyUnicode_FromString(info.name);
     case SM_COUNT: return PyLong_FromLongLong(info.sm_count);
+    case MAX_THREADS_PER_BLOCK: return PyLong_FromLongLong(info.max_threads_per_block);
     case MAX_THREADS_PER_SM: return PyLong_FromLongLong(info.max_threads_per_sm);
     case MAX_REGISTERS_PER_SM: return PyLong_FromLongLong(info.max_registers_per_sm);
     case SM_MAJOR: return PyLong_FromLongLong(info.sm_major);
@@ -249,6 +258,7 @@ PyObject *make_attribute_value(const DeviceData &info, DeviceAttribute attribute
     case L2_CACHE_SIZE_MB: return PyFloat_FromDouble(info.l2_cache_size / 1024.0 / 1024.0);
     case L1_CACHE_SIZE: return PyLong_FromLongLong(info.l1_cache_size);
     case L1_CACHE_SIZE_KB: return PyFloat_FromDouble(info.l1_cache_size / 1024.0);
+    case DEFAULT_SMEM_SIZE: return PyLong_FromLongLong(info.default_smem_size);
     case MAX_SMEM_SIZE: return PyLong_FromLongLong(info.max_smem_size);
     case MAX_SMEM_SIZE_KB: return PyFloat_FromDouble(info.max_smem_size / 1024.0);
     case MEMORY_CLOCK_KHZ: return PyLong_FromLongLong(info.memory_clock_khz);
@@ -374,14 +384,17 @@ PyObject *format_device_info(PyDeviceInfo *self) {
     }
   }
   PyObject *result = PyUnicode_FromFormat(
-      "DeviceInfo(index=%R, name=%R, sm_count=%R, max_threads_per_sm=%R, max_registers_per_sm=%R, "
+      "DeviceInfo(index=%R, name=%R, sm_count=%R, max_threads_per_block=%R, "
+      "max_threads_per_sm=%R, max_registers_per_sm=%R, "
       "sm_major=%R, sm_minor=%R, sm_version=%R, "
       "l2_cache_size=%R, l2_cache_size_mb=%R, l1_cache_size=%R, l1_cache_size_kb=%R, "
-      "max_smem_size=%R, max_smem_size_kb=%R, memory_clock_khz=%R, memory_bus_width=%R, "
+      "default_smem_size=%R, max_smem_size=%R, max_smem_size_kb=%R, "
+      "memory_clock_khz=%R, memory_bus_width=%R, "
       "sm_clock_khz=%R, memory_bandwidth_gbps=%R, tensorcore_tops=%R)",
       values[INDEX],
       values[NAME],
       values[SM_COUNT],
+      values[MAX_THREADS_PER_BLOCK],
       values[MAX_THREADS_PER_SM],
       values[MAX_REGISTERS_PER_SM],
       values[SM_MAJOR],
@@ -391,6 +404,7 @@ PyObject *format_device_info(PyDeviceInfo *self) {
       values[L2_CACHE_SIZE_MB],
       values[L1_CACHE_SIZE],
       values[L1_CACHE_SIZE_KB],
+      values[DEFAULT_SMEM_SIZE],
       values[MAX_SMEM_SIZE],
       values[MAX_SMEM_SIZE_KB],
       values[MEMORY_CLOCK_KHZ],
@@ -422,6 +436,7 @@ PyGetSetDef DeviceInfo_properties[] = {
     DEVICE_PROPERTY("index", INDEX),
     DEVICE_PROPERTY("name", NAME),
     DEVICE_PROPERTY("sm_count", SM_COUNT),
+    DEVICE_PROPERTY("max_threads_per_block", MAX_THREADS_PER_BLOCK),
     DEVICE_PROPERTY("max_threads_per_sm", MAX_THREADS_PER_SM),
     DEVICE_PROPERTY("max_registers_per_sm", MAX_REGISTERS_PER_SM),
     DEVICE_PROPERTY("sm_major", SM_MAJOR),
@@ -431,6 +446,7 @@ PyGetSetDef DeviceInfo_properties[] = {
     DEVICE_PROPERTY("l2_cache_size_mb", L2_CACHE_SIZE_MB),
     DEVICE_PROPERTY("l1_cache_size", L1_CACHE_SIZE),
     DEVICE_PROPERTY("l1_cache_size_kb", L1_CACHE_SIZE_KB),
+    DEVICE_PROPERTY("default_smem_size", DEFAULT_SMEM_SIZE),
     DEVICE_PROPERTY("max_smem_size", MAX_SMEM_SIZE),
     DEVICE_PROPERTY("max_smem_size_kb", MAX_SMEM_SIZE_KB),
     DEVICE_PROPERTY("memory_clock_khz", MEMORY_CLOCK_KHZ),

@@ -6,20 +6,21 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
 from humming import dtypes
+from humming.device import DeviceInfo
 from humming.kernel.process_input import ProcessInputKernel
 from humming.ops.utils import init_humming_launcher, register_op
 
 from .enums import ActivationType, GroupScaleLayout, LayoutType, QuantizationMode
 from .plan import select_process_input_plan
 
-QUANT_DTYPE_MIN_CAPABILITY = {
-    dtypes.int4: (7, 5),
-    dtypes.int8: (7, 5),
-    dtypes.float8e4m3: (8, 9),
-    dtypes.float8e5m2: (8, 9),
-    dtypes.float4e0m3: (10, 0),
-    dtypes.float4e2m1: (10, 0),
-    dtypes.float8e3m4: (10, 0),
+QUANT_DTYPE_MIN_SM_VERSION = {
+    dtypes.int4: 75,
+    dtypes.int8: 75,
+    dtypes.float8e4m3: 89,
+    dtypes.float8e5m2: 89,
+    dtypes.float4e0m3: 100,
+    dtypes.float4e2m1: 100,
+    dtypes.float8e3m4: 100,
 }
 
 
@@ -62,7 +63,7 @@ class _ProcessInput:
         self.quant_mode = QuantizationMode(self.quant_mode)
         self.quantized = self.quant_mode.quantized
         assert self.quantized == (self.quant_dtype is not None), "quant_dtype must match quant_mode"
-        valid_quant_dtype = not self.quantized or self.quant_dtype in QUANT_DTYPE_MIN_CAPABILITY
+        valid_quant_dtype = not self.quantized or self.quant_dtype in QUANT_DTYPE_MIN_SM_VERSION
         assert valid_quant_dtype, f"unsupported quant_dtype: {self.quant_dtype}"
 
         self.input_row_size = self.inputs.size(-1)
@@ -238,12 +239,11 @@ class _ProcessInput:
             assert self.token_scales is None, "token_scales is not used by quant_mode"
 
     def select_schedule(self) -> None:
-        self.properties = torch.cuda.get_device_properties(self.inputs.device)
-        self.capability = (self.properties.major, self.properties.minor)
-        minimum_capability = QUANT_DTYPE_MIN_CAPABILITY.get(self.quant_dtype)
-        if minimum_capability is not None and self.capability < minimum_capability:
-            actual = f"SM{self.capability[0]}{self.capability[1]}"
-            minimum = f"SM{minimum_capability[0]}{minimum_capability[1]}"
+        self.device_info = DeviceInfo(self.inputs.device)
+        minimum_sm_version = QUANT_DTYPE_MIN_SM_VERSION.get(self.quant_dtype)
+        if minimum_sm_version is not None and self.device_info.sm_version < minimum_sm_version:
+            actual = f"SM{self.device_info.sm_version}"
+            minimum = f"SM{minimum_sm_version}"
             raise RuntimeError(f"{self.quant_dtype} output requires {minimum} or newer, got {actual}")
         tensors = (self.inputs, self.outputs, self.group_scales, self.token_scales)
         tensors += (self.expert_layout, self.indices)
@@ -257,13 +257,13 @@ class _ProcessInput:
         expanded_rows = self.num_work_rows * self.output_width
         self.schedule_rows = expanded_rows if separate_outputs else self.num_work_rows
         self.schedule_width = 1 if separate_outputs else self.output_width
-        self.plan = select_process_input_plan(self, self.properties)
+        self.plan = select_process_input_plan(self, self.device_info)
         self.plan = dataclasses.replace(self.plan, separate_outputs=separate_outputs)
 
     def separate_scatter_outputs(self, rows: int) -> bool:
         can_repeat_input = self.activation_type == ActivationType.None_
         can_repeat_input &= self.hadamard_block_size <= 1
-        row_limit = self.properties.multi_processor_count
+        row_limit = self.device_info.sm_count
         if not self.quant_mode.has_dynamic_token_scale:
             row_limit = (row_limit + 1) // 2
         separate_outputs = self.output_width > 1 and can_repeat_input
@@ -277,7 +277,7 @@ class _ProcessInput:
         operation.schedule_width = 1 if separate_outputs else self.output_width
         bytes_per_row = (self.working_set_bytes + self.num_work_rows - 1) // self.num_work_rows
         operation.working_set_bytes = bytes_per_row * rows
-        plan = select_process_input_plan(operation, self.properties)
+        plan = select_process_input_plan(operation, self.device_info)
         return dataclasses.replace(plan, separate_outputs=separate_outputs)
 
     def plan_intervals(self):
@@ -301,10 +301,10 @@ class _ProcessInput:
             middle = (first + last) // 2
             return partition(first, middle) + partition(middle + 1, last)
 
-        small_limit = max(1, 4 * self.properties.multi_processor_count)
+        small_limit = max(1, 4 * self.device_info.sm_count)
         intervals = [(row, row, get_plan(row)) for row in range(1, small_limit + 1)]
         bytes_per_row = max(1, (self.working_set_bytes + self.num_work_rows - 1) // self.num_work_rows)
-        l2_rows = max(1, self.properties.L2_cache_size // bytes_per_row)
+        l2_rows = max(1, self.device_info.l2_cache_size // bytes_per_row)
         maximum = 1 << 30
         cuts = {small_limit, maximum}
         cuts.update(row for row in range(l2_rows - 2, l2_rows + 3) if small_limit < row < maximum)
@@ -342,7 +342,7 @@ class _ProcessInput:
             quant_mode=self.quant_mode,
             group_scale_dtype=self.group_scale_dtype,
             scale_layout=self.group_scale_layout,
-            use_pdl=self.use_pdl and self.capability[0] >= 9,
+            use_pdl=self.use_pdl and self.device_info.sm_version >= 90,
         )
         return kernel_args
 

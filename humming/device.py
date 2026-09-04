@@ -57,6 +57,10 @@ class DeviceInfo:
         return self._get_value().sm_count
 
     @property
+    def max_threads_per_block(self) -> int:
+        return self._get_value().max_threads_per_block
+
+    @property
     def max_threads_per_sm(self) -> int:
         return self._get_value().max_threads_per_sm
 
@@ -91,6 +95,10 @@ class DeviceInfo:
     @property
     def l1_cache_size_kb(self) -> float:
         return self._get_value().l1_cache_size_kb
+
+    @property
+    def default_smem_size(self) -> int:
+        return self._get_value().default_smem_size
 
     @property
     def max_smem_size(self) -> int:

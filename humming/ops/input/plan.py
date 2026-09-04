@@ -57,27 +57,28 @@ def _valid_values(operation, values: int, block_size: int) -> bool:
 
 
 def _fits_shared_memory(operation, device, block_size: int, threads: int, values: int, tokens: int) -> bool:
-    transform = (
-        threads * values * tokens if operation.hadamard_block_size > 1 and block_size // values > 32 else 0
-    )
+    has_hadamard = operation.hadamard_block_size > 1
+    transform_lanes = block_size // values
+    uses_shared_transform = has_hadamard and transform_lanes > 32
+    num_transform_values = 0
+    if uses_shared_transform:
+        num_transform_values = threads * values * tokens
     num_warps = threads * tokens // 32
-    reduce = 0
+    num_reduction_values = 0
     dynamic_scale_mode = operation.quant_mode.dynamic_scale_mode
     if dynamic_scale_mode is not None:
         scale_size = operation.quant_group_size
         if dynamic_scale_mode == "token":
             scale_size = operation.hidden_size
-        group_reduce = num_warps if scale_size // values > 32 else 0
-        token_reduce = num_warps if dynamic_scale_mode == "group_token" and threads > 32 else 0
-        reduce = max(group_reduce, token_reduce)
-    layout = tokens * (16 + 8 * operation.schedule_width)
-    required = 4 * (transform + reduce) + layout
+        num_group_reduction_values = num_warps if scale_size // values > 32 else 0
+        num_token_reduction_values = num_warps if dynamic_scale_mode == "group_token" and threads > 32 else 0
+        num_reduction_values = max(num_group_reduction_values, num_token_reduction_values)
+    layout_bytes = tokens * (16 + 8 * operation.schedule_width)
+    required_smem_size = 4 * (num_transform_values + num_reduction_values) + layout_bytes
     # Pre-SM100 ptxas limits statically declared shared storage to the default
     # per-block capacity; its larger opt-in capacity applies to dynamic shared.
-    limit = device.shared_memory_per_block
-    if device.major >= 10:
-        limit = getattr(device, "shared_memory_per_block_optin", limit)
-    return required <= limit
+    limit = device.max_smem_size if device.sm_major >= 10 else device.default_smem_size
+    return required_smem_size <= limit
 
 
 def _token_candidates(operation, device, block_size: int):
@@ -151,14 +152,14 @@ def _tile_candidates(operation, device, block_size: int):
 
 def _token_score(operation, device, plan: ProcessInputPlan):
     blocks = _ceil_div(operation.schedule_rows, plan.tokens_per_block)
-    resident = min(16, device.max_threads_per_multi_processor // plan.threads)
-    wave_blocks = device.multi_processor_count * resident
+    resident = min(16, device.max_threads_per_sm // plan.threads)
+    wave_blocks = device.sm_count * resident
     full_waves, remaining = divmod(blocks, wave_blocks)
-    remaining_slots = _ceil_div(remaining, device.multi_processor_count) if remaining else 0
+    remaining_slots = _ceil_div(remaining, device.sm_count) if remaining else 0
     slots = full_waves * resident + remaining_slots
 
     transform_stages = operation.hadamard_block_size.bit_length() - 1
-    identity = transform_stages == 0 and device.major >= 10
+    identity = transform_stages == 0 and device.sm_major >= 10
     setup_units = 13 if identity else 6
     thread_work = plan.threads * plan.values_per_thread * (6 + transform_stages)
     work = slots * (thread_work + operation.hidden_size * setup_units)
@@ -183,8 +184,8 @@ def _token_score(operation, device, plan: ProcessInputPlan):
 
 def _direct_group_score(operation, device, plan: ProcessInputPlan):
     vector_floor = 8 if operation.target_bits == 4 else 4
-    large_grid = operation.schedule_rows >= 2 * device.multi_processor_count
-    full_row_friendly = device.major >= 10 and large_grid
+    large_grid = operation.schedule_rows >= 2 * device.sm_count
+    full_row_friendly = device.sm_major >= 10 and large_grid
     full_row_friendly &= operation.activation_type == ActivationType.None_
     thread_limit = device.max_threads_per_block if full_row_friendly else 256
     if plan.threads > thread_limit or plan.values_per_thread < vector_floor:
@@ -202,7 +203,7 @@ def _direct_group_score(operation, device, plan: ProcessInputPlan):
         if costly and plan.values_per_thread > 8:
             warps = warps * 8 // plan.values_per_thread
 
-    underfilled = warps < device.multi_processor_count * 32
+    underfilled = warps < device.sm_count * 32
     preferred_values = 8 if operation.activation_type != ActivationType.None_ else 16
     if underfilled:
         thread_work = operation.tile_size // plan.values_per_thread * 8
@@ -222,19 +223,17 @@ def _partitioned_tile_score(operation, device, plan: ProcessInputPlan):
     """Shared-transform and staged-scale score from grid capacity."""
     rows = operation.schedule_rows
     blocks = rows * _ceil_div(operation.num_tiles, plan.tiles_per_block)
-    target_threads = 128 if device.major < 10 else (64 if operation.hadamard_block_size > 1 else 32)
-    if device.major < 10 and operation.working_set_bytes > device.L2_cache_size:
+    target_threads = 128 if device.sm_major < 10 else (64 if operation.hadamard_block_size > 1 else 32)
+    if device.sm_major < 10 and operation.working_set_bytes > device.l2_cache_size:
         target_threads *= 2
-    capacity = device.multi_processor_count * max(
-        1, device.max_threads_per_multi_processor // target_threads // 4
-    )
+    capacity = device.sm_count * max(1, device.max_threads_per_sm // target_threads // 4)
     row_blocks = max(1, rows * 4)
-    occupancy_blocks = min(device.multi_processor_count // 2, rows * min(8, rows * 4))
+    occupancy_blocks = min(device.sm_count // 2, rows * min(8, rows * 4))
     target_blocks = min(capacity, max(row_blocks, occupancy_blocks))
 
     largest = max(operation.tile_size, operation.hadamard_block_size)
     preferred_values = max(16, largest // 32) if largest <= 1024 else 16
-    if operation.working_set_bytes > device.L2_cache_size:
+    if operation.working_set_bytes > device.l2_cache_size:
         preferred_values = min(preferred_values, 8)
 
     binary_activation = operation.activation_type in (
@@ -246,10 +245,10 @@ def _partitioned_tile_score(operation, device, plan: ProcessInputPlan):
     raw_unary = operation.activation_type == ActivationType.Unary and not operation.quantized
     binary_lowbit = binary_activation and operation.target_bits == 4
     resident_blocks = 4 if raw_unary or binary_lowbit else 1
-    thread_limit = device.max_threads_per_multi_processor // resident_blocks
+    thread_limit = device.max_threads_per_sm // resident_blocks
     thread_limit = min(device.max_threads_per_block, thread_limit)
-    large_grid = operation.schedule_rows >= 2 * device.multi_processor_count
-    full_row = device.major >= 10 and large_grid
+    large_grid = operation.schedule_rows >= 2 * device.sm_count
+    full_row = device.sm_major >= 10 and large_grid
     full_row &= operation.quant_mode.dynamic_scale_mode != "group_token" and natural_threads <= thread_limit
     if full_row:
         target_blocks = rows
@@ -271,10 +270,12 @@ def _raw_tile_score(operation, device, plan: ProcessInputPlan):
     """Rank elementwise plans from occupancy, tail work, and launch work."""
     source_bits = operation.source_bits
     preferred_values = 8 if operation.activation_type != ActivationType.None_ else max(1, 128 // source_bits)
-    target_threads = 256 if device.major >= 10 and operation.activation_type == ActivationType.Unary else 128
+    target_threads = (
+        256 if device.sm_major >= 10 and operation.activation_type == ActivationType.Unary else 128
+    )
     columns = min(operation.hidden_size, plan.tiles_per_block * operation.tile_size)
     idle = plan.threads * plan.values_per_thread - columns
-    underfilled = operation.schedule_rows < 2 * device.multi_processor_count
+    underfilled = operation.schedule_rows < 2 * device.sm_count
     if operation.quant_mode == QuantizationMode.StaticTensor:
         target_threads = 128 if underfilled else 256
         target_columns = min(operation.hidden_size, 8 * target_threads)
@@ -284,9 +285,9 @@ def _raw_tile_score(operation, device, plan: ProcessInputPlan):
             abs(plan.values_per_thread - 8),
             abs(plan.threads - target_threads),
         )
-    if device.major >= 10 and operation.activation_type == ActivationType.Unary and underfilled:
+    if device.sm_major >= 10 and operation.activation_type == ActivationType.Unary and underfilled:
         blocks = operation.schedule_rows * _ceil_div(operation.num_tiles, plan.tiles_per_block)
-        target_blocks = 2 * device.multi_processor_count
+        target_blocks = 2 * device.sm_count
         return (
             plan.values_per_thread < 4,
             plan.values_per_thread > 8,
@@ -296,24 +297,24 @@ def _raw_tile_score(operation, device, plan: ProcessInputPlan):
             abs(plan.values_per_thread - 8),
             blocks,
         )
-    if device.major >= 10 and operation.activation_type == ActivationType.Unary and not underfilled:
+    if device.sm_major >= 10 and operation.activation_type == ActivationType.Unary and not underfilled:
         blocks = operation.schedule_rows * _ceil_div(operation.num_tiles, plan.tiles_per_block)
         useful = operation.schedule_rows * operation.hidden_size
         capacity = blocks * plan.threads * plan.values_per_thread
         tail_ratio = (capacity - useful) / useful
         warps = blocks * plan.threads // 32
-        warps_per_sm = min(32, device.max_threads_per_multi_processor // 32)
-        warp_target = warps_per_sm * device.multi_processor_count
+        warps_per_sm = min(32, device.max_threads_per_sm // 32)
+        warp_target = warps_per_sm * device.sm_count
         warp_shortfall = max(0, warp_target - warps) / warp_target
         resident_blocks = 4
         latency_waves = 4
-        vector_block_target = latency_waves * resident_blocks * device.multi_processor_count
+        vector_block_target = latency_waves * resident_blocks * device.sm_count
         vector_block_shortfall = max(0, vector_block_target - blocks) / vector_block_target
         target_threads = min(256, device.max_threads_per_block)
         vector_thread_shortfall = max(0, target_threads - plan.threads) / target_threads
         vector_shortfall = max(vector_block_shortfall, vector_thread_shortfall)
         vector_shortfall = vector_shortfall if plan.values_per_thread > 8 else 0
-        thread_limit = device.max_threads_per_multi_processor // resident_blocks
+        thread_limit = device.max_threads_per_sm // resident_blocks
         setup_values = resident_blocks * operation.tile_size
         estimated_work = capacity + capacity / plan.values_per_thread + blocks * setup_values
         work_cost = estimated_work / useful
@@ -332,7 +333,7 @@ def _raw_tile_score(operation, device, plan: ProcessInputPlan):
             tail_ratio,
             blocks,
         )
-    if device.major >= 10 and not underfilled and operation.activation_type != ActivationType.Unary:
+    if device.sm_major >= 10 and not underfilled and operation.activation_type != ActivationType.Unary:
         target_threads = device.max_threads_per_block
         if operation.quantized:
             preferred_values = 16
@@ -357,7 +358,7 @@ def _pure_hadamard_score(operation, device, plan: ProcessInputPlan):
         threads = block_size // values * tiles
         return plan.values_per_thread != values, plan.tiles_per_block != tiles, abs(plan.threads - threads)
 
-    underfilled = operation.schedule_rows < 2 * device.multi_processor_count
+    underfilled = operation.schedule_rows < 2 * device.sm_count
     irregular_tiles = transforms < 16 and transforms & (transforms - 1)
     if underfilled and irregular_tiles:
         values = max(4, natural_values // 2)
@@ -375,7 +376,7 @@ def _pure_hadamard_score(operation, device, plan: ProcessInputPlan):
             idle,
             abs(plan.threads - 128),
         )
-    target_blocks = _ceil_div(3 * device.multi_processor_count, 2)
+    target_blocks = _ceil_div(3 * device.sm_count, 2)
     grid_shortfall = max(0, target_blocks - blocks)
     return (
         plan.values_per_thread < 4,
@@ -397,7 +398,7 @@ def select_process_input_plan(operation, device) -> ProcessInputPlan:
     dynamic_scale_mode = operation.quant_mode.dynamic_scale_mode
     token_partition = dynamic_scale_mode == "token"
     if dynamic_scale_mode == "group_token":
-        token_partition = bool(token_plans) and operation.schedule_rows <= device.multi_processor_count
+        token_partition = bool(token_plans) and operation.schedule_rows <= device.sm_count
     if token_partition:
         assert token_plans
         return min(token_plans, key=lambda plan: _token_score(operation, device, plan))
