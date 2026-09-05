@@ -4,6 +4,7 @@ import enum
 class MmaType(enum.Enum):
     MMA = "mma"
     WGMMA = "wgmma"
+    TCGEN05 = "tcgen05"
     MXMMA = "mxmma"
 
 

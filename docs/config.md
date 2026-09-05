@@ -24,7 +24,24 @@ HummingKernel configurations are divided into three categories:
 | `has_zero_point` | Whether to enable zero point. When enabled, the dequantization changes from `x * scale` to `(x - zp) * scale`. Humming supports two zero point types (see below). |
 | `is_fp_zero_point` | Whether to use FP-type zero point. See `has_zero_point` for details. |
 | `has_bias` | Whether to use fused bias addition. |
-| `mma_type` | Can be `mma` or `wgmma`. Since the MMA type affects weight layout, it is classified under LayerConfig. |
+| `mma_type` | Can be `mma`, `wgmma`, `tcgen05`, or `mxmma`. This selects the weight layout and preferred tensor-core backend. |
+
+On SM100-family GPUs, BF16 activations and outputs with CUDA 12.9 or newer default to
+`tcgen05`. Its kernels compile for `sm_100f` and share the existing `mma` packed
+weights, scales, and zero points. The per-shape heuristic uses MMA for decode,
+thin expert batches, and shapes without a measured TCGen5 advantage. Grouped-masked
+GEMMs retain MMA by default because their M dimension can represent buffer capacity. Setting
+`mma_type="mma"` retains the existing MMA heuristics. Explicit tuning can select
+`mma_type="tcgen05"` with a supported TCGen5 geometry. Automatic TCGen5 tuning
+initially covers `uint4`, `uint8`, `float4e2m1`, `float8e4m3`, and `float8e5m2`;
+other supported weights retain MMA by default.
+
+TCGen5 dequantizes the shared packed weights into two TMEM operand buffers while
+reusing the existing epilogue. Populated M128 tiles with K >= 1024 can use two
+CTAs per SM when their shared-memory allocations fit; smaller workloads retain
+one CTA. The heuristic uses five pipeline stages, or four for uint8 M128 and
+for eight-bit weights with two CTAs. Indexed FP4 also uses four stages with two
+CTAs.
 
 **`use_int_weight_scale` preprocessing:**
 
@@ -50,6 +67,10 @@ weight_scale = weight_scale.to(torch.int16).view(dtype)
 
 ## TuningConfig
 
+For indexed GEMMs, `sorted_ids` and `expert_ids` must be aligned to the selected
+`block_shape_m`. Gate/up and down projections can select different tile heights;
+reuse their routing tensors only when those heights match.
+
 ### Block and Warp Shapes
 
 `block_shape` and `warp_shape` are 3D tuples representing the M/N/K dimensions, with the following constraints:
@@ -57,6 +78,10 @@ weight_scale = weight_scale.to(torch.int16).view(dtype)
 - `block_shape[i]` must be a power-of-2 multiple of `warp_shape[i]`.
 - `block_shape_n` must be at least 64.
 - When using WGMMA, `block_shape_n` must be at least 4x `warp_shape_n`.
+- TCGen5 uses `block_shape=(64 or 128, 128, 64)` and
+  `warp_shape=(block_shape_m, 32, 64)`, with warp specialization, at least three
+  stages, and FP32 accumulation. PDL, multicast, and reduction overlap are not
+  supported by this schedule.
 - `warp_shape_m` must be a multiple of MMA shape M.
 - Valid values for `warp_shape_n` and `warp_shape_k` depend on the activation type:
 

@@ -301,9 +301,8 @@ public:
 
   CUDA_INLINE
   void fetch_moe_index_block() {
-    if (kUseWarpSpec && ctx.is_math_thread()) return;
-
     expert_id = ctx.params.expert_ids_ptr[m_block_id];
+    if (kUseWarpSpec && ctx.is_math_thread()) return;
 
     const uint32_t *gmem_ptr = ctx.params.sorted_ids_ptr + m_block_id * BlockShape::M;
     const int4 *gmem_ptr_load = reinterpret_cast<const int4 *>(gmem_ptr);
