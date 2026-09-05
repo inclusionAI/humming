@@ -67,6 +67,129 @@ def _select_sm90_block_m(
     return np.argmin(num_blocks_list).item() * 8 + 8
 
 
+# Provisional V1 constants. These are intentionally small and easy to
+# recalibrate with an H100 W4A8 MoE BM sweep.
+_W4A8_BM_V1_SEARCH_RADIUS = 32
+_W4A8_BM_V1_POOR_LAST_WAVE_UTIL = 0.25
+_W4A8_BM_V1_MAX_PADDING_REGRESSION = 0.10
+
+
+def _use_w4a8_moe_bm_heuristic_v1(problem: TuningProblem) -> bool:
+    """Return whether the production V1 BM selector applies."""
+    layer_config = problem.layer_config
+    return (
+        problem.device.sm_version == 90
+        and problem.gemm_type == GemmType.INDEXED
+        and layer_config.num_experts > 0
+        and layer_config.a_dtype == dtypes.float8e4m3
+        and layer_config.b_dtype == dtypes.float4e2m1
+        and layer_config.weight_scale_group_size == 32
+    )
+
+
+def _get_w4a8_moe_bm_candidates(
+    layer_config: LayerConfig,
+    max_block_m: int,
+) -> list[int]:
+    """Build the legal BM candidates for the active SM90 config."""
+    return [
+        block_m
+        for block_m in range(8, max_block_m + 1, 8)
+        if not (
+            layer_config.a_dtype == dtypes.int8
+            and block_m > 32
+            and block_m % 16 == 8
+        )
+    ]
+
+
+def _select_w4a8_moe_block_m_v1(
+    problem: TuningProblem,
+    max_block_m: int,
+) -> int:
+    """Select BM from expected per-expert M plus a conservative correction."""
+    if problem.device.num_sms is None:
+        raise ValueError("W4A8 BM V1 selection requires a device SM count")
+    layer_config = problem.layer_config
+    valid_candidates = _get_w4a8_moe_bm_candidates(layer_config, max_block_m)
+    if not valid_candidates:
+        raise ValueError("no legal W4A8 BM V1 candidates")
+
+    expected_m_per_expert = problem.shape_m / layer_config.num_experts
+    if expected_m_per_expert <= max_block_m:
+        primary_target = math.ceil(expected_m_per_expert / 8) * 8
+    else:
+        num_m_tiles = math.ceil(expected_m_per_expert / max_block_m)
+        primary_target = math.ceil(expected_m_per_expert / num_m_tiles / 8) * 8
+    primary_target = max(8, min(primary_target, max_block_m))
+    primary_bm = next(
+        (block_m for block_m in valid_candidates if block_m >= primary_target),
+        valid_candidates[-1],
+    )
+    num_sms = max(problem.device.num_sms, 1)
+
+    def estimate(block_m: int) -> dict[str, float | int]:
+        base, remainder = divmod(problem.shape_m, layer_config.num_experts)
+        base_blocks = math.ceil(base / block_m)
+        remainder_blocks = math.ceil((base + 1) / block_m)
+        total_m_blocks = (
+            (layer_config.num_experts - remainder) * base_blocks
+            + remainder * remainder_blocks
+        )
+        padded_m = (
+            (layer_config.num_experts - remainder) * base_blocks * block_m
+            + remainder * remainder_blocks * block_m
+        )
+        padding_ratio = max(padded_m - problem.shape_m, 0) / max(problem.shape_m, 1)
+        total_ctas = total_m_blocks * math.ceil(layer_config.shape_n / 128)
+        num_waves = math.ceil(total_ctas / num_sms) if total_ctas else 0
+        last_wave_util = 0.0
+        if num_waves:
+            last_wave_ctas = total_ctas - (num_waves - 1) * num_sms
+            last_wave_util = last_wave_ctas / num_sms
+        return {
+            "bm": block_m,
+            "num_waves": num_waves,
+            "last_wave_util": last_wave_util,
+            "padding_ratio": padding_ratio,
+        }
+
+    primary = estimate(primary_bm)
+    if primary["last_wave_util"] >= _W4A8_BM_V1_POOR_LAST_WAVE_UTIL:
+        return primary_bm
+    correction_candidates = [
+        block_m for block_m in valid_candidates
+        if abs(block_m - primary_bm) <= _W4A8_BM_V1_SEARCH_RADIUS
+    ]
+    winner = primary
+    for block_m in correction_candidates:
+        if block_m == primary_bm:
+            continue
+        neighbor = estimate(block_m)
+        wave_improved = (
+            neighbor["num_waves"] < primary["num_waves"]
+            or (
+                neighbor["num_waves"] == primary["num_waves"]
+                and neighbor["last_wave_util"] > primary["last_wave_util"]
+            )
+        )
+        padding_ok = neighbor["padding_ratio"] <= (
+            primary["padding_ratio"] + _W4A8_BM_V1_MAX_PADDING_REGRESSION
+        )
+        if not (wave_improved and padding_ok):
+            continue
+        winner_is_better = (
+            neighbor["num_waves"] < winner["num_waves"]
+            or (
+                neighbor["num_waves"] == winner["num_waves"]
+                and neighbor["last_wave_util"] > winner["last_wave_util"]
+            )
+        )
+        if winner_is_better:
+            winner = neighbor
+    return int(winner["bm"])
+
+
 def build_sm90_seed_config(problem: TuningProblem) -> dict:
     """Build the sparse seed config shared by legacy and indexed-A16 paths."""
     layer_config = problem.layer_config
@@ -213,56 +336,73 @@ def select_grouped_scale(
         max_block_m = 192
     else:
         max_block_m = 200
-    block_shape_m = _select_sm90_block_m(
-        layer_config,
-        problem.shape_m,
-        max_block_m,
+
+    origin_block_shape_m = _select_sm90_block_m(
+        layer_config, problem.shape_m, max_block_m
     )
-    block_ks = (256, 128, 64) if block_shape_m <= 32 else (128, 64)
+    use_w4a8_bm_v1 = _use_w4a8_moe_bm_heuristic_v1(problem)
+    block_shape_m = (
+        _select_w4a8_moe_block_m_v1(problem, max_block_m)
+        if use_w4a8_bm_v1
+        else origin_block_shape_m
+    )
+
+    # V1 changes BM only. Keep BK derivation tied to origin BM.
+    block_ks = (256, 128, 64) if origin_block_shape_m <= 32 else (128, 64)
     use_multicast = (
-        problem.gemm_type == GemmType.DENSE and problem.shape_m / block_shape_m >= 4
+        problem.gemm_type == GemmType.DENSE
+        and problem.shape_m / block_shape_m >= 4
     )
 
-    candidates = []
-    # Candidate order records measured preference; legality supplies fallbacks.
-    for block_shape_n, warp_shape_n in ((128, 32), (64, 16)):
-        for block_shape_k in block_ks:
-            multicast_values = (True, False) if use_multicast else (False,)
-            for multicast in multicast_values:
-                config = {
-                    "block_shape": (
-                        block_shape_m,
-                        block_shape_n,
-                        block_shape_k,
-                    ),
-                    "warp_shape": (
-                        block_shape_m,
-                        warp_shape_n,
-                        min(128, block_shape_k),
-                    ),
-                    "use_stream_k": not problem.use_batch_invariant,
-                    "use_f16_accum": problem.use_f16_accum,
-                    "num_stages": 4,
-                }
-                if problem.gemm_type != GemmType.INDEXED:
-                    config["use_warp_spec"] = True
-                    config["use_tma"] = True
-                    config["use_mbarrier"] = True
-                if multicast:
-                    config["multi_cast_size_a"] = 2
-                candidate = ScheduleCandidate.from_config(
-                    "grouped_scale_"
-                    f"n{block_shape_n}_k{block_shape_k}_"
-                    f"{'multicast' if multicast else 'direct'}",
-                    config,
-                )
-                candidates.append(fit_pipeline_stages(problem, candidate))
+    def build_candidates(candidate_block_m: int) -> list[ScheduleCandidate]:
+        candidates = []
+        for block_shape_n, warp_shape_n in ((128, 32), (64, 16)):
+            for block_shape_k in block_ks:
+                multicast_values = (True, False) if use_multicast else (False,)
+                for multicast in multicast_values:
+                    config = {
+                        "block_shape": (candidate_block_m, block_shape_n, block_shape_k),
+                        "warp_shape": (
+                            candidate_block_m,
+                            warp_shape_n,
+                            min(128, block_shape_k),
+                        ),
+                        "use_stream_k": not problem.use_batch_invariant,
+                        "use_f16_accum": problem.use_f16_accum,
+                        "num_stages": 4,
+                    }
+                    if problem.gemm_type != GemmType.INDEXED:
+                        config["use_warp_spec"] = True
+                        config["use_tma"] = True
+                        config["use_mbarrier"] = True
+                    if multicast:
+                        config["multi_cast_size_a"] = 2
+                    candidate = ScheduleCandidate.from_config(
+                        "grouped_scale_"
+                        f"n{block_shape_n}_k{block_shape_k}_"
+                        f"{'multicast' if multicast else 'direct'}",
+                        config,
+                    )
+                    candidates.append(fit_pipeline_stages(problem, candidate))
+        return candidates
 
-    analyses = tuple(analyze_candidate(problem, candidate) for candidate in candidates)
-    selected = next(
-        (analysis for analysis in analyses if analysis.legal),
-        None,
+    def analyze_candidates(candidate_block_m: int) -> tuple[CandidateAnalysis, ...]:
+        return tuple(
+            analyze_candidate(problem, candidate)
+            for candidate in build_candidates(candidate_block_m)
+        )
+
+    analyses = analyze_candidates(block_shape_m)
+    selected = next((analysis for analysis in analyses if analysis.legal), None)
+    reason = (
+        "selected V1 W4A8 BM with upstream grouped-scale legality checks"
+        if use_w4a8_bm_v1
+        else "selected the first legal measured-priority candidate"
     )
+    if selected is None and use_w4a8_bm_v1 and block_shape_m != origin_block_shape_m:
+        analyses = analyze_candidates(origin_block_shape_m)
+        selected = next((analysis for analysis in analyses if analysis.legal), None)
+        reason = "V1 BM rejected by upstream legality; fell back to origin BM"
     if selected is None:
         rejected = {
             analysis.candidate.candidate_id: analysis.rejection_reasons
@@ -275,7 +415,7 @@ def select_grouped_scale(
         family="grouped_scale",
         selected=selected.candidate,
         considered=analyses,
-        reason="selected the first legal measured-priority candidate",
+        reason=reason,
     )
 
 

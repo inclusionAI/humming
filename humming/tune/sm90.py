@@ -13,6 +13,7 @@ from humming.tune.sm90_policies import (
     calc_sm90_num_block_list,
     select_grouped_scale,
     select_indexed_a16,
+    _use_w4a8_moe_bm_heuristic_v1,
 )
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -105,6 +106,15 @@ class Sm90Heuristics(DeviceHeuristics):
             use_batch_invariant,
             gemm_type,
         )
+        if _use_w4a8_moe_bm_heuristic_v1(problem):
+            problem = cls._make_problem(
+                layer_config,
+                shape_m,
+                use_f16_accum,
+                use_batch_invariant,
+                gemm_type,
+                include_grid_size=True,
+            )
         return select_grouped_scale(problem).to_config()
 
     @classmethod
@@ -158,6 +168,15 @@ class Sm90Heuristics(DeviceHeuristics):
             include_grid_size=tune_indexed_a16,
         )
         if cls._uses_grouped_scale_candidates(layer_config):
+            if _use_w4a8_moe_bm_heuristic_v1(problem):
+                problem = cls._make_problem(
+                    layer_config,
+                    shape_m,
+                    use_f16_accum,
+                    use_batch_invariant,
+                    gemm_type,
+                    include_grid_size=True,
+                )
             return select_grouped_scale(problem)
         if not tune_indexed_a16:
             raise ValueError(
