@@ -22,7 +22,7 @@ class Sm100Heuristics(Sm80Heuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
-        if layer_config.mma_type != MmaType.TCGEN05:
+        if layer_config.mma_type != MmaType.UMMA:
             return super().get_config(
                 layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type
             )
@@ -59,14 +59,14 @@ class Sm100Heuristics(Sm80Heuristics):
             tiles = math.ceil(shape_m / 64) * (layer_config.shape_n // 128)
             profitable = shape_m >= min_m and tiles * 2 >= current_device.sm_count
         if common_weight and compatible and profitable:
-            return cls.get_tcgen05_config(layer_config, shape_m, gemm_type)
+            return cls.get_umma_config(layer_config, shape_m, gemm_type)
         mma_layer = dataclasses.replace(layer_config, mma_type=MmaType.MMA)
         return super().get_config(
             mma_layer, shape_m, use_f16_accum, use_batch_invariant, gemm_type
         ) | {"mma_type": MmaType.MMA.value}
 
     @classmethod
-    def get_tcgen05_config(
+    def get_umma_config(
         cls, layer_config: LayerConfig, shape_m: int, gemm_type: GemmType
     ):
         if layer_config.num_experts:
@@ -92,7 +92,7 @@ class Sm100Heuristics(Sm80Heuristics):
                 num_stages = resident_stages
         indexed = gemm_type == GemmType.INDEXED
         return {
-            "mma_type": MmaType.TCGEN05.value,
+            "mma_type": MmaType.UMMA.value,
             "block_shape": (block_m, 128, 64),
             "warp_shape": (block_m, 32, 64),
             "num_stages": num_stages,

@@ -76,7 +76,7 @@ class LayerConfig(BaseHummingConfig):
         cuda_version = _cuda_compiler_version(KernelRuntime._get_compiler())
         assert self.sm_version is not None
         native_low_bit_sm = self.sm_version >= 100
-        if self.mma_type not in (MmaType.MMA, MmaType.TCGEN05):
+        if self.mma_type not in (MmaType.MMA, MmaType.UMMA):
             return False
 
         accepted_b_dtype = tuple()
@@ -199,7 +199,7 @@ class LayerConfig(BaseHummingConfig):
                 from humming.jit.runtime import KernelRuntime
 
                 version = _cuda_compiler_version(KernelRuntime._get_compiler())
-                self.mma_type = MmaType.TCGEN05 if version >= (12, 9) else MmaType.MMA
+                self.mma_type = MmaType.UMMA if version >= (12, 9) else MmaType.MMA
             else:
                 self.mma_type = MmaType.MMA
         if self.mma_type == MmaType.MXMMA and self.is_group_weight_scale and self.input_scale_group_size > 0:
@@ -302,7 +302,7 @@ class LayerConfig(BaseHummingConfig):
     def mma_type_id(self):
         assert self.mma_type is not None
         value = self.mma_type.value.lower()
-        return ["mma", "wgmma", "tcgen05", "mxmma"].index(value)
+        return ["mma", "wgmma", "umma", "mxmma"].index(value)
 
     @property
     def mxmma_native_mixed(self) -> bool:
@@ -339,7 +339,7 @@ class LayerConfig(BaseHummingConfig):
     def should_apply_bs_on_c(self):
         if self.use_fused_e8m0_scale:
             return False
-        elif self.mma_type in (MmaType.MMA, MmaType.TCGEN05):
+        elif self.mma_type in (MmaType.MMA, MmaType.UMMA):
             return self.weight_scale_group_size == 0 or self.a_dtype.num_bits != 16
         elif self.mma_type == MmaType.WGMMA:
             return self.weight_scale_group_size == 0

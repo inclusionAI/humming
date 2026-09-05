@@ -19,7 +19,7 @@ enum class WeightScale2Type : uint32_t {
 enum class MmaType : uint32_t {
   MMA,
   WGMMA,
-  TCGEN05,
+  UMMA,
   MXMMA
 };
 

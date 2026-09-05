@@ -3,7 +3,7 @@
 #include <humming/mma/mxmma.cuh>
 #include <humming/mma/wgmma.cuh>
 #include <humming/mma/wmma.cuh>
-#include <humming/mma/tcgen05.cuh>
+#include <humming/mma/umma.cuh>
 
 
 template <MmaType kMmaType, class Ctx, class ArithClass>
@@ -25,8 +25,8 @@ struct MmaSelector<MmaType::MXMMA, Ctx, ArithClass> {
 };
 
 template <class Ctx, class ArithClass>
-struct MmaSelector<MmaType::TCGEN05, Ctx, ArithClass> {
-  using Type = TCGEN05<Ctx, ArithClass>;
+struct MmaSelector<MmaType::UMMA, Ctx, ArithClass> {
+  using Type = UMMA<Ctx, ArithClass>;
 };
 
 template <class Ctx, class ArithClass>

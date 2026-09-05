@@ -42,17 +42,17 @@ WEIGHT_CONFIGS = {
 @pytest.fixture(autouse=True)
 def require_sm100_family(monkeypatch):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
-        pytest.skip("TCGen5 BF16 requires an SM100-family GPU")
+        pytest.skip("UMMA BF16 requires an SM100-family GPU")
     if _cuda_compiler_version(KernelRuntime._get_compiler()) < (12, 9):
-        pytest.skip("TCGen5 sm100f requires CUDA 12.9 or newer")
+        pytest.skip("UMMA sm100f requires CUDA 12.9 or newer")
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
 
-    def force_tcgen05(layer_config, shape_m, gemm_type, **kwargs):
-        return Sm100Heuristics.get_tcgen05_config(layer_config, shape_m, gemm_type) | {
-            "mma_type": "tcgen05"
+    def force_umma(layer_config, shape_m, gemm_type, **kwargs):
+        return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
+            "mma_type": "umma"
         }
 
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", force_tcgen05)
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", force_umma)
 
 
 def _case(name, gemm_type, **weight_values):
@@ -64,7 +64,7 @@ def _case(name, gemm_type, **weight_values):
             num_experts=0 if gemm_type == GemmType.DENSE else 4,
             a_dtype=dtypes.bfloat16,
             c_dtype=dtypes.bfloat16,
-            mma_type=MmaType.TCGEN05,
+            mma_type=MmaType.UMMA,
             **(dict(bs_dtype="bfloat16") | weight_values),
         ),
         compute_config=ComputeConfig(gemm_type=gemm_type),
@@ -77,7 +77,7 @@ def _assert_results(case, shape_ms):
     runner = KernelTestRunner(case)
     kernels = runner.prepare_kernels(shape_ms)
     assert all(
-        HummingKernel._id2kernel[int(kernel[0][2])].mma_type == MmaType.TCGEN05
+        HummingKernel._id2kernel[int(kernel[0][2])].mma_type == MmaType.UMMA
         for variants in kernels.values()
         for kernel in variants
     )
@@ -91,7 +91,7 @@ def _assert_results(case, shape_ms):
 
 @pytest.mark.parametrize("gemm_type", list(GemmType))
 @pytest.mark.parametrize("weight_name", WEIGHT_CONFIGS)
-def test_tcgen05_common_weights_and_moe(weight_name, gemm_type):
+def test_umma_common_weights_and_moe(weight_name, gemm_type):
     """Decode, tile tails, and prefill use the same quantization contract."""
     case = _case(weight_name, gemm_type, **WEIGHT_CONFIGS[weight_name])
     _assert_results(case, (1, 17, 65, 257))
@@ -107,7 +107,7 @@ def test_tcgen05_common_weights_and_moe(weight_name, gemm_type):
         (GemmType.GROUPED_MASKED, 128, 448),
     ),
 )
-def test_tcgen05_pipeline_stage_reuse(gemm_type, block_m, shape_k, monkeypatch):
+def test_umma_pipeline_stage_reuse(gemm_type, block_m, shape_k, monkeypatch):
     """Retire async reads before reuse across persistent tiles and experts."""
     weights = WEIGHT_CONFIGS["uint4-zp"] | {"weight_scale_group_size": 64}
     case = _case("pipeline-stage-reuse", gemm_type, **weights)
@@ -116,7 +116,7 @@ def test_tcgen05_pipeline_stage_reuse(gemm_type, block_m, shape_k, monkeypatch):
     )
 
     def minimum_stages(layer_config, shape_m, gemm_type, **kwargs):
-        return Sm100Heuristics.get_tcgen05_config(layer_config, shape_m, gemm_type) | {
+        return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
             "block_shape": (block_m, 128, 64),
             "warp_shape": (block_m, 32, 64),
             "num_stages": 3,
@@ -147,14 +147,14 @@ def test_tcgen05_pipeline_stage_reuse(gemm_type, block_m, shape_k, monkeypatch):
         "float8e5m2",
     ),
 )
-def test_tcgen05_floating_weight_formats(b_dtype, gemm_type):
+def test_umma_floating_weight_formats(b_dtype, gemm_type):
     case = _case(b_dtype, gemm_type, b_dtype=b_dtype)
     _assert_results(case, (17, 129))
 
 
 @pytest.mark.parametrize("bits", range(1, 9))
 @pytest.mark.parametrize("gemm_type", list(GemmType))
-def test_tcgen05_integer_weight_widths(bits, gemm_type):
+def test_umma_integer_weight_widths(bits, gemm_type):
     case = _case(
         f"uint{bits}",
         gemm_type,
@@ -184,7 +184,7 @@ def test_tcgen05_integer_weight_widths(bits, gemm_type):
     ],
     ids=("fp8-scale", "channel-secondary-scale", "tensor-scale", "block-scale"),
 )
-def test_tcgen05_scale_contract(weight_values, gemm_type):
+def test_umma_scale_contract(weight_values, gemm_type):
     case = _case("scale", gemm_type, **weight_values)
     _assert_results(case, (17, 257))
 
@@ -289,8 +289,8 @@ def _selected_backend(layer, gemm_type, kwargs, tuning=None):
 
 @pytest.mark.parametrize("gemm_type", list(GemmType))
 @pytest.mark.parametrize("weight_name", WEIGHT_CONFIGS)
-def test_tcgen05_public_layer_switches_without_repacking(weight_name, gemm_type):
-    """MMA and TCGen5 consume one transformed layer, including routed calls."""
+def test_umma_public_layer_switches_without_repacking(weight_name, gemm_type):
+    """MMA and UMMA consume one transformed layer, including routed calls."""
     layer, weight_ref = _public_layer(weight_name, gemm_type)
     num_experts = layer.num_experts
     packed = {
@@ -299,7 +299,7 @@ def test_tcgen05_public_layer_switches_without_repacking(weight_name, gemm_type)
     }
     for shape_m, mma_type in (
         (17, None),
-        (257, MmaType.TCGEN05),
+        (257, MmaType.UMMA),
         (257, MmaType.MMA),
         (17, None),
     ):
@@ -310,8 +310,8 @@ def test_tcgen05_public_layer_switches_without_repacking(weight_name, gemm_type)
             else dataclasses.replace(layer.humming_config, mma_type=mma_type)
         )
         get_config = (
-            Sm100Heuristics.get_tcgen05_config
-            if mma_type == MmaType.TCGEN05
+            Sm100Heuristics.get_umma_config
+            if mma_type == MmaType.UMMA
             else get_heuristics_config
         )
         tuning = get_config(
@@ -345,8 +345,8 @@ def test_tcgen05_public_layer_switches_without_repacking(weight_name, gemm_type)
 @pytest.mark.parametrize(
     "gemm_type", (GemmType.DENSE, GemmType.INDEXED, GemmType.GROUPED_CONTIGUOUS)
 )
-def test_tcgen05_default_prefill_switches_back_to_decode(gemm_type):
-    """The public default selects TCGen5 for prefill on a reused packed layer."""
+def test_umma_default_prefill_switches_back_to_decode(gemm_type):
+    """The public default selects UMMA for prefill on a reused packed layer."""
     layer, weight_ref = _public_layer("uint4", gemm_type, 5120, 2048)
     packed = {
         name: (value.data_ptr(), value.detach().view(torch.uint8).clone())
@@ -354,7 +354,7 @@ def test_tcgen05_default_prefill_switches_back_to_decode(gemm_type):
     }
     for shape_m, expected in (
         (17, MmaType.MMA),
-        (1024, MmaType.TCGEN05),
+        (1024, MmaType.UMMA),
         (17, MmaType.MMA),
     ):
         tuning = get_heuristics_config(
@@ -376,7 +376,7 @@ def test_tcgen05_default_prefill_switches_back_to_decode(gemm_type):
         assert torch.equal(value.detach().view(torch.uint8), original)
 
 
-def test_tcgen05_grouped_metadata_limits_cta_residency():
+def test_umma_grouped_metadata_limits_cta_residency():
     """Retain one CTA when scales and expert metadata exhaust shared memory."""
     layer = LayerConfig(
         shape_n=2048,
@@ -391,10 +391,10 @@ def test_tcgen05_grouped_metadata_limits_cta_residency():
         has_zero_point=True,
         is_fp_zero_point=True,
         has_bias=True,
-        mma_type=MmaType.TCGEN05,
+        mma_type=MmaType.UMMA,
     )
     for group_size, expected_ctas in ((16, 1), (128, 2)):
-        tuning = Sm100Heuristics.get_tcgen05_config(
+        tuning = Sm100Heuristics.get_umma_config(
             dataclasses.replace(layer, weight_scale_group_size=group_size),
             shape_m=128 * layer.num_experts,
             gemm_type=GemmType.GROUPED_CONTIGUOUS,

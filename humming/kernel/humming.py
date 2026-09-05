@@ -115,10 +115,10 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def init_sm_version(self):
         super().init_sm_version()
-        if self.mma_type == MmaType.TCGEN05:
-            assert self.sm_version // 10 == 10, "TCGen5 requires SM100 family"
+        if self.mma_type == MmaType.UMMA:
+            assert self.sm_version // 10 == 10, "UMMA requires SM100 family"
             assert _cuda_compiler_version(self._get_compiler()) >= (12, 9), (
-                "TCGen5 sm_100f requires CUDA 12.9 or newer"
+                "UMMA sm_100f requires CUDA 12.9 or newer"
             )
             self.sm_version_str = "100f"
 
@@ -408,9 +408,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def check_config(self):
         assert self.num_threads <= 1024
-        if self.mma_type == MmaType.TCGEN05:
+        if self.mma_type == MmaType.UMMA:
             assert self.a_dtype == self.c_dtype == dtypes.bfloat16, (
-                "TCGen5 requires BF16 activations and outputs"
+                "UMMA requires BF16 activations and outputs"
             )
             assert self.block_shape[0] in (64, 128)
             assert tuple(self.block_shape[1:]) == (128, 64)

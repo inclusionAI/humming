@@ -170,8 +170,8 @@ class MmaOpClassImpl:
         return asm_code
 
 
-class Tcgen05OpClassImpl(MmaOpClassImpl):
-    mma_type = MmaType.TCGEN05
+class UmmaOpClassImpl(MmaOpClassImpl):
+    mma_type = MmaType.UMMA
 
     def generate_ptx(self, indent=0):
         return ""
@@ -484,11 +484,11 @@ class MmaOpClass:
 
         if mma_type == MmaType.MMA:
             return MmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
-        elif mma_type == MmaType.TCGEN05:
+        elif mma_type == MmaType.UMMA:
             assert (m, n, k) == (16, 8, 16)
             assert a_dtype == b_dtype == dtypes.bfloat16
             assert cd_dtype == dtypes.float32
-            return Tcgen05OpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
+            return UmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.WGMMA:
             return WgmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.MXMMA:

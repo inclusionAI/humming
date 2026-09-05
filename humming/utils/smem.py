@@ -162,7 +162,7 @@ def estimate_smem_size_layer(
             num_math_mbarriers += 1
         add(num_math_mbarriers * 8, 8)  # math_mbar
 
-    if layer_config.mma_type == MmaType.TCGEN05:
+    if layer_config.mma_type == MmaType.UMMA:
         add(4, 4)  # TMEM allocation
         add(8, 8)  # MMA completion barrier
 

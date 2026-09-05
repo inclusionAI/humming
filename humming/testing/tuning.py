@@ -404,7 +404,7 @@ def sample_test_tuning_configs(
     compute_config: ComputeConfig,
     sample_size: int = NUM_SAMPLED_TUNING_CONFIGS,
 ) -> list[dict]:
-    if layer_config.mma_type == MmaType.TCGEN05:
+    if layer_config.mma_type == MmaType.UMMA:
         mma_layer = dataclasses.replace(layer_config, mma_type=MmaType.MMA)
         return [
             config | {"mma_type": MmaType.MMA.value}
