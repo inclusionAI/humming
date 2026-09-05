@@ -250,7 +250,12 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       s2r_pipe.load_channel(scheduler.slice_id);
 
       if constexpr (kReduceOverlapLastStageOnly) consumer.arrive(kNumStages);
-      epilogue.call(mma.final_regs_c_as_ptr());
+      if constexpr (Ctx::kUseMxmma && Ctx::kUseUmma &&
+                    Ctx::kNumWriteSplits == 1 && EpilogueArithmetic::kCanWriteNative) {
+        epilogue.template call<true>(nullptr, &mma);
+      } else {
+        epilogue.call(mma.final_regs_c_as_ptr());
+      }
       if constexpr (TuningConfig::kUseTmaC) tma_wait_store_group<0, true>();
       if constexpr (kUseTwoStageReduceBarrier) consumer.arrive(kNumStages + 1);
       if constexpr (!kReduceOverlapLastStageOnly) consumer.arrive(kNumStages);

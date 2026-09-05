@@ -532,3 +532,58 @@ def test_mxumma_public_input_scales(prequantized, shape_k, shape_m, gemm_type, m
         config, inputs=inputs, input_scale=scale_bytes, **runner.kernel_tensors, **kwargs
     )
     torch.testing.assert_close(output.float(), reference, atol=0.05, rtol=0.01)
+
+
+@pytest.mark.parametrize(
+    "gemm_type",
+    (GemmType.INDEXED, GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED),
+)
+@pytest.mark.parametrize("epilogue", ("none", "bias", "tensor-bias", "channel-bias"))
+@pytest.mark.parametrize("block_m,shape_k", ((64, 640), (128, 896)))
+def test_mxumma_native_output_persistent_stage_reuse(
+    gemm_type, block_m, shape_k, epilogue, monkeypatch
+):
+    """Direct output staging survives odd input rings and persistent tile reuse."""
+
+    def native_tuning(layer_config, shape_m, gemm_type, **kwargs):
+        return get_heuristics_config(
+            layer_config, shape_m=shape_m, gemm_type=gemm_type
+        ) | {
+            "block_shape": (block_m, 128, 128),
+            "warp_shape": (block_m, 32, 128),
+            "num_stages": 3,
+            "num_sms": 2,
+        }
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", native_tuning)
+    case = KernelTestCase(
+        name="native-output-stage-reuse",
+        layer_config=LayerConfig(
+            shape_n=256,
+            shape_k=shape_k,
+            num_experts=4,
+            a_dtype="float8e4m3",
+            b_dtype="float4e2m1",
+            c_dtype="bfloat16",
+            as_dtype="float8e8m0",
+            bs_dtype="float8e8m0",
+            input_scale_group_size=32,
+            weight_scale_group_size=32,
+            mma_type=MmaType.MXMMA,
+            has_bias=epilogue != "none",
+            weight_scale_2_type=epilogue.split("-")[0] if "-" in epilogue else None,
+        ),
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        seed=2026,
+    )
+    runner = KernelTestRunner(case)
+    kernels = runner.prepare_kernels((17, 257))
+    assert all(
+        HummingKernel._id2kernel[int(kernel[0][2])].use_mxumma
+        for variants in kernels.values()
+        for kernel in variants
+    )
+    for result in runner.run((17, 257)):
+        torch.testing.assert_close(
+            result.outputs, result.outputs_ref, rtol=case.rtol, atol=case.atol
+        )

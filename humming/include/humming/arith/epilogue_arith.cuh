@@ -52,6 +52,10 @@ private:
   static constexpr uint32_t kSizeBias = WarpShape::N / 4 * 16 / 32;
 
 public:
+  static constexpr bool kCanWriteNative =
+      std::is_same<ElementC, BFloat16>::value && kIsGroupInputScale &&
+      kIsGroupWeightScale && !kHasZeroPoint && kExpOffset.x == 0;
+
   uint32_t as[kSizeAS];
   uint32_t bs[MAX(kSizeBS, 2)];
   uint32_t dq_bs[MAX(kSizeDequantBS, 4)];
@@ -59,6 +63,37 @@ public:
   uint32_t bs2[kSizeBias];
   uint32_t gs = 0;
   uint32_t _dummy;
+
+  scalar_t native_bias;
+  scalar_t native_scale;
+
+  CUDA_INLINE void prepare_native_output() {
+    const uint32_t lane = threadIdx.x % 32;
+    auto select_channel = [&](const uint32_t *values) {
+      uint32_t pair = 0;
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < 4; i++) {
+        uint32_t candidate = __shfl_sync(0xffffffff, values[i], lane % 8 / 2);
+        if (lane / 8 == i) pair = candidate;
+      }
+      return __ushort_as_bfloat16(pair >> ((lane % 2) * 16));
+    };
+    if constexpr (kHasBias) native_bias = select_channel(bias);
+    if constexpr (kIsChannelWeightScale2) native_scale = select_channel(bs2);
+  }
+
+  CUDA_INLINE __nv_bfloat16 apply_native_output(float value) {
+    if constexpr (kHasTensorWeightScale) value *= __uint_as_float(gs);
+    auto result = __float2bfloat16_rn(value);
+    if constexpr (kIsChannelWeightScale2 && kHasBias) {
+      result = __hfma(result, native_scale, native_bias);
+    } else if constexpr (kIsChannelWeightScale2) {
+      result = __hmul(result, native_scale);
+    } else if constexpr (kHasBias) {
+      result = __hadd(result, native_bias);
+    }
+    return result;
+  }
 
   CUDA_INLINE
   void may_process_f32_on_smem_write(uint32_t row, uint32_t col) {

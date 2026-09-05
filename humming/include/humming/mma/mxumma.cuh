@@ -107,6 +107,27 @@ struct MXUMMA : MXMMA<Ctx, ArithClass> {
     tcgen05_fence_after_thread_sync();
   }
 
+  template <class OutputArithmetic>
+  CUDA_INLINE void write_native_output(OutputArithmetic &arith) {
+    static_assert(!Ctx::kUseStreamK && BlockShape::K == Ctx::WarpShape::K);
+    static_assert(Ctx::kNumWriteSplits == 1);
+    __nv_bfloat16 *out = reinterpret_cast<__nv_bfloat16 *>(ctx.smem.reduce);
+    const uint32_t swizzle = offsetof(SharedStorage, reduce) / 128 % 8;
+    const uint32_t n = threadIdx.x;
+    PRAGMA_UNROLL
+    for (uint32_t m = 0; m < BlockShape::M; m += 8) {
+      uint32_t values[8];
+      tcgen05_ld_32x32b_x8(ctx.smem.umma_tmem_col + kAccumulatorColumn + m, values);
+      tcgen05_wait_ld();
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < 8; i++) {
+        uint32_t row = (n / 64) * BlockShape::M + m + i;
+        uint32_t col = ((n % 64 / 8) ^ ((m + i + swizzle) % 8)) * 8 + n % 8;
+        out[row * 64 + col] = arith.apply_native_output(__uint_as_float(values[i]));
+      }
+    }
+  }
+
   template <class T = uint32_t>
   CUDA_INLINE T *final_regs_c_as_ptr() {
     uint32_t lane = ctx.lane_id();
