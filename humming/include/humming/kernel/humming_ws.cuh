@@ -75,6 +75,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
   extern __shared__ int4 shared_memory[];
   auto &smem = *reinterpret_cast<SharedStorage *>(shared_memory);
+  if constexpr (Ctx::kUseUmma) MMA::init(smem);
 
   const KernelParams params{
       shape_m, top_k, use_int64_expert_layout,
@@ -194,19 +195,36 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       auto consume_stage = [&](auto stage, uint32_t slice_iter) {
         constexpr uint32_t stage_id = decltype(stage)::value;
         debug_kernel_timeout_check(debug_start_clock);
-        PRAGMA_UNROLL
-        for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-          if (warp_iter_id == Ctx::kWarpIters - 1 && slice_iter + 1 < num_slice_iters) {
+        if constexpr (Ctx::kUseUmma) {
+          // Fill the free TMEM operand while the previous stage's MMA runs.
+          PRAGMA_UNROLL
+          for (uint32_t iter_id = 1; iter_id < Ctx::kWarpIters; iter_id++) {
+            s2r_pipe.load_stage_iter(stage_id, iter_id);
+            mma.transform_b(iter_id % 2, iter_id);
+          }
+          if (slice_iter != 0) {
+            mma.wait_stage();
+            consumer.arrive((stage_id + kNumStages - 1) % kNumStages);
+          }
+          mma.run(stage_id, Ctx::kWarpIters - 1);
+          if (slice_iter + 1 < num_slice_iters) {
             consumer.wait_stage((stage_id + 1) % kNumStages);
+            s2r_pipe.load_stage_iter(stage_id, Ctx::kWarpIters);
+            mma.transform_b(0, 0);
           }
-          s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-          mma.run(stage_id, warp_iter_id);
-          if (warp_iter_id == Ctx::kWarpIters - 2) {
-            consumer.arrive(stage_id);
+        } else {
+          PRAGMA_UNROLL
+          for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
+            if (warp_iter_id == Ctx::kWarpIters - 1 && slice_iter + 1 < num_slice_iters) {
+              consumer.wait_stage((stage_id + 1) % kNumStages);
+            }
+            s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
+            mma.run(stage_id, warp_iter_id);
+            if (warp_iter_id == Ctx::kWarpIters - 2) consumer.arrive(stage_id);
+            mma.transform_b(
+                (warp_iter_id + 1) % 2,
+                (warp_iter_id + 1) % Ctx::kWarpIters);
           }
-          mma.transform_b(
-              (warp_iter_id + 1) % 2,
-              (warp_iter_id + 1) % Ctx::kWarpIters);
         }
       };
 
@@ -224,6 +242,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         }
       });
 
+      if constexpr (Ctx::kUseUmma) {
+        mma.wait_stage();
+        consumer.arrive((num_slice_iters - 1) % kNumStages);
+      }
       consumer.wait_channel();
       s2r_pipe.load_channel(scheduler.slice_id);
 
@@ -236,6 +258,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   }
 
   __syncthreads();
+  if constexpr (Ctx::kUseUmma) MMA::dealloc(smem);
   if constexpr (TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB > 1) {
     asm volatile("barrier.cluster.arrive;\n");
     asm volatile("barrier.cluster.wait;\n");

@@ -404,6 +404,12 @@ def sample_test_tuning_configs(
     compute_config: ComputeConfig,
     sample_size: int = NUM_SAMPLED_TUNING_CONFIGS,
 ) -> list[dict]:
+    if layer_config.mma_type == MmaType.UMMA:
+        mma_layer = dataclasses.replace(layer_config, mma_type=MmaType.MMA)
+        return [
+            config | {"mma_type": MmaType.MMA.value}
+            for config in sample_test_tuning_configs(mma_layer, compute_config, sample_size)
+        ]
     candidates = enumerate_test_tuning_configs(layer_config, compute_config)
     rng = random.Random(_get_seed(layer_config, compute_config))
     selected = _select_pairwise(candidates, rng)

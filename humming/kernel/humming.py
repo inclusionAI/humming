@@ -16,6 +16,7 @@ from humming.config import (
     MmaType,
     TuningConfig,
 )
+from humming.config.config import _cuda_compiler_version
 from humming.device import get_device_index
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
@@ -111,6 +112,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         ComputeConfig.__post_init__(self)
         TuningConfig.__post_init__(self)
         KernelRuntime.__post_init__(self)
+
+    def init_sm_version(self):
+        super().init_sm_version()
+        if self.mma_type == MmaType.UMMA:
+            assert self.sm_version // 10 == 10, "UMMA requires SM100 family"
+            assert _cuda_compiler_version(self._get_compiler()) >= (12, 9), (
+                "UMMA sm_100f requires CUDA 12.9 or newer"
+            )
+            self.sm_version_str = "100f"
 
     def init_kernel(self) -> None:
         self.check_shape()
@@ -398,6 +408,18 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def check_config(self):
         assert self.num_threads <= 1024
+        if self.mma_type == MmaType.UMMA:
+            assert self.a_dtype == self.c_dtype == dtypes.bfloat16, (
+                "UMMA requires BF16 activations and outputs"
+            )
+            assert self.block_shape[0] in (64, 128)
+            assert tuple(self.block_shape[1:]) == (128, 64)
+            assert tuple(self.warp_shape) == (self.block_shape[0], 32, 64)
+            assert self.use_warp_spec and self.num_stages >= 3
+            assert not self.use_f16_accum
+            assert not self.use_pdl
+            assert not self.reduce_overlap_last_stage_only
+            assert self.multi_cast_size_a == self.multi_cast_size_b == 1
         assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
             "MXMMA does not support FP16 accumulation"
         )

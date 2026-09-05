@@ -52,6 +52,8 @@ def calc_reg_count(rows, cols, ptx_dtype):
 
 
 class MmaOpClassImpl:
+    mma_type = MmaType.MMA
+
     def __init__(self, m, n, k, a_dtype, b_dtype, cd_dtype):
         self.shape = (m, n, k)
         self.a_dtype = a_dtype if isinstance(a_dtype, str) else DTYPE_MAP[a_dtype]
@@ -84,7 +86,7 @@ class MmaOpClassImpl:
     def to_cpp_str(self, include_class_name=False):
         reg_cd_type = self.reg_cd_type
         lines = [
-            "static constexpr MmaType kMmaType = MmaType::MMA;",
+            f"static constexpr MmaType kMmaType = MmaType::{self.mma_type.name};",
             f"using MmaShape = Shape<{self.shape[0]}, {self.shape[1]}, {self.shape[2]}>;",
             "",
             f"using ValTypeC = {self.val_type_cd};",
@@ -166,6 +168,13 @@ class MmaOpClassImpl:
         asm_code = "".join("\n" + " " * indent + x for x in asm_code.split("\n"))
 
         return asm_code
+
+
+class UmmaOpClassImpl(MmaOpClassImpl):
+    mma_type = MmaType.UMMA
+
+    def generate_ptx(self, indent=0):
+        return ""
 
 
 class WgmmaOpClassImpl:
@@ -475,6 +484,11 @@ class MmaOpClass:
 
         if mma_type == MmaType.MMA:
             return MmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
+        elif mma_type == MmaType.UMMA:
+            assert (m, n, k) == (16, 8, 16)
+            assert a_dtype == b_dtype == dtypes.bfloat16
+            assert cd_dtype == dtypes.float32
+            return UmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.WGMMA:
             return WgmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.MXMMA:

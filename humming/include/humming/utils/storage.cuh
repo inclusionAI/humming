@@ -2,6 +2,12 @@
 
 #include <humming/utils/base.cuh>
 
+#if HUMMING_MMA_TYPE_ID == 2
+#define IF_USE_UMMA(x) x
+#else
+#define IF_USE_UMMA(x)
+#endif
+
 // Conditional member macros: when the condition is false, the member is completely eliminated.
 
 #if HUMMING_HAS_INPUT_SCALE && HUMMING_INPUT_SCALE_GROUP_SIZE > 0
@@ -207,4 +213,6 @@ public:
 
   IF_USE_MBARRIER(alignas(128) uint64_t load_mbar[kNumStages + 2];)
   IF_USE_WARP_SPEC(uint64_t math_mbar[kNumMathMbarriers];)
+  IF_USE_UMMA(uint32_t umma_tmem_col;)
+  IF_USE_UMMA(uint64_t umma_mbar;)
 };

@@ -53,6 +53,7 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kIsGroupedGemm = kIsGroupedContiguousGemm || kIsGroupedMaskedGemm;
 
   static constexpr bool kUseWmma = LayerConfig::kMmaType == MmaType::MMA;
+  static constexpr bool kUseUmma = LayerConfig::kMmaType == MmaType::UMMA;
   static constexpr bool kUseWgmma = LayerConfig::kMmaType == MmaType::WGMMA;
   static constexpr bool kUseMxmma = LayerConfig::kMmaType == MmaType::MXMMA;
 

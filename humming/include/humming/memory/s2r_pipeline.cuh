@@ -67,7 +67,7 @@ public:
     auto &smem = ctx.smem;
 
     loader_b.load(smem.stages[stage_id].b, mma.regs_qb_as_ptr(buffer_id), iter_id);
-    if constexpr (!kUseWgmma)
+    if constexpr (!kUseWgmma && !Ctx::kUseUmma)
       loader_a.load(smem.stages[stage_id].a, mma.regs_a_as_ptr(buffer_id), iter_id, stage_id);
     if constexpr (kUseMxmma) {
       if constexpr (kIsGroupInputScale)

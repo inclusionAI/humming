@@ -24,7 +24,10 @@ HummingKernel configurations are divided into three categories:
 | `has_zero_point` | Whether to enable zero point. When enabled, the dequantization changes from `x * scale` to `(x - zp) * scale`. Humming supports two zero point types (see below). |
 | `is_fp_zero_point` | Whether to use FP-type zero point. See `has_zero_point` for details. |
 | `has_bias` | Whether to use fused bias addition. |
-| `mma_type` | Can be `mma` or `wgmma`. Since the MMA type affects weight layout, it is classified under LayerConfig. |
+| `mma_type` | Can be `mma`, `wgmma`, `umma`, or `mxmma`. This selects the weight layout and preferred tensor-core backend. |
+
+`umma` requires SM100-family GPUs, CUDA 12.9+, and BF16 inputs/outputs with FP32
+accumulation. It shares the `mma` weight layout; tuning selects the backend per shape.
 
 **`use_int_weight_scale` preprocessing:**
 
@@ -57,6 +60,8 @@ weight_scale = weight_scale.to(torch.int16).view(dtype)
 - `block_shape[i]` must be a power-of-2 multiple of `warp_shape[i]`.
 - `block_shape_n` must be at least 64.
 - When using WGMMA, `block_shape_n` must be at least 4x `warp_shape_n`.
+- When using UMMA, `block_shape=(64 or 128, 128, 64)` and `warp_shape=(block_shape_m, 32, 64)`.
+- For indexed GEMMs, align `sorted_ids` and `expert_ids` to each projection's `block_shape_m`.
 - `warp_shape_m` must be a multiple of MMA shape M.
 - Valid values for `warp_shape_n` and `warp_shape_k` depend on the activation type:
 
@@ -70,8 +75,8 @@ weight_scale = weight_scale.to(torch.int16).view(dtype)
 
 | Parameter | Description |
 |-----------|-------------|
-| `num_stages` | Number of pipeline stages. Must be at least 2. When using `use_warp_spec` with WGMMA, must be at least 3. |
-| `use_warp_spec` | Whether to enable Warp Specialization. Requires SM90+. |
+| `num_stages` | Number of pipeline stages. Must be at least 2. Must be at least 3 for UMMA or when using `use_warp_spec` with WGMMA. |
+| `use_warp_spec` | Whether to enable Warp Specialization. Requires SM90+. Required for UMMA. |
 | `use_mbarrier` | Whether to use MBarrier. Requires SM80+. |
 | `use_cp_async` | Whether to use CP Async. Requires SM80+. |
 | `num_ctas_per_sm` | Number of CTAs (Cooperative Thread Arrays / Thread Blocks) launched per SM. |
