@@ -35,6 +35,7 @@ private:
   static constexpr uint32_t kProblemNumGroups = CEIL_DIV(ProblemShape::K - PadShape::K, kGroupSize);
   static constexpr uint32_t kNumGroups = CEIL_DIV(BlockShape::K, kGroupSize);
   static constexpr uint32_t kMxScaleVec = kPartMmaShapeK / kGroupSize;
+  static constexpr uint32_t kMxGmemStride = ProblemShape::K / kPartMmaShapeK * kMxScaleVec / 4;
   static constexpr uint32_t kLoadsPerGroup =
       kUseMxScale ? MAX(1u, 4 / kNumGroups) : CEIL_DIV(kGroupSize, BlockShape::K);
   static constexpr uint32_t kRowLoadIters = CEIL_DIV(BlockShape::M, kNumLoadThreads);
@@ -88,10 +89,22 @@ public:
     const uint32_t *gmem_ptr_load = reinterpret_cast<const uint32_t *>(gmem_ptr);
 
     constexpr uint32_t kNumRows = CEIL_DIV(BlockShape::K / kPartMmaShapeK * kMxScaleVec, 4);
-    constexpr uint32_t kMxGmemStride = ProblemShape::K / kPartMmaShapeK * kMxScaleVec / 4;
     constexpr uint32_t kNumInts = BlockShape::M * kNumRows;
 
-    if constexpr (kNumInts <= kNumLoadThreads) {
+    if constexpr (kIsIndexedGemm) {
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < kRowLoadIters; i++) {
+        uint32_t row = i * kNumLoadThreads + thread_id;
+        uint32_t input_row = load_row_index[i];
+        PRAGMA_UNROLL
+        for (uint32_t group = 0; group < kNumRows; group++) {
+          legacy_load_pred<kUseCpAsync>(
+              gmem_ptr_load + input_row * kMxGmemStride + group,
+              smem_ptr_load + group * BlockShape::M + row,
+              row < BlockShape::M && input_row < shape_m);
+        }
+      }
+    } else if constexpr (kNumInts <= kNumLoadThreads) {
       uint32_t smem_offset = thread_id;
       uint32_t smem_row = smem_offset / BlockShape::M;
       uint32_t smem_col = smem_offset % BlockShape::M;
@@ -252,7 +265,7 @@ public:
           if constexpr (kMMajorInputScale)
             gmem_ptr = gmem_ptr_raw + ((col_offset / 4) * total_shape_m + MIN(row_offset, total_shape_m));
           else
-            gmem_ptr = gmem_ptr_raw + (row_offset * (kProblemNumGroups / 4) + col_offset / 4);
+            gmem_ptr = gmem_ptr_raw + (row_offset * kMxGmemStride + col_offset / 4);
         }
       } else if constexpr (kUseTma) {
         // tma loads via tensor map; gmem_ptr unused
@@ -262,7 +275,7 @@ public:
         gmem_ptr = gmem_ptr_raw + ((row_offset * kProblemNumGroups) + col_offset);
       }
     } else {
-      gmem_ptr = gmem_ptr_raw + col_offset;
+      gmem_ptr = gmem_ptr_raw + (kUseMxScale ? col_offset / 4 : col_offset);
 
       PRAGMA_UNROLL
       for (uint32_t i = 0; i < kRowLoadIters; i++) {

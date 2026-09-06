@@ -3,7 +3,7 @@ import dataclasses
 import pytest
 import torch
 
-from humming import dtypes
+from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
 from humming.config.config import _cuda_compiler_version
 from humming.jit.runtime import KernelRuntime
@@ -401,3 +401,134 @@ def test_umma_grouped_metadata_limits_cta_residency():
         )
         assert tuning["num_ctas_per_sm"] == expected_ctas
         assert tuning["num_stages"] == 5
+
+
+@pytest.mark.parametrize("gemm_type", list(GemmType))
+@pytest.mark.parametrize(
+    "a_dtype,weight_values",
+    (
+        ("float8e4m3", dict(b_dtype="float8e4m3")),
+        ("float8e5m2", dict(b_dtype="float8e5m2")),
+        ("float8e4m3", dict(b_dtype="uint4")),
+        ("float8e4m3", WEIGHT_CONFIGS["mxfp4"]),
+    ),
+)
+def test_umma_fp8_channel_input_scales(a_dtype, weight_values, gemm_type):
+    """FP8 TS MMA preserves channel input scales and W4 dequantization."""
+    case = _case("fp8-channel", gemm_type, **weight_values)
+    case = dataclasses.replace(
+        case, layer_config=dataclasses.replace(case.layer_config, a_dtype=a_dtype, use_fused_e8m0_scale=None)
+    )
+    _assert_results(case, (1, 65, 257))
+
+
+@pytest.mark.parametrize("gemm_type", list(GemmType))
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype",
+    (
+        ("float8e4m3", "float4e2m1"),
+        ("float8e4m3", "float8e4m3"),
+        ("float8e5m2", "float4e2m1"),
+        ("float8e5m2", "float8e5m2"),
+    ),
+)
+def test_mxumma_fp8_group32_scales(a_dtype, b_dtype, gemm_type, monkeypatch):
+    """Native MXFP8 consumes group32 E8M0 scales on both operands."""
+    monkeypatch.setattr(
+        "humming.testing.tuning.get_heuristics_config",
+        get_heuristics_config,
+    )
+    case = KernelTestCase(
+        name="mxumma-fp8",
+        layer_config=LayerConfig(
+            shape_n=256,
+            shape_k=768,
+            num_experts=0 if gemm_type == GemmType.DENSE else 4,
+            a_dtype=a_dtype,
+            b_dtype=b_dtype,
+            c_dtype="bfloat16",
+            as_dtype="float8e8m0",
+            bs_dtype="float8e8m0",
+            input_scale_group_size=32,
+            weight_scale_group_size=32,
+            mma_type=MmaType.MXMMA,
+        ),
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        top_k=2,
+        seed=2026,
+    )
+    runner = KernelTestRunner(case)
+    kernels = runner.prepare_kernels((1, 65, 257))
+    assert all(
+        HummingKernel._id2kernel[int(kernel[0][2])].use_mxumma
+        for variants in kernels.values()
+        for kernel in variants
+    )
+    results = runner.run((1, 65, 257))
+    assert {result.shape_m for result in results} == {1, 65, 257}
+    for result in results:
+        torch.testing.assert_close(result.outputs, result.outputs_ref, rtol=case.rtol, atol=case.atol)
+
+
+@pytest.mark.parametrize("prequantized", (False, True))
+@pytest.mark.parametrize("shape_k", (256, 1472, 2880))
+@pytest.mark.parametrize("shape_m", (17, 257))
+@pytest.mark.parametrize("gemm_type", (GemmType.DENSE, GemmType.GROUPED_CONTIGUOUS))
+def test_mxumma_public_input_scales(prequantized, shape_k, shape_m, gemm_type, monkeypatch):
+    """Logical K tails preserve packed scale pitch across tiles and experts."""
+    from humming.forward import humming_forward, may_quant_input
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", get_heuristics_config)
+    config = LayerConfig(
+        shape_n=256,
+        shape_k=(shape_k + 127) // 128 * 128,
+        pad_shape_k=(-shape_k) % 128,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+        a_dtype="float8e4m3",
+        b_dtype="float4e2m1",
+        c_dtype="bfloat16",
+        as_dtype="float8e8m0",
+        bs_dtype="float8e8m0",
+        input_scale_group_size=32,
+        weight_scale_group_size=32,
+    )
+    case = KernelTestCase(
+        name="mxumma-external-scales",
+        layer_config=config,
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        seed=2026,
+    )
+    runner = KernelTestRunner(case)
+    runner.prepare_weight()
+    torch.manual_seed(case.seed)
+    total_m = shape_m * max(config.num_experts, 1)
+    original = torch.randn(total_m, shape_k, device="cuda", dtype=torch.bfloat16)
+    inputs, scales, _ = ops.process_input(
+        original,
+        quant_mode="dynamic_group",
+        quant_dtype="float8e4m3",
+        quant_group_size=32,
+        group_scale_dtype="float8e8m0",
+    )
+    ref_inputs = inputs.float() * scales.float().repeat_interleave(32, dim=-1)
+    scale_bytes = scales.view(torch.uint8)
+    quanted, prepared = may_quant_input(config, inputs, input_scale=scale_bytes)
+    assert quanted.data_ptr() == inputs.data_ptr()
+    if shape_k % 128 == 0:
+        assert prepared.data_ptr() == scale_bytes.data_ptr()
+    assert prepared.dtype == torch.int32 and prepared.shape == (total_m, (shape_k + 127) // 128)
+    if not prequantized:
+        inputs, scale_bytes = may_quant_input(config, original)
+        assert scale_bytes.dtype == torch.int32 and scale_bytes.shape == prepared.shape
+    kwargs = {"compute_config": {"gemm_type": gemm_type.value}}
+    if config.num_experts:
+        kwargs["expert_layout"] = torch.arange(5, device="cuda", dtype=torch.int32) * shape_m
+        reference = torch.bmm(
+            ref_inputs.reshape(4, shape_m, shape_k), runner.weight_ref.transpose(1, 2)
+        ).flatten(0, 1)
+    else:
+        reference = ref_inputs @ runner.weight_ref.T
+    output = humming_forward(
+        config, inputs=inputs, input_scale=scale_bytes, **runner.kernel_tensors, **kwargs
+    )
+    torch.testing.assert_close(output.float(), reference, atol=0.05, rtol=0.01)

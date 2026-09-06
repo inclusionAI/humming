@@ -33,7 +33,11 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr uint32_t kAccumulatorColumn = 2 * kOperandColumns;
   static constexpr uint32_t kTmemColumns = kAccumulatorColumn + BlockShape::M <= 128 ? 128 : 256;
 
-  static_assert(std::is_same<typename Ctx::ElementA, BFloat16>::value);
+  using ElementA = typename Ctx::ElementA;
+  static constexpr bool kFp8 = ElementA::kBits == 8;
+  static_assert(std::is_same<ElementA, BFloat16>::value ||
+                std::is_same<ElementA, Float8E4M3>::value ||
+                std::is_same<ElementA, Float8E5M2>::value);
   static_assert(BlockShape::N == 128 && BlockShape::K == 64);
   static_assert(BlockShape::M == 64 || BlockShape::M == 128);
   static_assert(WarpShape::M == BlockShape::M && WarpShape::N == 32 && WarpShape::K == BlockShape::K);
@@ -83,10 +87,16 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       uint32_t base = ctx.smem.umma_tmem_col;
       PRAGMA_UNROLL
       for (uint32_t k = 0; k < Ctx::kWarpIters; k++) {
-        uint64_t descriptor = tcgen05_smem_desc_bf16(&ctx.smem.stages[stage_id].a[k * 2]);
-        tcgen05_mma_bf16<BlockShape::M>(base + kAccumulatorColumn,
-                                      base + operand_buffer * kOperandColumns + k * 8,
-                                      descriptor, !first_issue || k != 0);
+        auto *ptr = &ctx.smem.stages[stage_id].a[k * 2];
+        uint32_t operand = base + operand_buffer * kOperandColumns + k * 8;
+        if constexpr (kFp8) {
+          tcgen05_mma_fp8<BlockShape::M, std::is_same<ElementA, Float8E5M2>::value>(
+              base + kAccumulatorColumn, operand, tcgen05_smem_desc_fp8(ptr),
+              !first_issue || k != 0);
+        } else {
+          tcgen05_mma_bf16<BlockShape::M>(base + kAccumulatorColumn, operand,
+                                        tcgen05_smem_desc_bf16(ptr), !first_issue || k != 0);
+        }
       }
       tcgen05_commit(cast_smem_ptr_to_uint(&ctx.smem.umma_mbar));
     }

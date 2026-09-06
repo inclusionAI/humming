@@ -156,3 +156,20 @@ def test_hadamard_involution(block_size):
     transformed = process_input(inputs, hadamard_block_size=block_size)[0]
     restored = process_input(transformed, hadamard_block_size=block_size)[0]
     torch.testing.assert_close(restored, inputs, rtol=1e-5, atol=1e-5)
+
+
+def test_precise_activation_keeps_subnormals_across_cached_variants():
+    """Opting out of fast math must affect both compiled code and its cache key."""
+    x = torch.full((1, 32), 2.0**-140, device="cuda", dtype=torch.float32)
+    expected = x / 3.0
+    for precise in [True, False, True]:
+        result = process_input(
+            x,
+            activation_type="unary",
+            activation_impl="a / 3.0f",
+            disable_fast_math=precise,
+        )[0]
+        if precise:
+            torch.testing.assert_close(result, expected, atol=0, rtol=0)
+        else:
+            assert torch.count_nonzero(result) == 0
