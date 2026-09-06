@@ -115,7 +115,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def init_sm_version(self):
         super().init_sm_version()
-        if self.mma_type == MmaType.UMMA:
+        if self.mma_type == MmaType.UMMA or self.use_mxumma:
             assert self.sm_version // 10 == 10, "UMMA requires SM100 family"
             assert _cuda_compiler_version(self._get_compiler()) >= (12, 9), (
                 "UMMA sm_100f requires CUDA 12.9 or newer"
@@ -409,9 +409,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     def check_config(self):
         assert self.num_threads <= 1024
         if self.mma_type == MmaType.UMMA:
-            assert self.a_dtype == self.c_dtype == dtypes.bfloat16, (
-                "UMMA requires BF16 activations and outputs"
-            )
+            assert (
+                self.a_dtype in (dtypes.bfloat16, dtypes.float8e4m3, dtypes.float8e5m2)
+                and self.c_dtype == dtypes.bfloat16
+            ), "UMMA requires BF16 or FP8 activations and BF16 outputs"
+            if self.a_dtype.num_bits == 8:
+                assert self.input_scale_group_size == 0
+                assert self.use_fused_e8m0_scale or not (
+                    self.is_group_weight_scale or self.is_block_weight_scale
+                ), "UMMA FP8 requires channel scales or fused MXFP4 scales"
             assert self.block_shape[0] in (64, 128)
             assert tuple(self.block_shape[1:]) == (128, 64)
             assert tuple(self.warp_shape) == (self.block_shape[0], 32, 64)
@@ -419,6 +425,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert not self.use_f16_accum
             assert not self.use_pdl
             assert not self.reduce_overlap_last_stage_only
+            assert self.multi_cast_size_a == self.multi_cast_size_b == 1
+        if self.use_mxumma:
+            assert self.mxmma_supported
+            assert self.block_shape[0] in (64, 128)
+            assert tuple(self.block_shape[1:]) == (128, 128)
+            assert tuple(self.warp_shape) == (self.block_shape[0], 32, 128)
+            assert self.use_warp_spec and self.num_stages >= 3
+            assert not self.use_pdl and not self.reduce_overlap_last_stage_only
+            assert not self.use_stream_k
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
         assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
             "MXMMA does not support FP16 accumulation"

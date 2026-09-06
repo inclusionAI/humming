@@ -100,8 +100,24 @@ class LayerConfig(BaseHummingConfig):
     @property
     def mxmma_supported(self):
         assert self.sm_version is not None
-        if self.sm_version // 10 != 12:
+        if self.sm_version // 10 not in (10, 12):
             return False
+        if self.sm_version // 10 == 10:
+            from humming.jit.runtime import KernelRuntime
+
+            return (
+                _cuda_compiler_version(KernelRuntime._get_compiler()) >= (12, 9)
+                and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2)
+                and self.b_dtype in (dtypes.float4e2m1, self.a_dtype)
+                and self.input_scale_group_size == 32
+                and self.weight_scale_group_size == 32
+                and self.is_group_weight_scale
+                and self.bs_dtype == dtypes.float8e8m0
+                and self.as_dtype in (None, dtypes.float8e8m0)
+                and not self.has_zero_point
+                and self.shape_n % 128 == 0
+                and self.shape_k % 128 == 0
+            )
         if not (self.is_group_weight_scale or self.is_channel_weight_scale):
             return False
         if (
@@ -303,6 +319,10 @@ class LayerConfig(BaseHummingConfig):
         assert self.mma_type is not None
         value = self.mma_type.value.lower()
         return ["mma", "wgmma", "umma", "mxmma"].index(value)
+
+    @property
+    def use_mxumma(self):
+        return self.mma_type == MmaType.MXMMA and self.sm_version // 10 == 10
 
     @property
     def mxmma_native_mixed(self) -> bool:

@@ -82,3 +82,50 @@ CUDA_INLINE void tcgen05_ld_32x32b_x8(uint32_t address, uint32_t *values) {
         "=r"(values[4]), "=r"(values[5]), "=r"(values[6]), "=r"(values[7])
       : "r"(address) : "memory");
 }
+
+
+CUDA_INLINE uint64_t tcgen05_smem_desc_fp8(const void *ptr) {
+  // K-major, 64 FP8 per row, 64-byte swizzle.
+  return ((uint64_t(cast_smem_ptr_to_uint(ptr)) >> 4) & 0x3fff)
+         | (uint64_t(1) << 16) | (uint64_t(32) << 32)
+         | (uint64_t(1) << 46) | (uint64_t(4) << 61);
+}
+
+
+template <uint32_t kN, bool kE5M2>
+CUDA_INLINE void tcgen05_mma_fp8(uint32_t d, uint32_t a, uint64_t b, bool accumulate) {
+  constexpr uint32_t descriptor = (1u << 4) | (uint32_t(kE5M2) << 7)
+                                  | (uint32_t(kE5M2) << 10)
+                                  | ((kN / 8) << 17) | (8u << 24);
+  asm volatile(
+      "{\n"
+      "  .reg .pred p;\n"
+      "  setp.ne.b32 p, %4, 0;\n"
+      "  tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], [%1], %2, %3, {%5, %5, %5, %5}, p;\n"
+      "}\n"
+      :: "r"(d), "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u)
+      : "memory");
+}
+
+
+CUDA_INLINE void tcgen05_st_32x32b_x4(uint32_t address, const uint32_t *values) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x4.b32 [%0], {%1, %2, %3, %4};"
+               :: "r"(address), "r"(values[0]), "r"(values[1]),
+                  "r"(values[2]), "r"(values[3]) : "memory");
+}
+
+
+template <uint32_t kN, uint32_t kAType, uint32_t kBType>
+CUDA_INLINE void tcgen05_mma_mxfp8(uint32_t d, uint32_t a, uint64_t b,
+                            uint32_t sfa, uint32_t sfb, uint32_t scale_id,
+                            bool accumulate) {
+  constexpr uint32_t descriptor = (kAType << 7) | (kBType << 10)
+      | ((kN / 8) << 17) | (1u << 23) | (1u << 27);
+  uint32_t idesc = descriptor | (scale_id << 29) | (scale_id << 4);
+  asm volatile(
+      "{ .reg .pred p; setp.ne.b32 p, %6, 0;\n"
+      "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale "
+      "[%0], [%1], %2, %3, [%4], [%5], p; }"
+      :: "r"(d), "r"(a), "l"(b), "r"(idesc), "r"(sfa), "r"(sfb),
+         "r"(uint32_t(accumulate)) : "memory");
+}

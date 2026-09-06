@@ -36,6 +36,7 @@ class _ProcessInput:
     token_scales: torch.Tensor | None = None
     activation_type: ActivationType | str = "none"
     activation_impl: str | None = None
+    disable_fast_math: bool = False
     hadamard_block_size: int | None = None
     layout: LayoutType | str = "normal"
     expert_layout: torch.Tensor | None = None
@@ -336,6 +337,7 @@ class _ProcessInput:
             zero_invalid=self.zero_invalid and self.layout == LayoutType.GroupedPadded,
             activation_type=self.activation_type,
             activation_impl=self.activation_impl,
+            disable_fast_math=self.disable_fast_math,
             quant_mode=self.quant_mode,
             group_scale_dtype=self.group_scale_dtype,
             scale_layout=self.group_scale_layout,
@@ -373,6 +375,7 @@ def _prepare_process_input_op(
     group_scale_dtype: str | None = None,
     activation_type: str = "none",
     activation_impl: str | None = None,
+    disable_fast_math: bool = False,
     hadamard_block_size: int | None = None,
     layout: str = "normal",
     expert_layout: torch.Tensor | None = None,
@@ -395,6 +398,7 @@ def _prepare_process_input_op(
         token_scales=token_scales,
         activation_type=activation_type,
         activation_impl=activation_impl,
+        disable_fast_math=disable_fast_math,
         hadamard_block_size=hadamard_block_size,
         layout=layout,
         expert_layout=expert_layout,
@@ -429,6 +433,7 @@ def _prepare_process_input_op(
             quant_group_size,
             activation_type,
             activation_impl,
+            disable_fast_math,
             hadamard_block_size,
             layout,
             output_width,
@@ -461,6 +466,7 @@ def process_input(
     token_scales: torch.Tensor | None = None,
     activation_type: str = "none",
     activation_impl: str | None = None,
+    disable_fast_math: bool = False,
     hadamard_block_size: int | None = None,
     layout: str = "normal",
     expert_layout: torch.Tensor | None = None,
@@ -476,6 +482,7 @@ def process_input(
         group_scale_dtype=group_scale_dtype,
         activation_type=activation_type,
         activation_impl=activation_impl,
+        disable_fast_math=disable_fast_math,
         hadamard_block_size=hadamard_block_size,
         layout=layout,
         expert_layout=expert_layout,

@@ -2,7 +2,7 @@
 
 #include <humming/utils/base.cuh>
 
-#if HUMMING_MMA_TYPE_ID == 2
+#if HUMMING_MMA_TYPE_ID == 2 || (HUMMING_MMA_TYPE_ID == 3 && HUMMING_SM_VERSION / 10 == 10)
 #define IF_USE_UMMA(x) x
 #else
 #define IF_USE_UMMA(x)

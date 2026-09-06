@@ -22,6 +22,33 @@ class Sm100Heuristics(Sm80Heuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
+        if layer_config.use_mxumma:
+            indexed = gemm_type == GemmType.INDEXED
+            block_m = 64 if shape_m < 128 * (layer_config.num_experts or 1) else 128
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                (block_m, 128, 128),
+                gemm_type,
+                4,
+                warp_shape=(block_m, 32, 128),
+                use_mbarrier=True,
+                use_warp_spec=True,
+            )
+            num_ctas = 2 if 2 * smem_size <= cls.max_smem_size else 1
+            return {
+                "mma_type": MmaType.MXMMA.value,
+                "block_shape": (block_m, 128, 128),
+                "warp_shape": (block_m, 32, 128),
+                "num_stages": 4,
+                "num_ctas_per_sm": num_ctas,
+                "use_warp_spec": True,
+                "use_tma": True,
+                "use_tma_a": not indexed,
+                "use_tma_c": not indexed,
+                "use_stream_k": False,
+                "use_pdl": False,
+                "raster_group_m": 1,
+            }
         if layer_config.mma_type != MmaType.UMMA:
             return super().get_config(
                 layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type

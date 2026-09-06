@@ -96,6 +96,7 @@ class ProcessInputKernel(KernelRuntime, BaseHummingConfig):
     # Activation
     activation_type: ActivationType | str = ActivationType.None_
     activation_impl: str = ""
+    disable_fast_math: bool = False
 
     # Quantization
     quant_mode: QuantizationMode | str = QuantizationMode.DynamicGroup
