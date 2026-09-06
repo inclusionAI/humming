@@ -47,8 +47,10 @@ public:
     ctx.sync_math_threads();
   }
 
+  template <bool kNative = false>
   CUDA_INLINE
-  void call(uint32_t *regs_c_ptr) {
+  void call(uint32_t *regs_c_ptr, MMA *mma = nullptr) {
+    if constexpr (kNative) arith.prepare_native_output();
     ctx.sync_math_threads();
     if constexpr (BlockShape::K > WarpShape::K) smem_reducer.reduce(regs_c_ptr);
     static_assert(kNumWriteSplits == 1 || kNumWriteSplits == 2);
@@ -61,7 +63,13 @@ public:
     if (slice_count > 1) acquire_gmem_barrier();
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kNumWriteSplits; i++) {
-      smem_writer.write(regs_c_ptr, slice_count, i);
+      if constexpr (kNative) {
+        static_assert(kNumWriteSplits == 1 && !Ctx::kUseStreamK);
+        static_assert(BlockShape::K == WarpShape::K);
+        mma->write_native_output(arith);
+      } else {
+        smem_writer.write(regs_c_ptr, slice_count, i);
+      }
       if constexpr (Ctx::kUseTmaC) {
         if (ctx.is_math_thread()) tma_fence_async_shared();
       }
