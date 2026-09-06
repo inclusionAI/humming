@@ -1,4 +1,5 @@
 import functools
+import os
 
 import torch
 
@@ -15,6 +16,7 @@ from humming.tune.sm8x import (
 from humming.tune.sm75 import Sm75Heuristics
 from humming.tune.sm90 import Sm90Heuristics
 from humming.tune.sm90_h20 import Sm90H20Heuristics
+from humming.tune.sm90_h200 import Sm90H200Heuristics
 from humming.tune.sm100 import Sm100Heuristics
 from humming.tune.sm120 import Sm120Heuristics
 from humming.tune.sm121 import Sm121Heuristics
@@ -34,11 +36,53 @@ heuristics_map: dict[int, type[DeviceHeuristics]] = {
 }
 
 
+def _forced_heuristics_class() -> type[DeviceHeuristics] | None:
+    """Resolve HUMMING_FORCE_HEURISTICS to a heuristics class.
+
+    Accepts either a heuristics class name (e.g. ``sm90_h200``) or an SM
+    version key from ``heuristics_map`` (e.g. ``90``). Useful on OEM-renamed
+    GPUs where name-based dispatch picks the wrong variant.
+    """
+    forced = os.environ.get("HUMMING_FORCE_HEURISTICS")
+    if not forced:
+        return None
+    by_name = {cls.__name__: cls for cls in heuristics_map.values()}
+    by_name.update(
+        {
+            Sm90H20Heuristics.__name__: Sm90H20Heuristics,
+            Sm90H200Heuristics.__name__: Sm90H200Heuristics,
+        }
+    )
+    if forced in by_name:
+        return by_name[forced]
+    # Case-insensitive / module-style aliases (e.g. "sm90_h200" for
+    # Sm90H200Heuristics).
+    canonical = forced.lower().replace("_", "").removesuffix("heuristics")
+    for name, cls in by_name.items():
+        if name.lower().removesuffix("heuristics") == canonical:
+            return cls
+    if forced.isdigit():
+        sm_version = int(forced)
+        if sm_version in heuristics_map:
+            return heuristics_map[sm_version]
+        return heuristics_map.get(sm_version // 10 * 10)
+    raise ValueError(
+        f"HUMMING_FORCE_HEURISTICS={forced!r} does not match any heuristics "
+        f"class ({', '.join(sorted(by_name))}) or SM version key "
+        f"({', '.join(map(str, heuristics_map))})"
+    )
+
+
 def get_heuristics_class(device: int | torch.device | None = None) -> type[DeviceHeuristics]:
+    forced = _forced_heuristics_class()
+    if forced is not None:
+        return forced
     info = DeviceInfo(device)
     sm_version = info.sm_version
     if sm_version == 90:
-        if "H20" in info.name and "H200" not in info.name:
+        if "H200" in info.name:
+            return Sm90H200Heuristics
+        if "H20" in info.name:
             return Sm90H20Heuristics
 
     if sm_version in heuristics_map:
