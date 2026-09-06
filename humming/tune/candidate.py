@@ -54,6 +54,26 @@ class TuningProblem:
         return min(self.shape_m, self.layer_config.num_experts)
 
 
+def estimate_indexed_m_blocks_uniform(
+    shape_m: int,
+    num_experts: int,
+    block_shape_m: int,
+) -> int:
+    """Estimate Indexed MoE M tiles from deterministic uniform routing."""
+    if shape_m <= 0:
+        raise ValueError("shape_m must be positive")
+    if num_experts <= 0:
+        raise ValueError("num_experts must be positive")
+    if block_shape_m <= 0:
+        raise ValueError("block_shape_m must be positive")
+
+    base, remainder = divmod(shape_m, num_experts)
+    return (
+        (num_experts - remainder) * math.ceil(base / block_shape_m)
+        + remainder * math.ceil((base + 1) / block_shape_m)
+    )
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class ScheduleCandidate:
     candidate_id: str
@@ -522,10 +542,25 @@ def _analyze_resources(
         and schedule.block_shape[1] > 0
         and problem.layer_config.shape_n % schedule.block_shape[1] == 0
     ):
+        if (
+            problem.device.sm_version == 90
+            and problem.gemm_type == GemmType.INDEXED
+            and problem.layer_config.num_experts > 0
+            and problem.layer_config.a_dtype.num_bits == 16
+            and problem.layer_config.b_dtype.num_bits == 4
+            and not problem.use_batch_invariant
+        ):
+            num_m_blocks = estimate_indexed_m_blocks_uniform(
+                problem.shape_m,
+                problem.layer_config.num_experts,
+                schedule.block_shape[0],
+            )
+        else:
+            num_m_blocks = problem.estimate_num_blocks_m(schedule.block_shape[0])
         num_output_tiles = (
             problem.layer_config.shape_n
             // schedule.block_shape[1]
-            * problem.estimate_num_blocks_m(schedule.block_shape[0])
+            * num_m_blocks
         )
 
     residency_limits: list[int] = []

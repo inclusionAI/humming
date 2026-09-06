@@ -12,6 +12,7 @@ from humming.tune.candidate import (
     TuningDecision,
     TuningProblem,
     analyze_candidate,
+    estimate_indexed_m_blocks_uniform,
     fit_pipeline_stages,
 )
 
@@ -67,6 +68,150 @@ def _select_sm90_block_m(
     return np.argmin(num_blocks_list).item() * 8 + 8
 
 
+_W4A16_INDEXED_BM_SEARCH_RADIUS = 32
+_W4A16_INDEXED_BM_POOR_LAST_WAVE_UTIL = 0.25
+_W4A16_INDEXED_BM_MAX_PADDING_REGRESSION = 0.10
+_W4A16_INDEXED_BM_BOUNDARY_MAX_TILE_GAIN_RATIO = 0.05
+_W4A16_INDEXED_BM_BOUNDARY_MIN_PADDING_REGRESSION = 0.10
+_W4A16_INDEXED_BM_MAX = 64
+
+
+def _applies_w4a16_indexed_policy(problem: TuningProblem) -> bool:
+    """Return whether the SM90 W4A16 indexed policy applies."""
+    layer_config = problem.layer_config
+    return (
+        problem.device.sm_version == 90
+        and problem.gemm_type == GemmType.INDEXED
+        and layer_config.num_experts > 0
+        and layer_config.a_dtype.num_bits == 16
+        and layer_config.b_dtype.num_bits == 4
+        and not problem.use_batch_invariant
+    )
+
+
+def _select_conservative_indexed_a16_block_m(problem: TuningProblem) -> int:
+    """Return the conservative threshold-based indexed-A16 seed BM."""
+    layer_config = problem.layer_config
+    tokens_per_expert = problem.shape_m / layer_config.num_experts
+    first_threshold = 1.01 if layer_config.b_dtype.num_bits == 4 else 0.7
+    moe_block_size_configs = (
+        (8, first_threshold),
+        (16, 0.7),
+        (24, 0.8),
+        (32, 0.9),
+        (48, 0.9),
+        (64, 0.9),
+    )
+    for block_shape_m, threshold in moe_block_size_configs:
+        if tokens_per_expert / block_shape_m < threshold:
+            break
+    return block_shape_m
+
+
+def _select_w4a16_indexed_block_m(
+    problem: TuningProblem,
+    max_block_m: int,
+) -> int:
+    """Select the W4A16 seed BM from routed-M-aware grid estimates."""
+    if problem.device.num_sms is None:
+        raise ValueError("W4A16 BM selection requires a device SM count")
+    layer_config = problem.layer_config
+    valid_candidates = list(range(8, max_block_m + 1, 8))
+    if not valid_candidates:
+        raise ValueError("no legal W4A16 BM candidates")
+
+    expected_m_per_expert = problem.shape_m / layer_config.num_experts
+    if expected_m_per_expert <= max_block_m:
+        primary_target = math.ceil(expected_m_per_expert / 8) * 8
+    else:
+        num_m_tiles = math.ceil(expected_m_per_expert / max_block_m)
+        primary_target = math.ceil(expected_m_per_expert / num_m_tiles / 8) * 8
+    primary_target = max(8, min(primary_target, max_block_m))
+    primary_bm = next(
+        (block_m for block_m in valid_candidates if block_m >= primary_target),
+        valid_candidates[-1],
+    )
+    num_sms = max(problem.device.num_sms, 1)
+
+    def estimate(block_m: int) -> dict[str, float | int]:
+        total_m_blocks = estimate_indexed_m_blocks_uniform(
+            problem.shape_m,
+            layer_config.num_experts,
+            block_m,
+        )
+        padded_m = total_m_blocks * block_m
+        padding_ratio = max(padded_m - problem.shape_m, 0) / problem.shape_m
+        # Use the smallest indexed-A16 N tile only for conservative BM ranking.
+        # The indexed-A16 policy still owns the actual BN and CTA residency.
+        total_ctas = total_m_blocks * math.ceil(layer_config.shape_n / 128)
+        num_waves = math.ceil(total_ctas / num_sms) if total_ctas else 0
+        last_wave_util = 0.0
+        if num_waves:
+            last_wave_ctas = total_ctas - (num_waves - 1) * num_sms
+            last_wave_util = last_wave_ctas / num_sms
+        return {
+            "bm": block_m,
+            "num_m_tiles": total_m_blocks,
+            "num_waves": num_waves,
+            "last_wave_util": last_wave_util,
+            "padding_ratio": padding_ratio,
+        }
+
+    primary = estimate(primary_bm)
+    if primary_bm > 8:
+        smaller_bm = primary_bm - 8
+        smaller = estimate(smaller_bm)
+        tile_gain_ratio = (
+            smaller["num_m_tiles"] - primary["num_m_tiles"]
+        ) / smaller["num_m_tiles"]
+        padding_regression = (
+            primary["padding_ratio"] - smaller["padding_ratio"]
+        )
+        if (
+            tile_gain_ratio
+            < _W4A16_INDEXED_BM_BOUNDARY_MAX_TILE_GAIN_RATIO
+            and padding_regression
+            > _W4A16_INDEXED_BM_BOUNDARY_MIN_PADDING_REGRESSION
+        ):
+            primary_bm = smaller_bm
+            primary = smaller
+    if primary["last_wave_util"] >= _W4A16_INDEXED_BM_POOR_LAST_WAVE_UTIL:
+        return primary_bm
+    correction_candidates = [
+        block_m
+        for block_m in valid_candidates
+        if abs(block_m - primary_bm) <= _W4A16_INDEXED_BM_SEARCH_RADIUS
+    ]
+    winner = primary
+    for block_m in correction_candidates:
+        if block_m == primary_bm:
+            continue
+        neighbor = estimate(block_m)
+        wave_improved = (
+            neighbor["num_waves"] < primary["num_waves"]
+            or (
+                neighbor["num_waves"] == primary["num_waves"]
+                and neighbor["last_wave_util"] > primary["last_wave_util"]
+            )
+        )
+        padding_ok = neighbor["padding_ratio"] <= (
+            primary["padding_ratio"]
+            + _W4A16_INDEXED_BM_MAX_PADDING_REGRESSION
+        )
+        if not (wave_improved and padding_ok):
+            continue
+        winner_is_better = (
+            neighbor["num_waves"] < winner["num_waves"]
+            or (
+                neighbor["num_waves"] == winner["num_waves"]
+                and neighbor["last_wave_util"] > winner["last_wave_util"]
+            )
+        )
+        if winner_is_better:
+            winner = neighbor
+    return int(winner["bm"])
+
+
 def build_sm90_seed_config(problem: TuningProblem) -> dict:
     """Build the sparse seed config shared by legacy and indexed-A16 paths."""
     layer_config = problem.layer_config
@@ -83,20 +228,15 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         max_block_m = 176
 
     if tune_indexed_a16:
-        # Bound padding when only a few routed rows land on each expert.
-        tokens_per_expert = problem.shape_m / layer_config.num_experts
-        first_threshold = 1.01 if layer_config.b_dtype.num_bits == 4 else 0.7
-        moe_block_size_configs = (
-            (8, first_threshold),
-            (16, 0.7),
-            (24, 0.8),
-            (32, 0.9),
-            (48, 0.9),
-            (64, 0.9),
+        conservative_block_m = _select_conservative_indexed_a16_block_m(problem)
+        block_shape_m = (
+            _select_w4a16_indexed_block_m(
+                problem,
+                min(max_block_m, _W4A16_INDEXED_BM_MAX),
+            )
+            if _applies_w4a16_indexed_policy(problem)
+            else conservative_block_m
         )
-        for block_shape_m, threshold in moe_block_size_configs:
-            if tokens_per_expert / block_shape_m < threshold:
-                break
     else:
         block_shape_m = _select_sm90_block_m(
             layer_config,
@@ -391,6 +531,7 @@ def select_indexed_a16(
 ) -> TuningDecision:
     if problem.device.num_sms is None:
         raise ValueError("indexed-A16 selection requires a device SM count")
+
     base = fit_pipeline_stages(
         problem,
         ScheduleCandidate.from_config(
@@ -430,14 +571,26 @@ def select_indexed_a16(
     base_analysis = analyses[base_option]
     if not base_analysis.legal:
         raise AssertionError(base_analysis.rejection_reasons)
-    eligible_reasons = {
-        base_option: "selected the base indexed-A16 schedule",
-    }
 
-    if half_option is not None:
-        half_analysis = analyses[half_option]
+    half_analysis = analyses.get(half_option) if half_option is not None else None
+    prefer_half_k = (
+        _applies_w4a16_indexed_policy(problem)
+        and base_analysis.candidate.block_shape[0] >= 32
+        and half_analysis is not None
+        and half_analysis.legal
+    )
+    if prefer_half_k:
+        assert half_option is not None
+        selected = half_option
+        selection_reason = "halved K because BM is at least 32"
+    else:
+        eligible_reasons = {
+            base_option: "selected the base indexed-A16 schedule",
+        }
         if (
-            base_analysis.candidate.num_ctas_per_sm == 1
+            half_option is not None
+            and half_analysis is not None
+            and base_analysis.candidate.num_ctas_per_sm == 1
             and half_analysis.legal
             and half_analysis.candidate.num_ctas_per_sm
             > base_analysis.candidate.num_ctas_per_sm
@@ -446,34 +599,36 @@ def select_indexed_a16(
                 "halved K because it increased CTA residency"
             )
 
-    for option in options:
-        if option.transform != "split_n_widen_k":
-            continue
-        assert option.parent is not None
-        parent_reason = eligible_reasons.get(option.parent)
-        analysis = analyses[option]
-        parent_analysis = analyses[option.parent]
-        if (
-            parent_reason is not None
-            and analysis.legal
-            and analysis.candidate.num_ctas_per_sm
-            > parent_analysis.candidate.num_ctas_per_sm
-            and analysis.waves is not None
-            and parent_analysis.waves is not None
-            and analysis.waves <= parent_analysis.waves
-        ):
-            eligible_reasons[option] = (
-                f"{parent_reason}; split N and widened K without adding a grid wave"
-            )
-    selected = max(
-        eligible_reasons,
-        key=lambda option: option.priority,
-    )
+        for option in options:
+            if option.transform != "split_n_widen_k":
+                continue
+            assert option.parent is not None
+            parent_reason = eligible_reasons.get(option.parent)
+            analysis = analyses[option]
+            parent_analysis = analyses[option.parent]
+            if (
+                parent_reason is not None
+                and analysis.legal
+                and analysis.candidate.num_ctas_per_sm
+                > parent_analysis.candidate.num_ctas_per_sm
+                and analysis.waves is not None
+                and parent_analysis.waves is not None
+                and analysis.waves <= parent_analysis.waves
+            ):
+                eligible_reasons[option] = (
+                    f"{parent_reason}; split N and widened K without adding a grid wave"
+                )
+        selected = max(
+            eligible_reasons,
+            key=lambda option: option.priority,
+        )
+        selection_reason = eligible_reasons[selected]
 
-    final_candidate = analyses[selected].candidate.with_updates(
+    selected_analysis = analyses[selected]
+    final_candidate = selected_analysis.candidate.with_updates(
         use_stream_k=(
-            bool(analyses[selected].candidate.get("use_stream_k", True))
-            and analyses[selected].num_output_tiles < problem.device.num_sms
+            bool(selected_analysis.candidate.get("use_stream_k", True))
+            and selected_analysis.num_output_tiles < problem.device.num_sms
         )
     )
     final_analysis = analyze_candidate(problem, final_candidate)
@@ -487,5 +642,5 @@ def select_indexed_a16(
             final_analysis if option is selected else analyses[option]
             for option in options
         ),
-        reason=eligible_reasons[selected],
+        reason=selection_reason,
     )
