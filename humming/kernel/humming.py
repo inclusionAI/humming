@@ -115,7 +115,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def init_sm_version(self):
         super().init_sm_version()
-        if self.mma_type == MmaType.UMMA:
+        if self.mma_type == MmaType.UMMA or self.use_mxumma:
             assert self.sm_version // 10 == 10, "UMMA requires SM100 family"
             assert _cuda_compiler_version(self._get_compiler()) >= (12, 9), (
                 "UMMA sm_100f requires CUDA 12.9 or newer"
@@ -370,7 +370,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             dtypes.int4: 80,
             dtypes.int8: 75,
             dtypes.float4e0m3: 120,
-            dtypes.float4e2m1: 120,
+            dtypes.float4e2m1: 100 if self.use_mxumma else 120,
             dtypes.float8e3m4: 120,
             dtypes.float8e4m3: 89,
             dtypes.float8e5m2: 89,
@@ -419,6 +419,24 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert not self.use_f16_accum
             assert not self.use_pdl
             assert not self.reduce_overlap_last_stage_only
+            assert self.multi_cast_size_a == self.multi_cast_size_b == 1
+        if self.use_mxumma:
+            assert self.mxmma_supported
+            if self.input_scale_group_size > 0:
+                expected_scale = (
+                    self.bs_dtype if self.is_group_weight_scale
+                    else dtypes.float8e4m3 if self.input_scale_group_size == 16
+                    else dtypes.float8e8m0
+                )
+                assert self.as_dtype == expected_scale
+            assert self.block_shape[0] in (64, 128)
+            assert self.block_shape[1] == 128 and self.block_shape[2] in (128, 256)
+            assert tuple(self.warp_shape) == (
+                self.block_shape[0], 32, self.block_shape[2]
+            )
+            assert self.use_warp_spec and self.num_stages >= 3
+            assert not self.use_pdl and not self.reduce_overlap_last_stage_only
+            assert not self.use_stream_k
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
         assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
             "MXMMA does not support FP16 accumulation"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <humming/mma/mxmma.cuh>
+#include <humming/mma/mxumma.cuh>
 #include <humming/mma/wgmma.cuh>
 #include <humming/mma/wmma.cuh>
 #include <humming/mma/umma.cuh>
@@ -21,7 +22,7 @@ struct MmaSelector<MmaType::WGMMA, Ctx, ArithClass> {
 
 template <class Ctx, class ArithClass>
 struct MmaSelector<MmaType::MXMMA, Ctx, ArithClass> {
-  using Type = MXMMA<Ctx, ArithClass>;
+  using Type = typename std::conditional<Ctx::kUseUmma, MXUMMA<Ctx, ArithClass>, MXMMA<Ctx, ArithClass>>::type;
 };
 
 template <class Ctx, class ArithClass>
