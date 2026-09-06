@@ -11,6 +11,7 @@ from humming.utils.smem import estimate_smem_size_layer
 class Sm100Heuristics(Sm80Heuristics):
     max_smem_size: int = 227 * 1024
     sm_version: int = 100
+    b4_allowed_dtypes: list[dtypes.DataType] = [dtypes.int4, dtypes.float4e2m1]
     b8_allowed_dtypes: list[dtypes.DataType] = [dtypes.int8, dtypes.float8e4m3, dtypes.float8e5m2]
 
     @classmethod
@@ -22,6 +23,34 @@ class Sm100Heuristics(Sm80Heuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
+        if layer_config.use_mxumma:
+            indexed = gemm_type == GemmType.INDEXED
+            block_m = 64 if shape_m < 128 * (layer_config.num_experts or 1) else 128
+            block_k = 256 if layer_config.shape_k % 256 == 0 else 128
+            num_ctas = 1
+            tiles = math.ceil(shape_m / block_m) * (layer_config.shape_n // 128)
+            if tiles >= 2 * current_device.sm_count:
+                smem_size = estimate_smem_size_layer(
+                    layer_config, (block_m, 128, 128), gemm_type, 4,
+                    warp_shape=(block_m, 32, 128),
+                    use_mbarrier=True, use_warp_spec=True,
+                )
+                if 2 * smem_size <= cls.max_smem_size:
+                    block_k, num_ctas = 128, 2
+            return {
+                "mma_type": MmaType.MXMMA.value,
+                "block_shape": (block_m, 128, block_k),
+                "warp_shape": (block_m, 32, block_k),
+                "num_stages": 4,
+                "num_ctas_per_sm": num_ctas,
+                "use_warp_spec": True,
+                "use_tma": True,
+                "use_tma_a": not indexed,
+                "use_tma_c": not indexed,
+                "use_stream_k": False,
+                "use_pdl": False,
+                "raster_group_m": 1,
+            }
         if layer_config.mma_type != MmaType.UMMA:
             return super().get_config(
                 layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type

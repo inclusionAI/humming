@@ -26,6 +26,14 @@ def _prepare_input_scale(config: LayerConfig, input_scale: torch.Tensor) -> torc
     mx_scale_dtype = str(config.as_dtype) in ("float8e4m3", "float8e8m0")
     grouped_mxmma = config.mma_type == MmaType.MXMMA and config.input_scale_group_size > 0
     if mx_scale_dtype and grouped_mxmma and input_scale.dtype != torch.int32:
+        if config.use_mxumma and input_scale.ndim == 2:
+            group_size = config.input_scale_group_size
+            logical_groups = (config.shape_k - config.pad_shape_k) // group_size
+            packed_groups = (config.shape_k // group_size + 3) // 4 * 4
+            if input_scale.size(-1) == logical_groups and logical_groups < packed_groups:
+                input_scale = torch.nn.functional.pad(
+                    input_scale.view(torch.uint8), (0, packed_groups - logical_groups)
+                )
         packed_scale = input_scale.view(torch.int32)
         if input_scale.ndim == 3:
             packed_scale = packed_scale.reshape(input_scale.size(0), input_scale.size(1))
@@ -115,12 +123,16 @@ def may_quant_input(
         return inputs, None
     if input_scale is not None:
         config.check_device(inputs.device)
-        return inputs, input_scale
+        return inputs, _prepare_input_scale(config, input_scale)
     outputs, group_scales, token_scales = may_process_input(
         config,
         inputs=inputs,
         outputs=quanted_input,
-        m_major_scale=(config.mma_type == MmaType.MXMMA and config.input_scale_group_size > 0),
+        m_major_scale=(
+            config.mma_type == MmaType.MXMMA
+            and config.input_scale_group_size > 0
+            and not config.use_mxumma
+        ),
         use_pdl=use_pdl,
     )
     if token_scales is not None:
@@ -171,8 +183,8 @@ def humming_forward(
         if token_scales is not None:
             token_scales = token_scales.unsqueeze(-1)
         input_scale = group_scales if group_scales is not None else token_scales
-        if input_scale is not None:
-            input_scale = _prepare_input_scale(config, input_scale)
+    if input_scale is not None:
+        input_scale = _prepare_input_scale(config, input_scale)
 
     if isinstance(compute_config, dict):
         compute_config = json.dumps(compute_config)
