@@ -77,9 +77,9 @@ public:
   void acquire_gmem_barrier() {
     if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 0 : -1;
-      barrier_acquire2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val);
+      barrier_acquire2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val, ctx.math_thread_id());
     } else {
-      barrier_acquire<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id);
+      barrier_acquire<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id, ctx.math_thread_id());
     }
   }
 
@@ -87,9 +87,9 @@ public:
   void release_gmem_barrier() {
     if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 1 - static_cast<int32_t>(slice_count) : 0;
-      barrier_release2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val);
+      barrier_release2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val, ctx.math_thread_id());
     } else {
-      barrier_release<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id == slice_count - 1);
+      barrier_release<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id == slice_count - 1, ctx.math_thread_id());
     }
   }
 

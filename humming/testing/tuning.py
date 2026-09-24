@@ -25,7 +25,7 @@ SAMPLED_TUNING_VALUES = {
     "use_stream_k": (True, False),
     "num_ctas_per_sm": (1, 2, 3, 4),
     "raster_group_m": (1, 2, 5, 9),
-    "reduce_overlap_last_stage_only": (True, False),
+    "smem_reuse_mode": ("none", "last_stage", "all_stages"),
     "num_write_splits": (1, 2),
     "warp_iters": (2, 4, 8),
     "k_warps": (1, 2, 4),
@@ -226,12 +226,10 @@ def _generate_scheduling_candidates(
         "use_stream_k",
         "num_ctas_per_sm",
         "raster_group_m",
-        "reduce_overlap_last_stage_only",
+        "smem_reuse_mode",
         "num_write_splits",
     )
     for signature in _generate_cartesian(*names):
-        if signature["reduce_overlap_last_stage_only"] and compute_config.gemm_type.value == "indexed":
-            continue
         candidates.append((base | signature, signature))
     return candidates
 

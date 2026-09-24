@@ -58,6 +58,8 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kUseWgmma = LayerConfig::kMmaType == MmaType::WGMMA;
   static constexpr bool kUseMxmma = LayerConfig::kMmaType == MmaType::MXMMA;
 
+  static constexpr bool kUseUmmaSplitLoads = false;
+
   static constexpr bool kUsePackedKLayout = LayerConfig::kUsePackedKLayout;
   static constexpr uint32_t kPackedKFactor = kUsePackedKLayout ? 2 : 1;
 
@@ -80,14 +82,28 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
 
   SharedStorage &smem;
   const KernelParams &params;
+  uint32_t row_index_buffer = 0;
 
   CUDA_INLINE KernelContext(SharedStorage &smem, const KernelParams &params)
       : smem(smem), params(params) {}
 
+  CUDA_INLINE uint32_t math_thread_id() { return threadIdx.x; }
   CUDA_INLINE uint32_t warp_id() { return threadIdx.x / 32; }
   CUDA_INLINE uint32_t lane_id() { return threadIdx.x % 32; }
   CUDA_INLINE uint32_t load_thread_id() { return threadIdx.x - kLoadThreadOffset; }
   CUDA_INLINE uint32_t cluster_rank() { return blockIdx.x % kMultiCastSize; }
+
+  CUDA_INLINE uint32_t *get_rd_row_index() {
+    if constexpr (!kIsIndexedGemm) return nullptr;
+    else if constexpr (kUseWarpSpec) return row_index_buffer ? smem.rd_row_index_next : smem.rd_row_index;
+    else return smem.rd_row_index;
+  }
+
+  CUDA_INLINE uint32_t *get_wr_row_index() {
+    if constexpr (!kIsIndexedGemm) return nullptr;
+    else if constexpr (kUseWarpSpec) return row_index_buffer ? smem.wr_row_index_next : smem.wr_row_index;
+    else return smem.wr_row_index;
+  }
 
   CUDA_INLINE uint32_t m_warp_id() { return M_WARPS == 1 ? 0 : (warp_id() / N_WARPS % M_WARPS); }
   CUDA_INLINE uint32_t n_warp_id() { return N_WARPS == 1 ? 0 : (warp_id() % N_WARPS); }
@@ -102,4 +118,57 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
 
   CUDA_INLINE static void sync_math_threads() { sync_part_threads<kNumMathThreads, kNumThreads, kUseWarpSpec ? 1 : 0>(); }
   CUDA_INLINE static void sync_load_threads() { sync_part_threads<kNumLoadThreads, kNumThreads, kUseWarpSpec ? 2 : 0>(); }
+};
+
+
+// One physical WG visits the logical 128-channel partitions sequentially.
+template <class... ContextArgs>
+struct UmmaPipelineContext : KernelContext<ContextArgs...> {
+  using Base = KernelContext<ContextArgs...>;
+  using Base::Base;
+  using BlockShape = typename Base::BlockShape;
+  using WarpShape = typename Base::WarpShape;
+  using TuningConfig = typename Base::TuningConfig;
+  static_assert(BlockShape::M == WarpShape::M, "UMMA requires block M to equal warp M");
+  static_assert(BlockShape::K == WarpShape::K, "UMMA requires block K to equal warp K");
+  static_assert(TuningConfig::kNumWriteSplits == 1, "UMMA requires num_write_splits == 1");
+  static constexpr bool kHasStageWeightScale = Base::kIsGroupWeightScale || Base::kIsBlockWeightScale;
+  static constexpr bool kCanSplitWeightScaleLoad = !kHasStageWeightScale || Base::kUseTmaBS;
+  static constexpr bool kCanSplitZeroPointLoad = !Base::kHasZeroPoint || (Base::kIsGroupWeightScale && Base::kUseTmaBZP);
+  static constexpr bool kCanSplitInputScaleLoad = !Base::kIsGroupInputScale || Base::kUseTmaAS;
+  static constexpr bool kHasTmaWeightLoads = Base::kUseTmaB && kCanSplitWeightScaleLoad && kCanSplitZeroPointLoad;
+  static constexpr bool kHasTmaActivationLoads = Base::kUseTmaA && kCanSplitInputScaleLoad;
+  static constexpr bool kUseUmmaSplitLoads = kHasTmaActivationLoads && kHasTmaWeightLoads;
+  static constexpr uint32_t kLoadThreadOffset = 0;
+  static constexpr uint32_t kNumLoadThreads = 128;
+  static constexpr uint32_t kNumMathThreads = 128;
+  uint32_t math_group = 0;
+
+  CUDA_INLINE uint32_t math_thread_id() { return threadIdx.x % 128; }
+  CUDA_INLINE uint32_t load_thread_id() { return threadIdx.x; }
+  CUDA_INLINE uint32_t warp_id() { return math_group * 4 + math_thread_id() / 32; }
+  CUDA_INLINE uint32_t m_warp_id() { return 0; }
+  CUDA_INLINE uint32_t n_warp_id() { return warp_id() % Base::N_WARPS; }
+  CUDA_INLINE uint32_t k_warp_id() { return 0; }
+  CUDA_INLINE uint32_t m_warp_offset() { return 0; }
+  CUDA_INLINE uint32_t n_warp_offset() { return n_warp_id() * WarpShape::N; }
+  CUDA_INLINE uint32_t k_warp_offset() { return 0; }
+  CUDA_INLINE bool is_load_thread() { return threadIdx.x < kNumLoadThreads; }
+  CUDA_INLINE bool is_math_thread() { return threadIdx.x >= 128 && threadIdx.x < 256; }
+
+  CUDA_INLINE bool is_dequant_thread() {
+    constexpr uint32_t kDequantEnd = 256 + 128 * TuningConfig::kUmmaNumDequantWarpgroups;
+    return threadIdx.x >= 256 && threadIdx.x < kDequantEnd;
+  }
+
+  CUDA_INLINE bool is_issuer_thread() {
+    return is_math_thread() && math_thread_id() < 32;
+  }
+
+  CUDA_INLINE static void sync_math_threads() {
+    uint32_t barrier_id = threadIdx.x < 256 ? 1 : (threadIdx.x < 384 ? 3 : 4);
+    asm volatile("bar.sync %0, 128;" ::"r"(barrier_id) : "memory");
+  }
+
+  CUDA_INLINE static void sync_load_threads() { sync_part_threads<kNumLoadThreads, Base::kNumThreads, 2>(); }
 };

@@ -18,7 +18,7 @@ private:
   static constexpr bool kIsGroupedGemm = Ctx::kIsGroupedGemm;
 
   static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kLoadThreadOffset;
 
   static constexpr bool kConfiguredInputScale = kSecondary ? Ctx::kHasInputScale2 : Ctx::kHasInputScale;
   static constexpr bool kIsTensorScale = kSecondary ? Ctx::kIsTensorInputScale2 : Ctx::kIsTensorInputScale;
@@ -105,7 +105,7 @@ public:
       uint32_t smem_offset = smem_row * kScaleBlockM + smem_col;
 
       uint32_t gmem_row = smem_col;
-      if constexpr (kIsIndexedGemm) gmem_row = ctx.smem.rd_row_index[smem_col];
+      if constexpr (kIsIndexedGemm) gmem_row = ctx.get_rd_row_index()[smem_col];
       uint32_t gmem_col = smem_row;
       uint32_t gmem_offset = gmem_row * kMxGmemStride + gmem_col;
       uint32_t row_bound = kIsIndexedGemm ? shape_m : block_shape_m;
@@ -154,7 +154,8 @@ public:
 
   CUDA_INLINE void load_tma(void *smem_ptr, void *mbar_ptr) {
     static_assert(!kIsIndexedGemm && (kMMajorInputScale || kIsChannelScale));
-    if (ctx.load_thread_id() == 0) {
+    constexpr uint32_t kLoadThread = Ctx::kUseUmmaSplitLoads && !kIsChannelScale ? 32 : 0;
+    if (ctx.load_thread_id() == kLoadThread) {
       if constexpr (kIsChannelScale) tma_load_1d(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset);
       else tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset);
     }
@@ -285,7 +286,7 @@ public:
       PRAGMA_UNROLL
       for (uint32_t i = 0; i < kRowLoadIters; i++) {
         uint32_t smem_row = i * kNumLoadThreads + ctx.load_thread_id();
-        load_row_index[i] = smem_row < BlockShape::M ? ctx.smem.rd_row_index[smem_row] : shape_m;
+        load_row_index[i] = smem_row < BlockShape::M ? ctx.get_rd_row_index()[smem_row] : shape_m;
       }
     }
   }

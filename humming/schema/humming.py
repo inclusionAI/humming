@@ -328,7 +328,6 @@ class HummingWeightSchema(BaseWeightSchema):
 
         return schema, tensors
 
-
     def is_compatible_with(
         self,
         input_schema: "HummingInputSchema",

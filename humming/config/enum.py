@@ -102,3 +102,9 @@ class ProcessInputLayoutType(str, enum.Enum):
     Normal = "normal"
     GroupedMask = "grouped_mask"
     Scatter = "scatter"
+
+
+class SmemReuseMode(str, enum.Enum):
+    NONE = "none"
+    LAST_STAGE = "last_stage"
+    ALL_STAGES = "all_stages"

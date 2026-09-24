@@ -51,7 +51,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   uint64_t debug_start_clock = debug_kernel_timer_start();
   constexpr uint32_t kNumStages = TuningConfig::kNumStages;
   constexpr bool kUsePdl = TuningConfig::kUsePdl;
-  constexpr bool kReduceOverlapLastStageOnly = TuningConfig::kReduceOverlapLastStageOnly;
+  constexpr auto kSmemReuseMode = TuningConfig::kSmemReuseMode;
+  constexpr bool kCanOverlapEpilogue = kSmemReuseMode == SmemReuseMode::NONE || (kSmemReuseMode == SmemReuseMode::LAST_STAGE && kNumStages >= 3);
   constexpr uint32_t kLoadThreadRegisters = TuningConfig::kNumMathThreads > 256 || (TuningConfig::kNumCtasPerSm == 1 && ElementA::kBits != 16) ? 40 : 24;
 
   using SharedStorage = SharedStorage<
@@ -71,12 +72,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   using S2RMemoryPipeline = S2RMemoryPipeline<Ctx, MMA, Epilogue>;
   constexpr uint32_t kAccumulatorRegistersPerThread = sizeof(typename MMA::CRegistersArrayType) / sizeof(uint32_t) * (MMA::final_regs_c_index() + 1);
   constexpr bool kUseRegisterReallocation = TuningConfig::kNumMathThreads > 128 || ProblemShape::K > BlockShape::K * 16;
-  constexpr bool kUseTwoStageReduceBarrier = SharedStorage::kUseTwoStageReduceBarrier;
   static_assert(Ctx::kWarpIters >= 2, "warp-specialized mainloop requires at least two warp iterations");
 
   extern __shared__ int4 shared_memory[];
   auto &smem = *reinterpret_cast<SharedStorage *>(shared_memory);
-  if constexpr (Ctx::kUseUmma) MMA::init(smem);
 
   const KernelParams params{
       shape_m, top_k, use_int64_expert_layout,
@@ -117,7 +116,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         }
       }
       producer.load_stage<true, true>(0);
-      if constexpr (kUseTwoStageReduceBarrier) producer.wait_reduce_epilogue();
       PRAGMA_UNROLL
       for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
         producer.load_stage(stage_id, stage_id < slice_iters);
@@ -151,7 +149,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           produce_stage(stage, num_full_stage_cycles * kNumStages + stage_id);
         }
       });
-      if constexpr (Ctx::kIsIndexedGemm) producer.wait_math_epilogue();
+      if constexpr (Ctx::kIsIndexedGemm) {
+        ctx.row_index_buffer ^= 1;
+        producer.wait_math_epilogue();
+      }
     }
   } else {
     constexpr uint32_t kEstimatedMathThreadRegisters = MIN(232, MAX(128, kAccumulatorRegistersPerThread * 2 + 96));
@@ -177,7 +178,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     auto s2r_pipe = S2RMemoryPipeline(ctx, mma, epilogue);
 
     consumer.arrive(kNumStages);
-    if constexpr (kUseTwoStageReduceBarrier) consumer.arrive(kNumStages + 1);
 
     while (scheduler.get_next_block()) {
       debug_kernel_timeout_check(debug_start_clock);
@@ -197,36 +197,17 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       auto consume_stage = [&](auto stage, uint32_t slice_iter) {
         constexpr uint32_t stage_id = decltype(stage)::value;
         debug_kernel_timeout_check(debug_start_clock);
-        if constexpr (Ctx::kUseUmma) {
-          // Fill the free TMEM operand while the previous stage's MMA runs.
-          PRAGMA_UNROLL
-          for (uint32_t iter_id = 1; iter_id < Ctx::kWarpIters; iter_id++) {
-            s2r_pipe.load_stage_iter(stage_id, iter_id);
-            mma.transform_b(iter_id % 2, iter_id);
-          }
-          if (slice_iter != 0) {
-            mma.wait_stage();
-            consumer.arrive((stage_id + kNumStages - 1) % kNumStages);
-          }
-          mma.run(stage_id, Ctx::kWarpIters - 1);
-          if (slice_iter + 1 < num_slice_iters) {
+        PRAGMA_UNROLL
+        for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
+          if (warp_iter_id == Ctx::kWarpIters - 1 && slice_iter + 1 < num_slice_iters) {
             consumer.wait_stage((stage_id + 1) % kNumStages);
-            s2r_pipe.load_stage_iter(stage_id, Ctx::kWarpIters);
-            mma.transform_b(0, 0);
           }
-        } else {
-          PRAGMA_UNROLL
-          for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-            if (warp_iter_id == Ctx::kWarpIters - 1 && slice_iter + 1 < num_slice_iters) {
-              consumer.wait_stage((stage_id + 1) % kNumStages);
-            }
-            s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-            mma.run(stage_id, warp_iter_id);
-            mma.transform_b(
-                (warp_iter_id + 1) % 2,
-                (warp_iter_id + 1) % Ctx::kWarpIters);
-            if (warp_iter_id == Ctx::kWarpIters - 1) consumer.arrive(stage_id);
-          }
+          s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
+          mma.run(stage_id, warp_iter_id);
+          mma.transform_b(
+              (warp_iter_id + 1) % 2,
+              (warp_iter_id + 1) % Ctx::kWarpIters);
+          if (warp_iter_id == Ctx::kWarpIters - 1) consumer.arrive(stage_id);
         }
       };
 
@@ -244,23 +225,19 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         }
       });
 
-      if constexpr (Ctx::kUseUmma) {
-        mma.wait_stage();
-        consumer.arrive((num_slice_iters - 1) % kNumStages);
-      }
+
       consumer.wait_channel();
       s2r_pipe.load_channel(scheduler.slice_id);
 
-      if constexpr (kReduceOverlapLastStageOnly) consumer.arrive(kNumStages);
+      if constexpr (kCanOverlapEpilogue) consumer.arrive(kNumStages);
       epilogue.call(mma.final_regs_c_as_ptr());
       if constexpr (TuningConfig::kUseTmaC) tma_wait_store_group<0, true>();
-      if constexpr (kUseTwoStageReduceBarrier) consumer.arrive(kNumStages + 1);
-      if constexpr (!kReduceOverlapLastStageOnly) consumer.arrive(kNumStages);
+      if constexpr (!kCanOverlapEpilogue) consumer.arrive(kNumStages);
+      if constexpr (Ctx::kIsIndexedGemm) ctx.row_index_buffer ^= 1;
     }
   }
 
   __syncthreads();
-  if constexpr (Ctx::kUseUmma) MMA::dealloc(smem);
   if constexpr (TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB > 1) {
     asm volatile("barrier.cluster.arrive;\n");
     asm volatile("barrier.cluster.wait;\n");
