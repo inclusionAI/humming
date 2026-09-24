@@ -32,7 +32,7 @@ public:
   CUDA_INLINE
   void load_sf(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {
     const uint32_t *smem_ptr_load = reinterpret_cast<const uint32_t *>(smem_ptr);
-    uint32_t warp_id = threadIdx.x / 32;
+    uint32_t warp_id = ctx.warp_id();
     uint32_t lane_id = threadIdx.x % 32;
 
     uint32_t col_in_tile = lane_id / 4;

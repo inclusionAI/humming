@@ -193,7 +193,7 @@ class Sm90Heuristics(DeviceHeuristics):
                 gemm_type,
                 config["num_stages"],
                 warp_shape=config["warp_shape"],
-                reduce_overlap_last_stage_only=config.get("reduce_overlap_last_stage_only", False),
+                smem_reuse_mode=config.get("smem_reuse_mode", "all_stages"),
                 use_mbarrier=config.get("use_mbarrier", False),
                 use_warp_spec=config.get("use_warp_spec", False),
                 num_write_splits=config.get("num_write_splits", 1),

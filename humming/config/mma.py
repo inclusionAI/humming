@@ -282,7 +282,7 @@ class WgmmaOpClassImpl:
 
         cd_param_str = ""
         for i in range(math.ceil(len(cd_params) / 4)):
-            cd_params_part = cd_params[i * 4:(i + 1) * 4]
+            cd_params_part = cd_params[i * 4 : (i + 1) * 4]
             cd_params_part_str = ", ".join(cd_params_part) + ",\n"
             if cd_param_str:
                 cd_params_part_str = "    " + cd_params_part_str
@@ -489,8 +489,8 @@ class MmaOpClass:
         if mma_type == MmaType.MMA:
             return MmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.UMMA:
-            assert (m, n, k) == (16, 8, 16)
-            assert a_dtype == b_dtype == dtypes.bfloat16
+            assert m in (8, 16) and (n, k) == (8, 16)
+            assert a_dtype == b_dtype and a_dtype in (dtypes.bfloat16, dtypes.float16)
             assert cd_dtype == dtypes.float32
             return UmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.WGMMA:

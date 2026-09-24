@@ -52,7 +52,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
                 "use_mbarrier": use_tma,
             }
             if overlap:
-                config["reduce_overlap_last_stage_only"] = True
+                config["smem_reuse_mode"] = "last_stage"
             return config
 
         max_output_values = 6 * 1024

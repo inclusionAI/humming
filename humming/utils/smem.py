@@ -5,6 +5,7 @@ from humming.config import (
     GemmType,
     LayerConfig,
     MmaType,
+    SmemReuseMode,
     TuningConfig,
 )
 from humming.device import DeviceInfo
@@ -81,12 +82,21 @@ def estimate_smem_size_layer(
     num_stages: int,
     *,
     warp_shape: tuple[int, int, int] | None = None,
-    reduce_overlap_last_stage_only: bool = False,
+    smem_reuse_mode: SmemReuseMode | str | None = None,
     use_mbarrier: bool = False,
     use_warp_spec: bool = False,
     num_write_splits: int = 1,
     mma_accum_bits: int = 32,
 ) -> int:
+    if smem_reuse_mode is None:
+        smem_reuse_mode = SmemReuseMode.ALL_STAGES
+        if layer_config.mma_type == MmaType.UMMA:
+            smem_reuse_mode = SmemReuseMode.NONE
+
+    smem_reuse_mode = SmemReuseMode(smem_reuse_mode)
+    if layer_config.mma_type == MmaType.UMMA:
+        use_mbarrier = True
+        use_warp_spec = True
     block_m, block_n, block_k = block_shape
     is_mxmma = layer_config.mma_type == MmaType.MXMMA
     is_grouped = gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED)
@@ -109,17 +119,17 @@ def estimate_smem_size_layer(
     has_channel_input_scale |= layer_config.has_input_scale_2 and not layer_config.is_tensor_input_scale_2
     channel_as_bytes = (scale_block_m * 4) if has_channel_input_scale else 0
 
-    struct_a = _struct_size(
+    channel_bytes = _struct_size(
         [
             (channel_zp_bytes, 128),
             (channel_bs_bytes, 128),
             (channel_bs2_bytes, 128),
             (bias_bytes, 128),
             (channel_as_bytes, 128),
-            (stage_bytes * num_stages, 1024),
         ],
         1024,
     )
+    stage_storage_bytes = stage_bytes * num_stages
 
     n_warps_k = (block_k // warp_shape[2]) if warp_shape else 1
     warp_reduce = 0
@@ -130,20 +140,14 @@ def estimate_smem_size_layer(
     block_output = block_m * block_n // 2 // 4 // max(1, num_write_splits)
     reduce_bytes = max(warp_reduce, block_output) * _INT4
 
-    struct_b_fields: list[tuple[int, int]] = []
-    if reduce_overlap_last_stage_only:
-        struct_b_fields.append((channel_zp_bytes, 128))
-        struct_b_fields.append((channel_bs_bytes, 128))
-        struct_b_fields.append((channel_bs2_bytes, 128))
-        struct_b_fields.append((bias_bytes, 128))
-        struct_b_fields.append((channel_as_bytes, 128))
-        struct_b_fields.append((stage_bytes * (num_stages - 1), 1024))
-    struct_b_fields.append((reduce_bytes, 128))
-    struct_b = _struct_size(struct_b_fields, 1024)
-
-    union_bytes = round_up(max(struct_a, struct_b), 1024)
-
-    offset = union_bytes
+    skipped_stages = {
+        SmemReuseMode.NONE: num_stages,
+        SmemReuseMode.LAST_STAGE: num_stages - 1,
+        SmemReuseMode.ALL_STAGES: 0,
+    }[smem_reuse_mode]
+    output_storage_bytes = stage_bytes * skipped_stages + reduce_bytes
+    union_bytes = round_up(max(stage_storage_bytes, output_storage_bytes), 1024)
+    offset = channel_bytes + union_bytes
 
     def add(nbytes: int, align: int):
         nonlocal offset
@@ -153,7 +157,8 @@ def estimate_smem_size_layer(
         offset += nbytes
 
     if gemm_type == GemmType.INDEXED:
-        add(block_m * 4 * 2, 4)
+        row_index_buffers = 4 if use_warp_spec else 2
+        add(block_m * 4 * row_index_buffers, 4)
     elif gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED):
         add(128, 64)  # tensor_map_buffer[1] (CUtensorMap)
         add(layer_config.num_experts * 4, 4)  # expert_tokens
@@ -165,13 +170,14 @@ def estimate_smem_size_layer(
         add((num_stages + 2) * 8, 128)  # load_mbar
     if use_warp_spec:
         num_math_mbarriers = num_stages + 1
-        if reduce_overlap_last_stage_only and num_stages == 2:
-            num_math_mbarriers += 1
         add(num_math_mbarriers * 8, 8)  # math_mbar
 
     if layer_config.mma_type == MmaType.UMMA:
         add(4, 4)  # TMEM allocation
-        add(8, 8)  # MMA completion barrier
+        operand_barrier_bytes = 64 if num_stages == 4 else 48
+        add(operand_barrier_bytes, 8)  # Operand ready/free barriers
+        add((num_stages + 1) * 8, 8)  # Independent weight readiness
+        add(num_stages * 8, 8)  # Weight stage consumed by dequantization
 
     return round_up(offset, 1024)
 
@@ -193,7 +199,7 @@ def estimate_smem_size_config(
         gemm_type,
         tuning_config.num_stages,
         warp_shape=tuning_config.warp_shape,
-        reduce_overlap_last_stage_only=tuning_config.reduce_overlap_last_stage_only,
+        smem_reuse_mode=tuning_config.smem_reuse_mode,
         use_mbarrier=bool(tuning_config.use_mbarrier),
         use_warp_spec=bool(tuning_config.use_warp_spec),
         num_write_splits=tuning_config.num_write_splits,

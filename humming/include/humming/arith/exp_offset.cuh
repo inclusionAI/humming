@@ -7,6 +7,8 @@
 
 template <class ElementA, class ElementB, bool kHasZeroPoint = false>
 CUDA_INLINE constexpr uint32_t get_dtype_dequant_exp_offset() {
+  // E8M0 to FP16 converts numerically through BF16 rather than shifting exponent bits.
+  if constexpr (std::is_same<ElementA, Float16>::value && std::is_same<ElementB, Float8E8M0>::value) return 0;
   if constexpr (ElementA::kIsFloatingPointType) {
     if constexpr (ElementA::kExponentBits >= 1 && ElementA::kBits > ElementB::kBits) {
       if constexpr (ElementB::kIsFloatingPointType) {

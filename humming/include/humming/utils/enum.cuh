@@ -54,3 +54,10 @@ enum class GemmType : uint32_t {
   GROUPED_CONTIGUOUS,
   GROUPED_MASKED,
 };
+
+
+enum class SmemReuseMode : uint32_t {
+  NONE = 0,
+  LAST_STAGE = 1,
+  ALL_STAGES = 2,
+};

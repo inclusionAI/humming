@@ -54,6 +54,26 @@ private:
   static constexpr uint32_t kSizeBias = WarpShape::N / 4 * 16 / 32;
 
 public:
+  static constexpr bool kNeedsPackedOutputTransform =
+      (kExpOffset.x != 0 && !kHasTensorWeightScale) || kHasChannelWeightScale || kHasBias;
+
+  CUDA_INLINE void apply_native_f32_output_scale(float &first, float &second) const {
+    if constexpr (kHasTensorWeightScale) {
+      float scale = *reinterpret_cast<const float *>(&gs);
+      if constexpr (kExpOffset.x) scale *= prepare_exp_scale_factor<float, kExpOffset.x>();
+      first *= scale;
+      second *= scale;
+    }
+  }
+
+  CUDA_INLINE static void apply_packed_output_exp_offset(uint32_t &value) {
+    if constexpr (kExpOffset.x) {
+      const scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, kExpOffset.x>();
+      scalar_t2 &packed = *reinterpret_cast<scalar_t2 *>(&value);
+      packed = __hmul2(packed, scale_factor);
+    }
+  }
+
   uint32_t as[kSizeAS];
   uint32_t bs[MAX(kSizeBS, 2)];
   uint32_t dq_bs[MAX(kSizeDequantBS, 4)];
@@ -151,11 +171,7 @@ public:
     may_process_on_smem_write(row, col);
 
     auto apply_exp_offset = [&]() {
-      if constexpr (kExpOffset.x && !kHasTensorWeightScale) {
-        const scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, kExpOffset.x>();
-        scalar_t2 *b_f16_ptr = reinterpret_cast<scalar_t2 *>(&regs);
-        b_f16_ptr[0] = __hmul2(b_f16_ptr[0], scale_factor);
-      }
+      if constexpr (!kHasTensorWeightScale) apply_packed_output_exp_offset(regs);
     };
 
     if constexpr (!kIsF16Accum) apply_exp_offset();

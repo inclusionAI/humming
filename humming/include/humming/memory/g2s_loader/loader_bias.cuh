@@ -12,7 +12,7 @@ private:
   static constexpr bool kUseTma = Ctx::kUseTmaBias;
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
   static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kLoadThreadOffset;
 
   static constexpr uint32_t kSmemStride = BlockShape::N * 16 / 32 / 4;
   static constexpr uint32_t kGmemStride = ProblemShape::N * 16 / 32 / 4;

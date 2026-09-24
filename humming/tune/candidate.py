@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from humming import dtypes
-from humming.config import GemmType, LayerConfig, MmaType
+from humming.config import GemmType, LayerConfig, MmaType, SmemReuseMode
 from humming.utils.smem import estimate_smem_size_layer
 
 
@@ -67,6 +67,7 @@ class ScheduleCandidate:
     use_warp_spec: bool = False
     use_tma: bool = False
     use_mbarrier: bool = False
+    smem_reuse_mode: SmemReuseMode = SmemReuseMode.ALL_STAGES
     _explicit_fields: frozenset[str] = dataclasses.field(default_factory=frozenset, repr=False)
 
     def __post_init__(self) -> None:
@@ -118,6 +119,7 @@ class ScheduleCandidate:
                 use_tma or use_warp_spec,
                 allow_none=True,
             ),
+            smem_reuse_mode=SmemReuseMode(config.get("smem_reuse_mode", SmemReuseMode.ALL_STAGES)),
             _explicit_fields=frozenset(config),
         )
 
@@ -445,7 +447,7 @@ def _analyze_resources(
         problem.gemm_type,
         schedule.num_stages,
         warp_shape=schedule.warp_shape,
-        reduce_overlap_last_stage_only=False,
+        smem_reuse_mode=schedule.smem_reuse_mode,
         use_mbarrier=schedule.use_mbarrier,
         use_warp_spec=schedule.use_warp_spec,
         num_write_splits=1,

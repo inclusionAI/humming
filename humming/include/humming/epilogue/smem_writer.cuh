@@ -112,7 +112,7 @@ public:
 
   CUDA_INLINE
   void write(uint32_t *regs_ptr, uint32_t slice_count, uint32_t split_idx) {
-    if (threadIdx.x >= kNumMathThreads / K_WARPS) return;
+    if (ctx.k_warp_id() != 0) return;
 
     auto &regs = *reinterpret_cast<CRegistersArrayType *>(regs_ptr);
     scalar_t2 *smem_half2_ptr = reinterpret_cast<scalar_t2 *>(ctx.smem.reduce);
@@ -213,6 +213,73 @@ public:
             write_to_smem(part_regs[n * inner_m + m], row_index, col_index);
           }
         }
+      }
+    }
+  }
+
+  CUDA_INLINE
+  void write_umma(MMA &mma) {
+    uint32_t lane = ctx.lane_id();
+    uint32_t warp = ctx.math_thread_id() / 32;
+    uint32_t n_partition = ctx.math_group;
+    uint32_t column = n_partition * 128 + warp * 32 + (lane / 8) * 8;
+    if (column >= BlockShape::N) return;
+    uint32_t row_in_matrix = (lane % 8) / 2 + (lane % 2) * 4;
+    uint32_t smem_base = offsetof(SharedStorage, reduce) / 128 % 8;
+    uint32_t output_base = cast_smem_ptr_to_uint(ctx.smem.reduce);
+
+    PRAGMA_UNROLL
+    for (uint32_t m = 0; m < CEIL_DIV(WarpShape::M, 32); m++) {
+      uint32_t lower[16];
+      uint32_t upper[16];
+      uint32_t rows = MIN(32, WarpShape::M - m * 32);
+      mma.load_output_chunk(m, rows, lower, upper);
+      PRAGMA_UNROLL
+      for (uint32_t group = 0; group < rows / 8; group++) {
+        uint32_t values[4];
+        // TMEM holds N in rows and M in columns. stmatrix writes four 8-column
+        // matrices from the two 16-row TMEM loads.
+        values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 2]);
+        values[1] = convert_umma_pair(lower[group * 4 + 1], lower[group * 4 + 3]);
+        values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 2]);
+        values[3] = convert_umma_pair(upper[group * 4 + 1], upper[group * 4 + 3]);
+        uint32_t row = m * 32 + group * 8 + row_in_matrix;
+        uint32_t swizzled_column = ((column % 64 / 8) ^ ((row + smem_base) % 8)) * 8;
+        uint32_t output_offset = (row + BlockShape::M * (column / 64)) * 64 + swizzled_column;
+        st_shared<4, true>(output_base + output_offset * 2, values);
+      }
+    }
+    if constexpr (ArithClass::kNeedsPackedOutputTransform) apply_umma_packed_output_arithmetic();
+  }
+
+private:
+  CUDA_INLINE uint32_t convert_umma_pair(uint32_t first, uint32_t second) {
+    float first_value = __uint_as_float(first);
+    float second_value = __uint_as_float(second);
+    arith.apply_native_f32_output_scale(first_value, second_value);
+    float2 values = {first_value, second_value};
+    auto packed = this->float22num2(values);
+    return *reinterpret_cast<uint32_t *>(&packed);
+  }
+
+  CUDA_INLINE void apply_umma_packed_output_arithmetic() {
+    uint32_t n_partition = ctx.math_group;
+    uint32_t warp = ctx.math_thread_id() / 32;
+    uint32_t lane = ctx.lane_id();
+    uint32_t smem_base = offsetof(SharedStorage, reduce) / 128 % 8;
+
+    __syncwarp();
+    for (uint32_t row = lane / 4; row < WarpShape::M; row += 8) {
+      PRAGMA_UNROLL
+      for (uint32_t pair = 0; pair < 4; pair++) {
+        // Visit stmatrix's transposed groups in the channel loader's register order.
+        uint32_t column = n_partition * 128 + warp * 32 + pair * 8;
+        uint32_t swizzled_chunk = (column % 64 / 8) ^ ((row + smem_base) % 8);
+        uint32_t offset = (row + BlockShape::M * (column / 64)) * 8 + swizzled_chunk;
+        uint32_t *pairs = reinterpret_cast<uint32_t *>(&ctx.smem.reduce[offset]);
+        uint32_t value = pairs[lane % 4];
+        arith.may_apply_on_smem_write(value, row / 8, pair);
+        pairs[lane % 4] = value;
       }
     }
   }

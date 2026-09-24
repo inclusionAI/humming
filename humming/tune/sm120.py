@@ -135,7 +135,12 @@ class Sm120Heuristics(Sm89Heuristics):
             k_warps = block_shape[2] // warp_shape[2]
             num_math_threads = m_warps * n_warps * k_warps * 32
             config["use_warp_spec"] = num_math_threads % 128 == 0
-            config["num_stages"] = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=False)
+            config["num_stages"] = cls._fit_num_stages(
+                layer_config,
+                config,
+                gemm_type,
+                smem_reuse_mode="all_stages",
+            )
 
         if gemm_type == GemmType.INDEXED:
             config["use_tma_a"] = False
@@ -157,9 +162,9 @@ class Sm120Heuristics(Sm89Heuristics):
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_mxmma = cls._is_mxmma(layer_config.a_dtype, group_size, layer_config.use_fused_e8m0_scale)
         if gemm_type != GemmType.INDEXED and is_mxmma:
-            num_stages = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=True)
+            num_stages = cls._fit_num_stages(layer_config, config, gemm_type, smem_reuse_mode="last_stage")
             config["num_stages"] = num_stages
-            config["reduce_overlap_last_stage_only"] = True
+            config["smem_reuse_mode"] = "last_stage"
 
         if gemm_type == GemmType.DENSE:
             num_blocks_n = layer_config.shape_n // config["block_shape"][1]
@@ -211,7 +216,7 @@ class Sm120Heuristics(Sm89Heuristics):
                         layer_config,
                         config,
                         gemm_type,
-                        reduce_overlap=config.get("reduce_overlap_last_stage_only", False),
+                        smem_reuse_mode=config.get("smem_reuse_mode", "all_stages"),
                     ),
                 )
 
@@ -310,7 +315,7 @@ class Sm120Heuristics(Sm89Heuristics):
                 GemmType.DENSE,
                 num_stages,
                 warp_shape=candidate["warp_shape"],
-                reduce_overlap_last_stage_only=candidate.get("reduce_overlap_last_stage_only", False),
+                smem_reuse_mode=candidate.get("smem_reuse_mode", "all_stages"),
                 use_mbarrier=True,
                 use_warp_spec=candidate.get("use_warp_spec", False),
                 num_write_splits=candidate.get("num_write_splits", 1),
@@ -343,10 +348,15 @@ class Sm120Heuristics(Sm89Heuristics):
         _, warp_n, warp_k = config["warp_shape"]
         config["block_shape"] = (block_m, block_n, block_k)
         config["warp_shape"] = (block_m, warp_n, warp_k)
-        config["num_stages"] = cls._fit_num_stages(layer_config, config, gemm_type, reduce_overlap=False)
+        config["num_stages"] = cls._fit_num_stages(
+            layer_config,
+            config,
+            gemm_type,
+            smem_reuse_mode="all_stages",
+        )
 
     @classmethod
-    def _fit_num_stages(cls, layer_config, config, gemm_type, reduce_overlap: bool) -> int:
+    def _fit_num_stages(cls, layer_config, config, gemm_type, smem_reuse_mode: str) -> int:
         best = None
         for num_stages in range(2, 6 if cls.sm_version == 121 else 5):
             smem = estimate_smem_size_layer(
@@ -355,7 +365,7 @@ class Sm120Heuristics(Sm89Heuristics):
                 gemm_type,
                 num_stages,
                 warp_shape=config["warp_shape"],
-                reduce_overlap_last_stage_only=reduce_overlap,
+                smem_reuse_mode=smem_reuse_mode,
                 use_mbarrier=True,
                 use_warp_spec=config["use_warp_spec"],
                 num_write_splits=config.get("num_write_splits", 1),

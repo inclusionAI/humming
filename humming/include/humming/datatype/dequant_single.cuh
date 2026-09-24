@@ -109,6 +109,15 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
 };
 
 
+template <>
+CUDA_INLINE uint32_t fp_to_fp<Float8E8M0, Float16>(uint32_t val) {
+  uint32_t converted = fp_to_fp<Float8E8M0, BFloat16>(val);
+  float2 values = F16Conversion<BFloat16>::num22float2(*reinterpret_cast<nv_bfloat162 *>(&converted));
+  half2 packed = F16Conversion<Float16>::float22num2(values);
+  return *reinterpret_cast<uint32_t *>(&packed);
+}
+
+
 template <class SourceType, class TargetType, bool kHasZeroPoint, bool kIsFpZeroPoint>
 CUDA_INLINE uint32_t dequant_single(uint32_t val, const uint32_t &zp_val) {
   if constexpr (std::is_same<SourceType, TargetType>::value) {

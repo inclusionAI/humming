@@ -12,6 +12,7 @@ from humming.config.enum import (
     MmaType,
     ProcessInputLayoutType,
     ProcessInputQuantizationPhase,
+    SmemReuseMode,
     WeightScale2Type,
     WeightScaleType,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "ComputeConfig",
     "TuningConfig",
     "MmaType",
+    "SmemReuseMode",
     "InputQuantizationMode",
     "WeightScaleType",
     "WeightScale2Type",

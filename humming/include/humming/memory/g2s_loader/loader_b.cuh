@@ -16,8 +16,11 @@ private:
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
   static constexpr bool kUseAiu = USE_PPU && kUseCpAsync && !kUseTma;
   static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = Ctx::kNumThreads - kNumLoadThreads;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kLoadThreadOffset;
   static constexpr uint32_t kMultiCastSizeB = Ctx::kMultiCastSizeB;
+  // M-grouped traversal reuses B immediately across neighboring CTAs. Avoid
+  // retaining streamed weights at the expense of A's reuse across N tiles.
+  static constexpr bool kEvictWeightsFirst = Ctx::kUseUmmaSplitLoads && Ctx::kRasterGroupM > 1;
 
   static constexpr uint32_t kPackSizeK = Ctx::kUsePackedKLayout ? 64 : (256 / ElementA::kBits);
   static constexpr uint32_t kSmemStride = BlockShape::N * kPackSizeK * ElementB::kBits / 32 / 4;
@@ -69,7 +72,7 @@ public:
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     if (ctx.load_thread_id() == 0) {
       if constexpr (kMultiCastSizeB == 1) {
-        tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+        tma_load_3d<1, kEvictWeightsFirst>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       } else if (cluster_rank == 0) {
         tma_load_3d<kMultiCastSizeB>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       }

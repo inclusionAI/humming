@@ -30,7 +30,11 @@ CODE_TEMPLATE = jinja2.Template("""
 
 {{tuning_config_macro}}
 
-#if {{use_warp_spec}}
+#define HUMMING_USE_UMMA_PIPELINE {{use_umma_pipeline | int}}
+
+#if HUMMING_USE_UMMA_PIPELINE
+#include <humming/kernel/humming_umma.cuh>
+#elif {{use_warp_spec}}
 #include <humming/kernel/humming_ws.cuh>
 #else
 #include <humming/kernel/humming.cuh>
@@ -110,7 +114,14 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     def __post_init__(self):
         LayerConfig.__post_init__(self)
         ComputeConfig.__post_init__(self)
+        self.use_umma_pipeline = self.mma_type == MmaType.UMMA
+        if self.use_umma_pipeline:
+            self.use_warp_spec = True
+            self.use_mbarrier = True
         TuningConfig.__post_init__(self)
+        if self.use_umma_pipeline:
+            self.num_threads = 256 + 128 * self.umma_num_dequant_warpgroups
+            self.num_math_threads = 128
         KernelRuntime.__post_init__(self)
 
     def init_sm_version(self):
@@ -132,6 +143,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         assert self.bs_dtype is not None
         template_args = self.to_template_args()
         template_args.update(
+            use_umma_pipeline=self.use_umma_pipeline,
             mma_op_class=self.mma_op_class.to_cpp_str(),
             problem_shape=self.problem_shape,
             pad_shape=self.pad_shape,
@@ -261,6 +273,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             mma_cd_dtype = dtypes.float32
 
         mma_shape_m = self.warp_shape[0] if self.mma_type == MmaType.WGMMA else 16
+        if self.mma_type == MmaType.UMMA and self.warp_shape[0] % 16 == 8:
+            mma_shape_m = 8
         mma_shape_n = 64 if self.mma_type == MmaType.WGMMA else 8
         if current_device.is_ppu:
             mma_shape_n = 16
@@ -423,17 +437,21 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     def check_config(self):
         assert self.num_threads <= 1024
         if self.mma_type == MmaType.UMMA:
-            assert self.a_dtype == self.c_dtype == dtypes.bfloat16, (
-                "UMMA requires BF16 activations and outputs"
-            )
-            assert self.block_shape[0] in (64, 128)
-            assert tuple(self.block_shape[1:]) == (128, 64)
-            assert tuple(self.warp_shape) == (self.block_shape[0], 32, 64)
-            assert self.use_warp_spec and self.num_stages >= 3
+            assert self.umma_num_dequant_warpgroups in (1, 2)
+            assert self.a_dtype in (dtypes.bfloat16, dtypes.float16)
+            block_m, block_n, block_k = self.block_shape
+            warp_m, warp_n, warp_k = self.warp_shape
+            assert block_m == warp_m, "UMMA requires block M to equal warp M"
+            assert block_k == warp_k, "UMMA requires block K to equal warp K"
+            assert 8 <= warp_m <= 256 and warp_m % 8 == 0, "UMMA requires warp M in [8, 256], divisible by 8"
+            assert warp_n == 32
+            assert block_k >= 32, "UMMA requires K >= 32"
+            assert self.num_write_splits == 1, "UMMA requires num_write_splits == 1"
+            assert self.num_stages >= 2
             assert not self.use_f16_accum
-            assert not self.use_pdl
-            assert not self.reduce_overlap_last_stage_only
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
+        else:
+            assert self.umma_num_dequant_warpgroups == 1, "dequantization warp groups apply only to UMMA"
         assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
             "MXMMA does not support FP16 accumulation"
         )
@@ -463,8 +481,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.gemm_type is None and self.num_experts == 0:
             self.gemm_type = GemmType.DENSE
         assert self.gemm_type is not None, "gemm_type must be specify for MoE GEMM"
-        if self.reduce_overlap_last_stage_only:
-            assert not self.is_indexed_gemm, "reduce_overlap_last_stage_only does not support indexed GEMM"
 
         if self.is_tensor_input_scale:
             self.use_tma_as = False

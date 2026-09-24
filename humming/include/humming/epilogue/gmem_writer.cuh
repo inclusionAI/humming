@@ -91,7 +91,7 @@ public:
 
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < iters; i++) {
-      uint32_t smem_offset = threadIdx.x + kNumMathThreads * i;
+      uint32_t smem_offset = ctx.math_thread_id() + kNumMathThreads * i;
       if (is_full_div || i != iters - 1 || smem_offset < total_write_int4s) {
         uint32_t smem_row = smem_offset / 8;
         uint32_t smem_col = smem_offset % 8;
@@ -100,7 +100,7 @@ public:
         uint32_t smem_offset_swizzled = smem_row * 8 + smem_col_swizzled;
         uint32_t gmem_row = smem_row % (BlockShape::M / kNumWriteSplits);
         if constexpr (kNumWriteSplits == 2) gmem_row += BlockShape::M / 2 * split_idx;
-        if constexpr (Ctx::kIsIndexedGemm) gmem_row = ctx.smem.wr_row_index[gmem_row];
+        if constexpr (Ctx::kIsIndexedGemm) gmem_row = ctx.get_wr_row_index()[gmem_row];
         uint32_t gmem_col = smem_row / (BlockShape::M / kNumWriteSplits) * 8 + smem_col;
         bool pred1 = gmem_row < (kIsIndexedGemm ? output_shape_m : block_output_shape_m);
         bool pred2 = PadShape::N == 0 || (col_offset + gmem_col * 8 < ProblemShape::N - PadShape::N);
@@ -124,7 +124,7 @@ public:
   void write_tma(uint32_t slice_id, uint32_t slice_count) {
     static_assert(!kIsIndexedGemm);
     constexpr uint32_t count = BlockShape::N / 64;
-    const uint32_t block_idx = threadIdx.x;
+    const uint32_t block_idx = ctx.math_thread_id();
     const uint32_t smem_offset = BlockShape::M * 64 / 8 * block_idx;
     const uint32_t col_offset2 = col_offset + 64 * block_idx;
     if (block_idx < count) {

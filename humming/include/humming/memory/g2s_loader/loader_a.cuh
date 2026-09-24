@@ -76,6 +76,7 @@ public:
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     uint32_t thread_id = ctx.load_thread_id();
+    if constexpr (Ctx::kUseUmmaSplitLoads) thread_id -= 32;
     if (thread_id < kNumTmaLoadsPerLine) {
       const uint32_t block_idx = thread_id;
       const uint32_t smem_offset = BlockShape::M * 8 * block_idx;
@@ -92,6 +93,7 @@ public:
   void prefetch_tma() {
     if constexpr (kUseTma) {
       uint32_t thread_id = ctx.load_thread_id();
+      if constexpr (Ctx::kUseUmmaSplitLoads) thread_id -= 32;
       if (thread_id < kNumTmaLoadsPerLine && (kMultiCastSizeA == 1 || blockIdx.x % kMultiCastSizeA == 0)) {
         const uint32_t block_idx = thread_id;
         const uint32_t col_offset2 = col_offset + (1024 / MAX(ElementA::kBits, 8)) * block_idx;
@@ -208,7 +210,7 @@ public:
         } else {
           gmem_row = smem_row % (BlockShape::M / 2) * 2 + smem_col / 4;
         }
-        load_row_index[i] = ctx.smem.rd_row_index[gmem_row];
+        load_row_index[i] = ctx.get_rd_row_index()[gmem_row];
       }
     }
   }
