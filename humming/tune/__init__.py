@@ -5,8 +5,8 @@ import torch
 from humming.config import GemmType, LayerConfig
 from humming.device import DeviceInfo, get_device_index
 from humming.tune.base import DeviceHeuristics
-from humming.tune.raster import raster_group_m_for_config
 from humming.tune.ppu_sm80 import PPUSm80Heuristics
+from humming.tune.raster import raster_group_m_for_config
 from humming.tune.sm8x import (
     Sm80Heuristics,
     Sm86Heuristics,
@@ -16,7 +16,7 @@ from humming.tune.sm8x import (
 from humming.tune.sm75 import Sm75Heuristics
 from humming.tune.sm90 import Sm90Heuristics
 from humming.tune.sm90_h20 import Sm90H20Heuristics
-from humming.tune.sm100 import Sm100Heuristics
+from humming.tune.sm100_umma import Sm100UmmaHeuristics as Sm100Heuristics
 from humming.tune.sm120 import Sm120Heuristics
 from humming.tune.sm121 import Sm121Heuristics
 
