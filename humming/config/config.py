@@ -438,7 +438,6 @@ class TuningConfig(BaseHummingConfig):
 
     num_stages: int = 2
     num_ctas_per_sm: int = 1
-    umma_num_dequant_warpgroups: int = 1
 
     use_warp_spec: bool | None = None
     use_mbarrier: bool | None = None

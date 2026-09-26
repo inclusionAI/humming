@@ -156,10 +156,7 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
   CUDA_INLINE bool is_load_thread() { return threadIdx.x < kNumLoadThreads; }
   CUDA_INLINE bool is_math_thread() { return threadIdx.x >= 128 && threadIdx.x < 256; }
 
-  CUDA_INLINE bool is_dequant_thread() {
-    constexpr uint32_t kDequantEnd = 256 + 128 * TuningConfig::kUmmaNumDequantWarpgroups;
-    return threadIdx.x >= 256 && threadIdx.x < kDequantEnd;
-  }
+  CUDA_INLINE bool is_dequant_thread() { return threadIdx.x >= 256; }
 
   CUDA_INLINE bool is_issuer_thread() {
     return is_math_thread() && math_thread_id() < 32;
@@ -169,10 +166,9 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
     if constexpr (TuningConfig::kNumCtasPerSm > 2) {
       // A dynamic barrier ID reserves all named barriers, limiting residency to two CTAs.
       if (threadIdx.x < 256) sync_part_threads<128, Base::kNumThreads, 1>();
-      else if (threadIdx.x < 384) sync_part_threads<128, Base::kNumThreads, 3>();
-      else sync_part_threads<128, Base::kNumThreads, 4>();
+      else sync_part_threads<128, Base::kNumThreads, 3>();
     } else {
-      uint32_t barrier_id = threadIdx.x < 256 ? 1 : (threadIdx.x < 384 ? 3 : 4);
+      uint32_t barrier_id = threadIdx.x < 256 ? 1 : 3;
       asm volatile("bar.sync %0, 128;" ::"r"(barrier_id) : "memory");
     }
   }

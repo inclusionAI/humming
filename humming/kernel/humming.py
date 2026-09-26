@@ -120,7 +120,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.use_mbarrier = True
         TuningConfig.__post_init__(self)
         if self.use_umma_pipeline:
-            self.num_threads = 256 + 128 * self.umma_num_dequant_warpgroups
+            self.num_threads = 384
             self.num_math_threads = 128
         KernelRuntime.__post_init__(self)
 
@@ -437,7 +437,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     def check_config(self):
         assert self.num_threads <= 1024
         if self.mma_type == MmaType.UMMA:
-            assert self.umma_num_dequant_warpgroups in (1, 2)
             assert self.a_dtype in (dtypes.bfloat16, dtypes.float16)
             block_m, block_n, block_k = self.block_shape
             warp_m, warp_n, warp_k = self.warp_shape
@@ -450,8 +449,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.num_stages >= 2
             assert not self.use_f16_accum
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
-        else:
-            assert self.umma_num_dequant_warpgroups == 1, "dequantization warp groups apply only to UMMA"
         assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
             "MXMMA does not support FP16 accumulation"
         )

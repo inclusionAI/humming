@@ -78,7 +78,7 @@ def _assert_results(case, shape_ms):
         for kernel in variants:
             compiled = HummingKernel._id2kernel[int(kernel[0][2])]
             assert compiled.mma_type == MmaType.UMMA
-            assert compiled.num_threads == 256 + 128 * compiled.umma_num_dequant_warpgroups
+            assert compiled.num_threads == 384
             assert compiled.num_math_threads == 128
             assert compiled.num_load_threads == 128
             compiled.assert_smem_size_matches_estimate()
@@ -86,33 +86,6 @@ def _assert_results(case, shape_ms):
     assert {result.shape_m for result in results} == set(shape_ms)
     for result in results:
         torch.testing.assert_close(result.outputs, result.outputs_ref, rtol=case.rtol, atol=case.atol)
-
-
-@pytest.mark.parametrize("weight_name", ("uint4", "nvfp4", "fp8"))
-@pytest.mark.parametrize("num_stages", (4, 5))
-@pytest.mark.parametrize("use_stream_k", (False, True))
-def test_umma_two_dequant_warpgroups(weight_name, num_stages, use_stream_k, monkeypatch):
-    block_n = 64 if weight_name == "fp8" else 128
-
-    def select_two_dequant_groups(layer_config, shape_m, gemm_type, **kwargs):
-        return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
-            "block_shape": (128, block_n, 64),
-            "warp_shape": (128, 32, 64),
-            "num_stages": num_stages,
-            "num_ctas_per_sm": 1,
-            "umma_num_dequant_warpgroups": 2,
-            "use_stream_k": use_stream_k,
-        }
-
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_two_dequant_groups)
-    case = _case(weight_name, GemmType.DENSE, **WEIGHT_CONFIGS[weight_name])
-    case = dataclasses.replace(
-        case,
-        layer_config=dataclasses.replace(case.layer_config, shape_k=8192 if weight_name == "fp8" else 1024),
-    )
-    # Odd stage counts transfer ownership between WGs. Enough output tiles must
-    # reuse a persistent CTA to check that their phases also survive tile changes.
-    _assert_results(case, (128, 33000))
 
 
 @pytest.mark.parametrize("block_n,block_k", ((256, 64), (128, 128)))
@@ -624,7 +597,6 @@ def test_umma_k32(weight_name, output_dtype, use_tma_a, num_stages, monkeypatch)
             "num_stages": num_stages,
             "num_sms": 2,
             "num_ctas_per_sm": 1,
-            "umma_num_dequant_warpgroups": 2,
             "use_tma_a": use_tma_a,
             "use_stream_k": False,
         }
@@ -651,7 +623,6 @@ def test_umma_k32_tile_reuse(gemm_type, use_stream_k, monkeypatch):
             "num_stages": 5,
             "num_sms": 2,
             "num_ctas_per_sm": 1,
-            "umma_num_dequant_warpgroups": 1,
             "use_stream_k": use_stream_k,
         }
 
@@ -662,19 +633,17 @@ def test_umma_k32_tile_reuse(gemm_type, use_stream_k, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "gemm_type,weight_name,use_tma_a,block_n,num_stages,dequant_groups",
+    "gemm_type,weight_name,use_tma_a,block_n,num_stages",
     (
-        (GemmType.DENSE, "uint4-zp", True, 128, 3, 2),
-        (GemmType.DENSE, "fp8", True, 128, 3, 1),
-        (GemmType.GROUPED_CONTIGUOUS, "nvfp4", True, 256, 3, 2),
-        (GemmType.GROUPED_MASKED, "uint4-zp", True, 256, 4, 1),
-        (GemmType.DENSE, "nvfp4", False, 128, 3, 2),
-        (GemmType.DENSE, "nvfp4", True, 512, 4, 2),
+        (GemmType.DENSE, "uint4-zp", True, 128, 3),
+        (GemmType.DENSE, "fp8", True, 128, 3),
+        (GemmType.GROUPED_CONTIGUOUS, "nvfp4", True, 256, 3),
+        (GemmType.GROUPED_MASKED, "uint4-zp", True, 256, 4),
+        (GemmType.DENSE, "nvfp4", False, 128, 3),
+        (GemmType.DENSE, "nvfp4", True, 512, 4),
     ),
 )
-def test_umma_operand_buffer_selection(
-    gemm_type, weight_name, use_tma_a, block_n, num_stages, dequant_groups, monkeypatch
-):
+def test_umma_operand_buffer_selection(gemm_type, weight_name, use_tma_a, block_n, num_stages, monkeypatch):
     """Exercise stage-matched and capacity-limited operands with either loading path."""
 
     def select_operands(layer_config, shape_m, gemm_type, **kwargs):
@@ -684,7 +653,6 @@ def test_umma_operand_buffer_selection(
             "num_stages": num_stages,
             "num_sms": 2,
             "num_ctas_per_sm": 1,
-            "umma_num_dequant_warpgroups": dequant_groups,
             "use_tma_a": use_tma_a,
             "use_stream_k": False,
         }

@@ -61,9 +61,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   constexpr uint32_t kNumStages = Ctx::kNumStages;
   constexpr uint32_t kNumOperandBuffers = MMA::kNumOperandBuffers;
   constexpr uint32_t kOutputGroups = MMA::kOutputGroups;
-  constexpr uint32_t kDequantGroups = TuningConfig::kUmmaNumDequantWarpgroups;
-  static_assert(kDequantGroups == 1 || kDequantGroups == 2);
-  static_assert(TuningConfig::kNumThreads == 256 + 128 * kDequantGroups);
+  static_assert(TuningConfig::kNumThreads == 384);
   constexpr bool kSeparateOutputStorage = Ctx::kSmemReuseMode == SmemReuseMode::NONE;
   constexpr bool kNeedsEpilogueGate = !kSeparateOutputStorage || Consumer::kHasChannelData;
 
@@ -171,16 +169,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     // Divide the register budget among the output and dequantization WGs.
     constexpr uint32_t kMathRegisterLimit = TuningConfig::kNumCtasPerSm == 2 ? 96 : 224;
     constexpr uint32_t kMathRegisters = MIN(kMathRegisterLimit,
-        ((65536 / TuningConfig::kNumCtasPerSm - 128 * 40) / (128 * (1 + kDequantGroups)) / 8) * 8);
-    if constexpr (kDequantGroups == 2 && TuningConfig::kNumCtasPerSm == 1) {
-      if (ctx.is_math_thread()) {
-        asm volatile("setmaxnreg.inc.sync.aligned.u32 200;" ::: "memory");
-      } else {
-        asm volatile("setmaxnreg.inc.sync.aligned.u32 128;" ::: "memory");
-      }
-    } else {
-      asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(kMathRegisters) : "memory");
-    }
+                                            ((65536 / TuningConfig::kNumCtasPerSm - 128 * 40) / 256 / 8) * 8);
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(kMathRegisters) : "memory");
     MainloopArith mainloop_arith;
     EpilogueArith epilogue_arith;
     MMA mma(ctx, mainloop_arith);
@@ -189,7 +179,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     Consumer consumer(ctx);
     uint32_t ready_phase[kNumOperandBuffers] = {};
     uint32_t free_phase[kNumOperandBuffers] = {};
-    uint32_t stage_ready_phase[kNumStages + 1] = {};
     bool operand_used[kNumOperandBuffers] = {};
     if constexpr (kNeedsEpilogueGate) {
       if (ctx.is_math_thread()) consumer.arrive(kNumStages);
@@ -203,126 +192,66 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       }
       s2r.seek(scheduler.m_offset);
       if (ctx.is_dequant_thread()) {
-        // Dequantization WGs prepare disjoint K iterations.
-        constexpr uint32_t kDequantLoopSpan = 2 * kNumStages;
-        constexpr bool kSharedOperandStages = kNumOperandBuffers % kDequantGroups != 0;
-        constexpr bool kSharedWeightStages = kNumStages % kDequantGroups != 0;
-        constexpr bool kUseGlobalStagePhases = kSharedWeightStages;
-        static_assert(kDequantLoopSpan % kDequantGroups == 0);
-        auto run_dequant_group = [&](auto dequant_group) {
-          for (uint32_t base_iter = 0; base_iter < scheduler.slice_iters; base_iter += kDequantLoopSpan) {
-            static_for<0, kDequantLoopSpan / kDequantGroups>([&](auto slot) {
-              constexpr uint32_t step = decltype(slot)::value * kDequantGroups + decltype(dequant_group)::value;
-              uint32_t iter = base_iter + step;
-              if (iter >= scheduler.slice_iters) return;
+        for (uint32_t base_iter = 0; base_iter < scheduler.slice_iters; base_iter += 2 * kNumStages) {
+          static_for<0, 2 * kNumStages>([&](auto step) {
+            uint32_t iter = base_iter + decltype(step)::value;
+            if (iter >= scheduler.slice_iters) return;
 
-              constexpr uint32_t stage = step % kNumStages;
-              constexpr uint32_t buffer = step % kNumOperandBuffers;
-              auto wait_for_operand = [&]() {
-                uint32_t reuse = iter / kNumOperandBuffers;
-                bool has_previous_operand = operand_used[buffer];
-                uint32_t phase = free_phase[buffer];
-                if constexpr (kSharedOperandStages) {
-                  // Both WGs use the tile's initial phase plus the global reuse
-                  // count, including stages consumed by the other WG.
-                  has_previous_operand |= reuse > 0;
-                  phase ^= (reuse - 1) & 1;
-                }
-                if (has_previous_operand) {
-                  if constexpr (kNumStages == kNumOperandBuffers) {
-                    mbarrier_wait(&smem.math_mbar[stage], phase);
-                  } else {
-                    mbarrier_wait(&smem.umma_operand_free[buffer], phase);
-                  }
-                  if constexpr (!kSharedOperandStages) free_phase[buffer] ^= 1;
-                  tcgen05_fence_after_thread_sync();
-                }
-                if constexpr (!kSharedOperandStages) operand_used[buffer] = true;
-              };
-              // A WG taking over a stage must retire its previous consumer
-              // before testing readiness. Otherwise parity can match a future
-              // generation while the predecessor's load is still in flight.
-              if constexpr (kSharedWeightStages || kSharedOperandStages) wait_for_operand();
-              if constexpr (kUseGlobalStagePhases) {
-                // Weight stages can alternate between dequantization WGs. Derive
-                // the barrier phase from the stage reuse count, not a WG-local
-                // counter. The first stage uses a separate prefetch barrier.
-                auto *ready_barriers = Ctx::kUseUmmaSplitLoads ? smem.umma_weight_ready : smem.load_mbar;
-                if (iter == 0) {
-                  mbarrier_wait(&ready_barriers[kNumStages], stage_ready_phase[kNumStages]);
+            constexpr uint32_t stage = decltype(step)::value % kNumStages;
+            constexpr uint32_t buffer = decltype(step)::value % kNumOperandBuffers;
+            auto wait_for_operand = [&]() {
+              if (operand_used[buffer]) {
+                if constexpr (kNumStages == kNumOperandBuffers) {
+                  mbarrier_wait(&smem.math_mbar[stage], free_phase[buffer]);
                 } else {
-                  uint32_t reuse = iter / kNumStages;
-                  uint32_t phase = (stage_ready_phase[stage] + reuse - (stage == 0)) & 1;
-                  mbarrier_wait(&ready_barriers[stage], phase);
+                  mbarrier_wait(&smem.umma_operand_free[buffer], free_phase[buffer]);
                 }
-              } else {
-                if (iter == 0) consumer.template wait_stage<true>(0);
-                else consumer.wait_stage(stage);
+                free_phase[buffer] ^= 1;
+                tcgen05_fence_after_thread_sync();
               }
-              // Without early weight reuse, weight readiness also protects TMEM:
-              // the producer reloads a stage only after its UMMA completes.
-              if constexpr (Ctx::kUseUmmaSplitLoads) tcgen05_fence_after_thread_sync();
-              mma.set_operand_buffer(buffer);
+              operand_used[buffer] = true;
+            };
+            if (iter == 0) consumer.template wait_stage<true>(0);
+            else consumer.wait_stage(stage);
+            // Without early weight reuse, weight readiness also protects TMEM:
+            // the producer reloads a stage only after its UMMA completes.
+            if constexpr (Ctx::kUseUmmaSplitLoads) tcgen05_fence_after_thread_sync();
+            mma.set_operand_buffer(buffer);
+            PRAGMA_UNROLL
+            for (uint32_t group = 0; group < kOutputGroups; group++) {
+              ctx.math_group = group;
+              constexpr uint32_t kPreparedFragments = MIN(Ctx::kWarpIters, 4);
+              constexpr uint32_t kFragmentWords = sizeof(mma.regs_b[0]) / sizeof(uint32_t);
               PRAGMA_UNROLL
-              for (uint32_t group = 0; group < kOutputGroups; group++) {
-                ctx.math_group = group;
-                constexpr uint32_t kPreparedFragments = MIN(Ctx::kWarpIters, 4);
-                constexpr uint32_t kFragmentWords = sizeof(mma.regs_b[0]) / sizeof(uint32_t);
+              for (uint32_t fragment = 0; fragment < Ctx::kWarpIters; fragment += kPreparedFragments) {
+                // Prepare a wider store while UMMA still owns the TMEM buffer.
+                uint32_t prepared[kPreparedFragments][kFragmentWords];
                 PRAGMA_UNROLL
-                for (uint32_t fragment = 0; fragment < Ctx::kWarpIters; fragment += kPreparedFragments) {
-                  // Prepare a wider store while UMMA still owns the TMEM buffer.
-                  uint32_t prepared[kPreparedFragments][kFragmentWords];
+                for (uint32_t part = 0; part < kPreparedFragments; part++) {
+                  uint32_t register_buffer = (fragment + part) % 2;
+                  s2r.template load_stage_iter<true>(stage, fragment + part);
+                  mma.transform_b(register_buffer, fragment + part);
+                  const uint32_t *values = reinterpret_cast<const uint32_t *>(mma.regs_b[register_buffer]);
                   PRAGMA_UNROLL
-                  for (uint32_t part = 0; part < kPreparedFragments; part++) {
-                    uint32_t register_buffer = (fragment + part) % 2;
-                    s2r.template load_stage_iter<true>(stage, fragment + part);
-                    mma.transform_b(register_buffer, fragment + part);
-                    const uint32_t *values = reinterpret_cast<const uint32_t *>(mma.regs_b[register_buffer]);
-                    PRAGMA_UNROLL
-                    for (uint32_t word = 0; word < kFragmentWords; word++) {
-                      prepared[part][word] = values[word];
-                    }
+                  for (uint32_t word = 0; word < kFragmentWords; word++) {
+                    prepared[part][word] = values[word];
                   }
-                  if constexpr (!kSharedWeightStages && !kSharedOperandStages) {
-                    if (group == 0 && fragment == 0) wait_for_operand();
-                  }
-                  if constexpr (Ctx::kUseUmmaSplitLoads) {
-                    if (group + 1 == kOutputGroups && fragment + kPreparedFragments >= Ctx::kWarpIters) {
-                      // All raw weights have been consumed; TMEM stores need
-                      // not delay the producer's next shared-memory load.
-                      __mbarrier_arrive(&smem.umma_weight_free[stage]);
-                    }
-                  }
-                  mma.store_b(prepared, fragment);
                 }
+                if (group == 0 && fragment == 0) wait_for_operand();
+                if constexpr (Ctx::kUseUmmaSplitLoads) {
+                  if (group + 1 == kOutputGroups && fragment + kPreparedFragments >= Ctx::kWarpIters) {
+                    // All raw weights have been consumed; TMEM stores need
+                    // not delay the producer's next shared-memory load.
+                    __mbarrier_arrive(&smem.umma_weight_free[stage]);
+                  }
+                }
+                mma.store_b(prepared, fragment);
               }
-              tcgen05_wait_st();
-              tcgen05_fence_before_thread_sync();
-              __mbarrier_arrive(&smem.umma_operand_ready[buffer]);
-            });
-          }
-        };
-        if constexpr (kDequantGroups == 1) {
-          run_dequant_group(std::integral_constant<uint32_t, 0>{});
-        } else if (threadIdx.x < 384) {
-          run_dequant_group(std::integral_constant<uint32_t, 0>{});
-        } else {
-          run_dequant_group(std::integral_constant<uint32_t, 1>{});
-        }
-        if constexpr (kSharedOperandStages) {
-          static_for<0, kNumOperandBuffers>([&](auto buffer) {
-            uint32_t arrivals = (scheduler.slice_iters + kNumOperandBuffers - 1 - decltype(buffer)::value) / kNumOperandBuffers;
-            free_phase[decltype(buffer)::value] ^= arrivals & 1;
-            operand_used[decltype(buffer)::value] |= arrivals > 0;
+            }
+            tcgen05_wait_st();
+            tcgen05_fence_before_thread_sync();
+            __mbarrier_arrive(&smem.umma_operand_ready[buffer]);
           });
-        }
-        if constexpr (kUseGlobalStagePhases) {
-          stage_ready_phase[kNumStages] ^= 1;
-          for (uint32_t stage = 0; stage < kNumStages; stage++) {
-            uint32_t arrivals = (scheduler.slice_iters + kNumStages - 1 - stage) / kNumStages;
-            if (stage == 0) arrivals--;
-            stage_ready_phase[stage] ^= arrivals & 1;
-          }
         }
       } else {
         if (ctx.is_issuer_thread()) {
