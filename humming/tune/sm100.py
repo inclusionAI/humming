@@ -30,20 +30,40 @@ class Sm100MmaHeuristics(Sm80Heuristics):
         config = super().get_config(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
         block_m, block_n, _ = config["block_shape"]
         warp_m = config["warp_shape"][0]
-        if use_batch_invariant or block_m != warp_m:
+        if use_batch_invariant:
+            return config
+
+        warp_k = 1024 // layer_config.a_dtype.num_bits
+        num_stages = config["num_stages"]
+        # Long Stream-K slices can amortize a wider weight tile and a deeper
+        # pipeline. Keep four warps, including when the inherited M tile was
+        # split between two warps, to avoid extra intra-CTA partitioning.
+        candidate_n, candidate_k, candidate_stages = 128, 2 * warp_k, 4
+        has_aligned_tile = layer_config.shape_n % candidate_n == 0
+        has_aligned_tile = has_aligned_tile and layer_config.shape_k % candidate_k == 0
+        if config["use_stream_k"] and block_m <= 32 and has_aligned_tile:
+            m_tiles = cls.estimate_num_blocks_m(layer_config, shape_m, block_m)
+            output_tiles = m_tiles * (layer_config.shape_n // candidate_n)
+            k_iters = layer_config.shape_k // candidate_k
+            resident_ctas = config["num_sms"] * 2
+            slice_iters = math.ceil(output_tiles * k_iters / resident_ctas)
+            if min(slice_iters, k_iters) >= 2 * candidate_stages:
+                block_n = candidate_n
+                warp_m = block_m
+                num_stages = candidate_stages
+
+        if block_m != warp_m:
             return config
 
         # Small M needs little math parallelism. Use four warps per CTA and
         # two resident CTAs instead of expanding K to fill a single CTA.
         # Start from the existing M/N grid and Stream-K policy for dense and MoE.
         warp_n = min(64, block_n // 2)
-        warp_k = 1024 // layer_config.a_dtype.num_bits
         n_warps = block_n // warp_n
         block_k = (4 // n_warps) * warp_k
         if layer_config.shape_k % block_k:
             return config
 
-        num_stages = config["num_stages"]
         if config["use_stream_k"] and block_n < 128:
             m_tiles = cls.estimate_num_blocks_m(layer_config, shape_m, block_m)
             output_tiles = m_tiles * (layer_config.shape_n // block_n)
@@ -388,6 +408,11 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             tile_rounds = waves * block_n
             padded_work = tile_rounds * num_ctas * block_m
             score = float(np.sqrt(tile_rounds * padded_work).mean())
+            # Larger M can force a shallower pipeline at the same residency.
+            # Charge for the reduced load lookahead instead of comparing only
+            # tile counts and padding. This keeps the tradeoff continuous.
+            pipeline_penalty = 1 + 1 / config["num_stages"]
+            score *= pipeline_penalty
             previous = best_by_residency.get(num_ctas)
             if previous is None or score < previous[0]:
                 best_by_residency[num_ctas] = (score, config, tiles)
