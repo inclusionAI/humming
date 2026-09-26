@@ -88,13 +88,15 @@ def _assert_results(case, shape_ms):
         torch.testing.assert_close(result.outputs, result.outputs_ref, rtol=case.rtol, atol=case.atol)
 
 
-@pytest.mark.parametrize("weight_name", ("uint4", "nvfp4"))
+@pytest.mark.parametrize("weight_name", ("uint4", "nvfp4", "fp8"))
 @pytest.mark.parametrize("num_stages", (4, 5))
 @pytest.mark.parametrize("use_stream_k", (False, True))
 def test_umma_two_dequant_warpgroups(weight_name, num_stages, use_stream_k, monkeypatch):
+    block_n = 64 if weight_name == "fp8" else 128
+
     def select_two_dequant_groups(layer_config, shape_m, gemm_type, **kwargs):
         return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
-            "block_shape": (128, 128, 64),
+            "block_shape": (128, block_n, 64),
             "warp_shape": (128, 32, 64),
             "num_stages": num_stages,
             "num_ctas_per_sm": 1,
@@ -104,10 +106,34 @@ def test_umma_two_dequant_warpgroups(weight_name, num_stages, use_stream_k, monk
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_two_dequant_groups)
     case = _case(weight_name, GemmType.DENSE, **WEIGHT_CONFIGS[weight_name])
-    case = dataclasses.replace(case, layer_config=dataclasses.replace(case.layer_config, shape_k=1024))
+    case = dataclasses.replace(
+        case,
+        layer_config=dataclasses.replace(case.layer_config, shape_k=8192 if weight_name == "fp8" else 1024),
+    )
     # Odd stage counts transfer ownership between WGs. Enough output tiles must
     # reuse a persistent CTA to check that their phases also survive tile changes.
-    _assert_results(case, (17, 33000))
+    _assert_results(case, (128, 33000))
+
+
+@pytest.mark.parametrize("block_n,block_k", ((256, 64), (128, 128)))
+def test_umma_operand_wait_once_per_iteration(block_n, block_k, monkeypatch):
+    # Odd stages must not wait again for a second output group or fragment.
+    def select_config(layer_config, shape_m, gemm_type, **kwargs):
+        return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
+            "block_shape": (24, block_n, block_k),
+            "warp_shape": (24, 32, block_k),
+            "num_stages": 3,
+            "num_ctas_per_sm": 1,
+            "use_stream_k": False,
+            "use_tma": True,
+            "use_tma_a": True,
+            "use_tma_c": True,
+        }
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+    case = _case("operand-wait", GemmType.DENSE, **WEIGHT_CONFIGS["nvfp4"])
+    case = dataclasses.replace(case, layer_config=dataclasses.replace(case.layer_config, shape_k=1024))
+    _assert_results(case, (64, 257))
 
 
 @pytest.mark.parametrize("gemm_type", list(GemmType))
@@ -258,6 +284,7 @@ def test_umma_native_output_weight_types(weight_values, block_n, monkeypatch):
     _assert_results(case, (17, 257))
 
 
+@pytest.mark.parametrize("shape_n,shape_k,num_sms", ((256, 256, 3), (128, 8192, 64)))
 @pytest.mark.parametrize("use_tma_c", (False, True))
 @pytest.mark.parametrize(
     "weight_values",
@@ -266,17 +293,22 @@ def test_umma_native_output_weight_types(weight_values, block_n, monkeypatch):
         dict(b_dtype="uint4", weight_scale_type="channel", has_bias=True),
     ),
 )
-def test_umma_native_output_stream_k_bias(weight_values, use_tma_c, monkeypatch):
+def test_umma_native_output_stream_k_bias(weight_values, use_tma_c, shape_n, shape_k, num_sms, monkeypatch):
     """Only the first K slice contributes bias to native output."""
     case = _case("native-output-stream-k", GemmType.DENSE, **weight_values)
+
+    case = dataclasses.replace(
+        case, layer_config=dataclasses.replace(case.layer_config, shape_n=shape_n, shape_k=shape_k)
+    )
 
     def select_stream_k(layer_config, shape_m, gemm_type, **kwargs):
         return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
             "block_shape": (128, 128, 64),
             "warp_shape": (128, 32, 64),
-            "num_stages": 3,
+            "num_stages": 2,
             "num_ctas_per_sm": 1,
-            "num_sms": 3,
+            "num_sms": num_sms,
+            "use_tma": True,
             "use_tma_c": use_tma_c,
             "use_stream_k": True,
         }
@@ -323,28 +355,29 @@ def test_umma_pipeline_stage_reuse(gemm_type, block_m, shape_k, block_n, weight_
     _assert_results(case, (17, 257))
 
 
-def test_umma_two_cta_sparse_decode(monkeypatch):
-    """Two resident CTAs can reuse indexed stages across successive output tiles."""
-    case = _case("two-cta-sparse-decode", GemmType.INDEXED, **WEIGHT_CONFIGS["uint4"])
+@pytest.mark.parametrize("num_ctas_per_sm,block_n", ((2, 256), (3, 128)))
+def test_umma_multi_cta_sparse_decode(num_ctas_per_sm, block_n, monkeypatch):
+    """Multiple CTAs can reuse indexed stages across successive output tiles."""
+    case = _case("multi-cta-sparse-decode", GemmType.INDEXED, **WEIGHT_CONFIGS["uint4"])
     case = dataclasses.replace(case, layer_config=dataclasses.replace(case.layer_config, shape_n=1024))
 
-    def select_two_ctas(layer_config, shape_m, gemm_type, **kwargs):
+    def select_multiple_ctas(layer_config, shape_m, gemm_type, **kwargs):
         return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
-            "block_shape": (8, 256, 64),
+            "block_shape": (8, block_n, 64),
             "warp_shape": (8, 32, 64),
             "num_stages": 2,
-            "num_ctas_per_sm": 2,
+            "num_ctas_per_sm": num_ctas_per_sm,
             "num_sms": 2,
         }
 
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_two_ctas)
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_multiple_ctas)
     _assert_results(case, (1, 17))
 
 
 @pytest.mark.parametrize("weight_name", ("uint4", "uint4-zp"))
 @pytest.mark.parametrize(
     "shape_n,shape_k,num_experts,shape_ms",
-    ((2048, 512, 32, (1, 17)), (1024, 2048, 64, (17, 257))),
+    ((2048, 512, 32, (1, 17, 2816)), (1024, 2048, 64, (17, 32, 49, 257, 5632))),
 )
 def test_umma_indexed_multi_expert_tiles(weight_name, shape_n, shape_k, num_experts, shape_ms):
     case = _case("indexed-multi-expert", GemmType.INDEXED, **WEIGHT_CONFIGS[weight_name])

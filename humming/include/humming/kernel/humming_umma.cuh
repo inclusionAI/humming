@@ -296,6 +296,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                   mma.store_b(prepared, fragment);
                 }
               }
+              tcgen05_wait_st();
+              tcgen05_fence_before_thread_sync();
               __mbarrier_arrive(&smem.umma_operand_ready[buffer]);
             });
           }
