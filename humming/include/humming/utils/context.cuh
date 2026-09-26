@@ -166,8 +166,15 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
   }
 
   CUDA_INLINE static void sync_math_threads() {
-    uint32_t barrier_id = threadIdx.x < 256 ? 1 : (threadIdx.x < 384 ? 3 : 4);
-    asm volatile("bar.sync %0, 128;" ::"r"(barrier_id) : "memory");
+    if constexpr (TuningConfig::kNumCtasPerSm > 2) {
+      // A dynamic barrier ID reserves all named barriers, limiting residency to two CTAs.
+      if (threadIdx.x < 256) sync_part_threads<128, Base::kNumThreads, 1>();
+      else if (threadIdx.x < 384) sync_part_threads<128, Base::kNumThreads, 3>();
+      else sync_part_threads<128, Base::kNumThreads, 4>();
+    } else {
+      uint32_t barrier_id = threadIdx.x < 256 ? 1 : (threadIdx.x < 384 ? 3 : 4);
+      asm volatile("bar.sync %0, 128;" ::"r"(barrier_id) : "memory");
+    }
   }
 
   CUDA_INLINE static void sync_load_threads() { sync_part_threads<kNumLoadThreads, Base::kNumThreads, 2>(); }

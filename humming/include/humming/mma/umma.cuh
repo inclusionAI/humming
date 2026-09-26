@@ -61,10 +61,6 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       tcgen05_st_16x128b_x8(address, values[0], values[1], values[2], values[3]);
       tcgen05_st_16x128b_x8(address | (16u << 16), values[0] + 4, values[1] + 4, values[2] + 4, values[3] + 4);
     }
-    if (iter_id + kFragments == Ctx::kWarpIters) {
-      tcgen05_wait_st();
-      tcgen05_fence_before_thread_sync();
-    }
   }
 
   CUDA_INLINE void set_operand_buffer(uint32_t buffer) { operand_buffer = buffer; }

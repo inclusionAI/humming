@@ -290,10 +290,28 @@ public:
     m_block_in_expert += delta_m_block_id;
 
     while (m_block_in_expert >= current_expert_m_blocks) {
-      m_block_in_expert -= current_expert_m_blocks;
-      expert_id++;
-      current_expert_num_tokens = ctx.smem.expert_tokens[expert_id];
-      current_expert_m_blocks = CEIL_DIV(current_expert_num_tokens, BlockShape::M);
+      uint32_t lane = threadIdx.x % 32;
+      uint32_t index = expert_id + lane;
+      uint32_t tokens = index < kNumExperts ? ctx.smem.expert_tokens[index] : 0;
+      uint32_t blocks = CEIL_DIV(tokens, BlockShape::M);
+      uint32_t prefix = blocks;
+      PRAGMA_UNROLL
+      for (uint32_t offset = 1; offset < 32; offset *= 2) {
+        uint32_t preceding = __shfl_up_sync(0xffffffff, prefix, offset);
+        if (lane >= offset) prefix += preceding;
+      }
+      uint32_t matches = __ballot_sync(0xffffffff, m_block_in_expert < prefix);
+      if (matches) {
+        uint32_t selected_lane = __ffs(matches) - 1;
+        m_block_in_expert -= __shfl_sync(0xffffffff, prefix - blocks, selected_lane);
+        current_expert_num_tokens = __shfl_sync(0xffffffff, tokens, selected_lane);
+        current_expert_m_blocks = __shfl_sync(0xffffffff, blocks, selected_lane);
+        expert_id += selected_lane;
+        break;
+      }
+      m_block_in_expert -= __shfl_sync(0xffffffff, prefix, 31);
+      expert_id += 32;
+      current_expert_m_blocks = 0;
     }
 
     old_m_block_id = m_block_id;
