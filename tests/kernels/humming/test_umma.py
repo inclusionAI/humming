@@ -173,6 +173,7 @@ def test_umma_native_output_partitions(
             "warp_shape": (warp_m, 32, 64),
             "num_stages": num_stages,
             "num_ctas_per_sm": 1,
+            "use_tma": True,
             "use_tma_a": True,
             "use_tma_c": use_tma_c,
             "use_stream_k": False,
@@ -216,6 +217,7 @@ def test_umma_native_output_channel_and_bias(weight_values, block_m, block_n, ou
             "warp_shape": (block_m, 32, 64),
             "num_stages": 3,
             "num_ctas_per_sm": 1,
+            "use_tma": True,
             "use_tma_a": True,
             "use_tma_c": True,
             "use_stream_k": False,
@@ -248,6 +250,7 @@ def test_umma_native_output_weight_types(weight_values, block_n, monkeypatch):
             "warp_shape": (128, 32, 64),
             "num_stages": 3,
             "num_ctas_per_sm": 1,
+            "use_tma": True,
             "use_tma_a": True,
             "use_tma_c": True,
             "use_stream_k": False,
@@ -597,6 +600,7 @@ def test_umma_k32(weight_name, output_dtype, use_tma_a, num_stages, monkeypatch)
             "num_stages": num_stages,
             "num_sms": 2,
             "num_ctas_per_sm": 1,
+            "use_tma": True,
             "use_tma_a": use_tma_a,
             "use_stream_k": False,
         }
@@ -643,8 +647,12 @@ def test_umma_k32_tile_reuse(gemm_type, use_stream_k, monkeypatch):
         (GemmType.DENSE, "nvfp4", True, 512, 4),
     ),
 )
-def test_umma_operand_buffer_selection(gemm_type, weight_name, use_tma_a, block_n, num_stages, monkeypatch):
+@pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
+def test_umma_operand_buffer_selection(
+    gemm_type, weight_name, use_tma_a, block_n, num_stages, compiler, monkeypatch
+):
     """Exercise stage-matched and capacity-limited operands with either loading path."""
+    monkeypatch.setenv("HUMMING_COMPILER", compiler)
 
     def select_operands(layer_config, shape_m, gemm_type, **kwargs):
         return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
@@ -653,6 +661,7 @@ def test_umma_operand_buffer_selection(gemm_type, weight_name, use_tma_a, block_
             "num_stages": num_stages,
             "num_sms": 2,
             "num_ctas_per_sm": 1,
+            "use_tma": True,
             "use_tma_a": use_tma_a,
             "use_stream_k": False,
         }
