@@ -147,8 +147,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             }
           }
         };
-        if (threadIdx.x < 32) run_load_warp(std::true_type{});
-        else if (threadIdx.x < 64) run_load_warp(std::false_type{});
+        if (threadIdx.x < 32) run_load_warp(CompileTimeConstant<1>{});
+        else if (threadIdx.x < 64) run_load_warp(CompileTimeConstant<0>{});
         // Retire both operand streams before starting another tile; otherwise
         // weight readiness can advance into the next tile's barrier phases.
         ctx.sync_load_threads();
