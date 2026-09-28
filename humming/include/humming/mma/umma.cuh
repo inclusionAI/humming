@@ -91,9 +91,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
     }
   }
 
-  // MXMMA's packed GMEM scales are kept unchanged. Each warp writes the same
-  // scales to its 32-lane TMEM partition, as required by SM100 block scaling.
-  CUDA_INLINE void store_weight_scales(uint32_t stage) {
+  CUDA_INLINE void store_weight_scales(uint32_t stage, uint32_t k_block, uint32_t n_block) {
     if constexpr (kUseBlockScale) {
       if constexpr (kOutputGroups < Ctx::TuningConfig::kUmmaNumDequantWarpgroups) {
         if (ctx.dequant_group_id() != 0) return;
@@ -101,6 +99,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       const uint32_t *scales = reinterpret_cast<const uint32_t *>(ctx.smem.stages[stage].bs);
       uint32_t base = tmem_column + ctx.math_group * kGroupColumns +
                       operand_buffer * kOperandBufferColumns + kOperandColumns;
+      uint32_t phase = (k_block * Ctx::kWarpIters) % 4;
       PRAGMA_UNROLL
       for (uint32_t word = 0; word < kScaleWords; word++) {
         uint32_t values[4];
@@ -110,13 +109,9 @@ struct UMMA : WMMA<Ctx, ArithClass> {
           uint32_t packed = 0x7f7f7f7f;
           if constexpr (Ctx::kIsGroupWeightScale) {
             if (n < BlockShape::N) {
-              uint32_t index = word * BlockShape::N + (n / 16) * 8 + n % 8;
-              uint32_t first = scales[index];
-              uint32_t second = 0x7f7f7f7f;
-              if (word * 4 + 2 < Ctx::kWarpIters) second = scales[index + BlockShape::N / 2];
-              // Each MXMMA word contains two K scales for n and two for n+8.
-              uint32_t selector = n % 16 < 8 ? 0x5410 : 0x7632;
-              packed = __byte_perm(first, second, selector);
+              uint32_t row = n + (n_block * BlockShape::N) % 128;
+              uint32_t index = word * MAX(BlockShape::N, 128) + row / 128 * 128 + row % 32 * 4 + row % 128 / 32;
+              packed = scales[index] >> (phase * 8);
             }
           }
           values[column] = packed;

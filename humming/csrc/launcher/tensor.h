@@ -176,8 +176,13 @@ inline void check_tensor_bs(Tensor &tensor, KernelData &kernel_data, int64_t dev
     expected_dtype = ScalarType::Int;
     uint32_t num_bits = get_dtype_num_bits(kernel_data.a_dtype_id);
     uint32_t scale_vec = 256 / num_bits / group_size;
-    expected_shape.push_back(num_groups / (scale_vec == 1 ? 2 : 4));
-    expected_shape.push_back(kernel_data.problem_shape_n / (scale_vec == 1 ? 2 : 1));
+    if (kernel_data.mma_type_id == 2) {
+      expected_shape.push_back(CEIL_DIV(num_groups, 4));
+      expected_shape.push_back(CEIL_DIV(problem_shape_n, 128) * 128);
+    } else {
+      expected_shape.push_back(num_groups / (scale_vec == 1 ? 2 : 4));
+      expected_shape.push_back(problem_shape_n / (scale_vec == 1 ? 2 : 1));
+    }
   } else {
     expected_shape.push_back(num_groups);
     if (kernel_data.is_block_weight_scale) {
@@ -380,6 +385,10 @@ inline CUtensorMap make_tma_desc_bs(Tensor tensor, KernelData &kernel_data) {
     uint32_t scale_vec = 256 / num_bits / group_size;
     uint32_t packed_block_n = block_shape_n / (scale_vec == 1 ? 2 : 1);
     uint32_t packed_num_groups = num_groups / (scale_vec == 1 ? 2 : 4);
+    if (kernel_data.mma_type_id == 2) {
+      packed_block_n = std::max(block_shape_n, 128u);
+      packed_num_groups = CEIL_DIV(num_groups, 4);
+    }
     if (packed_block_n > 256) {
       ASSERT_CHECK(packed_block_n % 256 == 0, "MXMMA BS TMA width must be divisible by 256");
       ASSERT_CHECK(tensor.size(-1) % 256 == 0, "MXMMA packed BS width must be divisible by 256");

@@ -346,9 +346,23 @@ def transform_humming_weight_scale(
     is_blockwise: bool = False,
     is_mxmma: bool = False,
     mxmma_scale_vec: int = 4,
+    is_umma: bool = False,
 ) -> torch.Tensor:
     if is_blockwise:
         return weight_scale.transpose(-1, -2).contiguous()
+
+    if is_umma:
+        # One copy tile holds 128 channels and four consecutive K scales.
+        scales = weight_scale.view(torch.uint8)
+        lead = scales.shape[:-2]
+        n, groups = scales.shape[-2:]
+        scales = torch.nn.functional.pad(scales, (0, -groups % 4, 0, -n % 128), value=127)
+        padded_n, padded_groups = scales.shape[-2:]
+        scales = scales.reshape(*lead, padded_n // 128, 4, 32, padded_groups // 4, 4)
+        ndim = len(lead)
+        order = (*range(ndim), ndim + 3, ndim, ndim + 2, ndim + 1, ndim + 4)
+        scales = scales.permute(*order).contiguous()
+        return scales.view(torch.int32).reshape(*lead, padded_groups // 4, padded_n)
 
     if is_mxmma:
         if mxmma_scale_vec == 1:
@@ -487,6 +501,7 @@ def transform_humming_tensors(
             is_blockwise=config.weight_scale_type == WeightScaleType.BLOCK,
             is_mxmma=is_mxmma,
             mxmma_scale_vec=mxmma_scale_vec,
+            is_umma=is_mxmma and config.mma_type == MmaType.UMMA,
         )
 
     if zero_point is not None:

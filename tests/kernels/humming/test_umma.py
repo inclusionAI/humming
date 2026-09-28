@@ -1027,6 +1027,9 @@ def test_umma_cooperative_dequant(
         (64, 128, 128, False, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (64, 128, 64, False, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (64, 128, 128, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
+        (32, 64, 64, True, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
+        (32, 512, 128, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
+        (32, 512, 128, False, 2, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (96, 128, 256, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (160, 128, 256, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (24, 256, 128, True, 2, True, dtypes.float8e5m2, dtypes.float4e2m1, GemmType.DENSE),
@@ -1062,7 +1065,7 @@ def test_umma_mxf8_mxf4(
     case = KernelTestCase(
         name="umma-mxf8-mxf4",
         layer_config=LayerConfig(
-            shape_n=256,
+            shape_n=max(256, block_n),
             shape_k=1024,
             num_experts=0 if gemm_type == GemmType.DENSE else 4,
             a_dtype=a_dtype,

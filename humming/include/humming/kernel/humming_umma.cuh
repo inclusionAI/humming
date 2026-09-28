@@ -231,7 +231,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         static_assert(kSplitN || Ctx::kWarpIters % kDequantGroups == 0);
         uint32_t first_group = kSplitN && kDequantGroups > 1 ? ctx.dequant_group_id() : 0;
         uint32_t first_fragment = kSplitN ? 0 : ctx.dequant_group_id() * kFragmentsPerGroup;
-        auto convert_weight_stage = [&](uint32_t stage, uint32_t buffer, auto wait_for_operand) {
+        auto convert_weight_stage = [&](uint32_t stage, uint32_t buffer, uint32_t iter, auto wait_for_operand) {
           mma.set_operand_buffer(buffer);
           PRAGMA_UNROLL
           for (uint32_t group_index = 0; group_index < kGroupsPerWarpgroup; group_index++) {
@@ -256,7 +256,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                 }
               }
               if (group_index == 0 && fragment_index == 0) wait_for_operand();
-              if (fragment_index == 0) mma.store_weight_scales(stage);
+              if (fragment_index == 0) mma.store_weight_scales(stage, scheduler.k_block_id + iter, scheduler.n_block_id);
               mma.store_b(prepared, fragment);
               if constexpr (kEarlyWeightReuse) {
                 if (group_index + 1 == kGroupsPerWarpgroup && fragment_index + kPreparedFragments >= kFragmentsPerGroup) {
@@ -284,7 +284,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
           // With three loading warps, the combined load barrier already covers A.
           if constexpr (kNumReadinessThreads == 0 && !Ctx::kUseTmaA) tma_fence_async_shared();
-          convert_weight_stage(pipeline_stage, buffer, wait_for_operand);
+          convert_weight_stage(pipeline_stage, buffer, iter, wait_for_operand);
           if constexpr (Ctx::kUseBlockScaledMma) {
             if constexpr (Ctx::kUseUmmaSplitLoads)
               mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);

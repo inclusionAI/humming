@@ -151,7 +151,9 @@ public:
   static constexpr uint32_t kStageSizeAS = kUseBlockScaledMma
                                                ? CEIL_DIV(kNumGroupsAStorage * kScaleBlockM, sizeof(int4))
                                                : kNumGroupsA * kScaleBlockM / 4;
-  static constexpr uint32_t kStageSizeBS = kNumGroupsB * kSmemStrideBS;
+  static constexpr uint32_t kStageSizeBS = kUseBlockScaledMma && LayerConfig::kMmaType == MmaType::UMMA
+                                               ? CEIL_DIV(kNumGroupsB, 4) * MAX(BlockShape::N, 128) / 4
+                                               : kNumGroupsB * kSmemStrideBS;
   static constexpr uint32_t kStageSizeBZP = kNumGroupsB * kSmemStrideBZP;
 
   static constexpr uint32_t kChannelSizeAS = kHasChannelInputScale ? kScaleBlockM / 4 : 0;

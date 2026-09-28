@@ -61,7 +61,12 @@ def _stage_storage_bytes(
 
     if is_group_or_block_ws and layer_config.weight_scale_group_size > 0:
         num_groups_b = ceil_div(block_k, layer_config.weight_scale_group_size)
-        fields.append((num_groups_b * block_n * bs_bits // 8, 128))
+        scale_n = block_n
+        storage_groups_b = num_groups_b
+        if is_mxmma and layer_config.mma_type == MmaType.UMMA:
+            storage_groups_b = round_up(num_groups_b, 4)
+            scale_n = max(block_n, 128)
+        fields.append((storage_groups_b * scale_n * bs_bits // 8, 128))
         if has_stage_zp:
             fields.append((num_groups_b * block_n * zp_bits // 8, 128))
 
