@@ -84,7 +84,9 @@ class HummingWeightSchema(BaseWeightSchema):
         group_size = self.weight_scale_group_size or shape_k
 
         scale_torch_dtype = param_dtype
-        if self.bs_dtype == dtypes.float8e8m0:
+        if self.bs_dtype == dtypes.float16 and self.weight_scale_type == WeightScaleType.GROUP:
+            scale_torch_dtype = torch.float16
+        elif self.bs_dtype == dtypes.float8e8m0:
             scale_torch_dtype = torch.float8_e8m0fnu
         elif self.bs_dtype == dtypes.float8e4m3:
             scale_torch_dtype = torch.float8_e4m3fn
@@ -327,7 +329,6 @@ class HummingWeightSchema(BaseWeightSchema):
             schema.bs_dtype = dtypes.float32
 
         return schema, tensors
-
 
     def is_compatible_with(
         self,

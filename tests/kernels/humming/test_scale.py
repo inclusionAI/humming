@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from humming import dtypes
 from humming.config import (
@@ -8,6 +9,7 @@ from humming.config import (
     WeightScale2Type,
     WeightScaleType,
 )
+from humming.schema import HummingWeightSchema
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -112,6 +114,14 @@ SCALE_CASES = (
         b_dtype=dtypes.uint4,
         bs_dtype=dtypes.bfloat16,
     ),
+    _case(
+        "group32-bfloat16-activation-float16-scale",
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.uint8,
+        c_dtype=dtypes.bfloat16,
+        bs_dtype=dtypes.float16,
+        weight_scale_group_size=32,
+    ),
     *BS_DTYPE_CASES,
     _case(
         "tensor-float32",
@@ -172,3 +182,14 @@ def test_scale_config_case_coverage():
     for bs_dtype in GROUP_SCALE_DTYPES:
         for scale_type in SECONDARY_SCALE_TYPES:
             assert (bs_dtype, scale_type) in secondary_scale_pairs
+
+
+def test_float16_group_scale_metadata_with_bfloat16_activation():
+    schema = HummingWeightSchema(
+        b_dtype="uint8",
+        bs_dtype="float16",
+        weight_scale_group_size=32,
+    )
+    attrs = schema.get_tensors_attrs(shape_n=64, shape_k=128, param_dtype=torch.bfloat16)
+    assert attrs["weight_scale"]["shape"] == (64, 4)
+    assert attrs["weight_scale"]["dtype"] == torch.float16

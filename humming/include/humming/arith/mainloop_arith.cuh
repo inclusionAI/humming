@@ -182,7 +182,12 @@ public:
         scalar_t *bs_half_ptr = reinterpret_cast<scalar_t *>(ElementBS::kBits == 8 ? &dq_bs[j] : &bs[buffer_id][j]);
         PRAGMA_UNROLL
         for (uint32_t i = 0; i < 2; i++) {
-          bs_f16_ptr[i] = this->num2num2(bs_half_ptr[i]);
+          if constexpr (std::is_same<ElementBS, Float16>::value && std::is_same<ElementC, BFloat16>::value) {
+            const half *fp16_scale = reinterpret_cast<const half *>(&bs[buffer_id][j]);
+            bs_f16_ptr[i] = this->float2num2(__half2float(fp16_scale[i]));
+          } else {
+            bs_f16_ptr[i] = this->num2num2(bs_half_ptr[i]);
+          }
         }
       }
 
