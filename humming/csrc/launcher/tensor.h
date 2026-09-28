@@ -353,6 +353,10 @@ inline CUtensorMap make_tma_desc_c(Tensor tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_c) return CUtensorMap();
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
   uint32_t rows = kernel_data.umma_output_chunk_rows ? kernel_data.umma_output_chunk_rows : kernel_data.block_shape_m;
+  if (kernel_data.umma_output_chunk_rows) {
+    while (kernel_data.block_shape_m % rows)
+      rows /= 2;
+  }
   return make_tma_desc(tensor, {64, rows}, 128, "c");
 }
 

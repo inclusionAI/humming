@@ -27,8 +27,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr bool kUseBf16 = std::is_same<typename Ctx::ElementA, BFloat16>::value;
   static_assert(kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
   static_assert(BlockShape::N == 64 || BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512);
-  static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % 8 == 0,
-                "UMMA requires warp M in [8, 256], divisible by 8");
+  static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
+                "UMMA requires warp M in [8, 256], divisible by 8 (one CTA) or 16 (two CTAs)");
   static_assert(WarpShape::N == 32);
   static_assert(WarpShape::K >= 32 && WarpShape::K % 32 == 0,
                 "UMMA requires K divisible by 32");

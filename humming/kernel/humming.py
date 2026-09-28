@@ -462,13 +462,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
             assert self.umma_cta_group_size in (1, 2)
             assert self.umma_output_chunk_rows in (0, 32)
-            if self.umma_output_chunk_rows:
-                assert self.gemm_type == GemmType.DENSE and self.use_tma_c, (
-                    "chunked UMMA output requires dense TMA output"
-                )
-                assert block_m % 32 == 0 and block_n == 128
-                assert self.smem_reuse_mode.value == "none"
             if self.umma_cta_group_size == 2:
+                assert block_m % 16 == 0, "two-CTA UMMA requires block M divisible by 16"
                 assert self.umma_output_chunk_rows == 32
                 assert self.problem_shape[1] % (2 * block_n) == 0
                 assert self.use_tma_a and self.use_tma_b
