@@ -489,8 +489,23 @@ class MmaOpClass:
         if mma_type == MmaType.MMA:
             return MmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.UMMA:
-            assert m in (8, 16) and (n, k) == (8, 16)
-            assert a_dtype == b_dtype and a_dtype in (dtypes.bfloat16, dtypes.float16)
+            assert m in (8, 16) and (n, k) == (8, 256 // a_dtype.num_bits)
+            assert a_dtype in (
+                dtypes.bfloat16,
+                dtypes.float16,
+                dtypes.float8e4m3,
+                dtypes.float8e5m2,
+            )
+            if a_dtype.num_bits == 16:
+                assert a_dtype == b_dtype
+            else:
+                assert b_dtype in (
+                    dtypes.float8e4m3,
+                    dtypes.float8e5m2,
+                    dtypes.float4e2m1,
+                    dtypes.float6e3m2,
+                    dtypes.float6e2m3,
+                )
             assert cd_dtype == dtypes.float32
             return UmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.WGMMA:

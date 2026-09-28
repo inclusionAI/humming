@@ -437,11 +437,12 @@ public:
   }
 
   // Issuer and dequantization WGs have independent ConsumerPipeline instances.
-  template <bool kIsFirst = false>
+  template <bool kIsFirst = false, bool kWeightAlreadyWaited = false>
   CUDA_INLINE void wait_activation(uint32_t stage_id) {
     stage_id = kIsFirst ? kNumStages : stage_id;
-    mbarrier_wait(&ctx.smem.load_mbar[stage_id], phases[stage_id]);
-    phases[stage_id] ^= 1;
+    // The operand WG has already advanced the shared phase after waiting for B.
+    mbarrier_wait(&ctx.smem.load_mbar[stage_id], phases[stage_id] ^ uint32_t(kWeightAlreadyWaited));
+    if constexpr (!kWeightAlreadyWaited) phases[stage_id] ^= 1;
   }
 
   CUDA_INLINE void wait_channel() {

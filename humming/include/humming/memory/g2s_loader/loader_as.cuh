@@ -11,7 +11,7 @@ private:
   using PadShape = typename Ctx::PadShape;
   using ElementA = typename Ctx::ElementA;
 
-  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
+  static constexpr bool kUseBlockScaledMma = Ctx::kUseBlockScaledMma;
   static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
   static constexpr bool kIsIndexedGemm = Ctx::kIsIndexedGemm;
@@ -25,13 +25,13 @@ private:
   static constexpr bool kHasInputScale = kConfiguredInputScale && !kIsTensorScale;
   static constexpr bool kIsChannelScale = kHasInputScale && (kSecondary || !Ctx::kIsGroupInputScale);
   static constexpr bool kIsGroupScale = kHasInputScale && !kSecondary && Ctx::kIsGroupInputScale;
-  static constexpr bool kUseMxScale = kUseMxmma && kIsGroupScale;
+  static constexpr bool kUseMxScale = kUseBlockScaledMma && kIsGroupScale;
   static constexpr bool kMMajorInputScale = Ctx::kUseMMajorInputScale && kIsGroupScale;
   static_assert(!kMMajorInputScale || !kIsIndexedGemm);
   static constexpr bool kConfiguredUseTma = kSecondary ? Ctx::kUseTmaAS2 : Ctx::kUseTmaAS;
   static constexpr bool kUseTma = kConfiguredUseTma && kHasInputScale && !kIsIndexedGemm;
   static_assert(!kConfiguredUseTma || !kIsTensorScale);
-  static_assert(!kUseTma || kMMajorInputScale || kIsChannelScale || kUseMxmma);
+  static_assert(!kUseTma || kMMajorInputScale || kIsChannelScale || kUseBlockScaledMma);
   static constexpr uint32_t kGroupSize = kIsGroupScale ? Ctx::kInputScaleGroupSize : ProblemShape::K;
 
   static_assert(ProblemShape::K == kGroupSize || (ProblemShape::K - PadShape::K) % kGroupSize == 0);
@@ -163,7 +163,8 @@ public:
 
   CUDA_INLINE void load_mx_tma(void *smem_ptr, void *mbar_ptr) {
     static_assert(kMMajorInputScale && !kIsIndexedGemm);
-    if (ctx.load_thread_id() == 0) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
+    constexpr uint32_t kLoadThread = Ctx::kUseUmmaSplitLoads ? 32 : 0;
+    if (ctx.load_thread_id() == kLoadThread) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
   }
 
   CUDA_INLINE void prefetch_tma() {

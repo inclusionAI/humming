@@ -474,7 +474,7 @@ def transform_humming_tensors(
     )
 
     if weight_scale is not None:
-        is_mxmma = config.mma_type == MmaType.MXMMA and (
+        is_mxmma = config.use_block_scaled_mma and (
             config.is_group_weight_scale or config.is_block_weight_scale
         )
         mxmma_scale_vec = None

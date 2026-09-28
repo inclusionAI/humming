@@ -98,7 +98,7 @@ def estimate_smem_size_layer(
         use_mbarrier = True
         use_warp_spec = True
     block_m, block_n, block_k = block_shape
-    is_mxmma = layer_config.mma_type == MmaType.MXMMA
+    is_mxmma = layer_config.use_block_scaled_mma
     is_grouped = gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED)
     scale_block_m = block_m + (4 if is_grouped else 0)
     bs_bits = (layer_config.bs_dtype or layer_config.c_dtype).num_bits

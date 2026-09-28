@@ -104,12 +104,17 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     sm_version = 100
     expert_probability_cv = 0.25
     b16_allowed_dtypes = [dtypes.float16, dtypes.bfloat16]
+    b8_allowed_dtypes = [dtypes.float8e4m3, dtypes.float8e5m2]
 
     @classmethod
     def _fits_resources(cls, layer_config, block_shape, num_stages, num_ctas_per_sm):
         block_m, block_n, block_k = block_shape
         output_groups = math.ceil(block_n / 128)
-        operand_columns = block_k // 2
+        operand_columns = block_k * layer_config.a_dtype.num_bits // 32
+        if layer_config.use_block_scaled_mma:
+            scale_words = math.ceil(block_k / 128)
+            operand_columns += scale_words * (4 + math.ceil(block_m / 32))
+            operand_columns = round_up(operand_columns, 16)
         stage_columns = output_groups * (num_stages * operand_columns + block_m)
         tmem_columns = 1 << (stage_columns - 1).bit_length()
         if tmem_columns * num_ctas_per_sm > 512:
@@ -235,7 +240,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         shape_n, shape_k = layer_config.shape_n, layer_config.shape_k
         num_sms = current_device.sm_count
 
-        for block_k in (64, 32):
+        for block_k in (1024 // layer_config.a_dtype.num_bits, 512 // layer_config.a_dtype.num_bits):
             if shape_k % block_k:
                 continue
             k_iters = shape_k // block_k
@@ -322,20 +327,26 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             if layer_config.shape_n % block_n:
                 continue
             output_groups = math.ceil(block_n / 128)
-            for block_k in (64,) if layer_config.shape_k % 64 == 0 else (32,):
+            preferred_k = 1024 // layer_config.a_dtype.num_bits
+            for block_k in (preferred_k,) if layer_config.shape_k % preferred_k == 0 else (preferred_k // 2,):
                 if layer_config.shape_k % block_k:
                     continue
                 k_iters = layer_config.shape_k // block_k
                 for num_ctas in (2, 1) if block_n == 256 else (2,):
-                    max_block_m = min(256, 512 // (output_groups * num_ctas) - block_k)
+                    operand_columns = block_k * layer_config.a_dtype.num_bits // 32
+                    max_block_m = min(256, 512 // (output_groups * num_ctas) - 2 * operand_columns)
                     for block_m in range(8, max_block_m + 1, 8):
+                        operand_columns = block_k * layer_config.a_dtype.num_bits // 32
+                        if layer_config.use_block_scaled_mma:
+                            operand_columns += math.ceil(block_k / 128) * (4 + math.ceil(block_m / 32))
+                            operand_columns = round_up(operand_columns, 16)
                         for stages in range(min(4, max(2, k_iters)), 1, -1):
-                            stage_columns = output_groups * (block_m + stages * block_k // 2)
+                            stage_columns = output_groups * (block_m + stages * operand_columns)
                             tmem_columns = 1 << (stage_columns - 1).bit_length()
                             buffers = stages
                             if tmem_columns * num_ctas > 512:
                                 buffers = 2
-                                columns = output_groups * (block_m + buffers * block_k // 2)
+                                columns = output_groups * (block_m + buffers * operand_columns)
                                 tmem_columns = 1 << (columns - 1).bit_length()
                             if tmem_columns * num_ctas > 512:
                                 continue
@@ -473,7 +484,12 @@ class Sm100Heuristics(Sm100MmaHeuristics):
         if shape_m <= 0:
             raise ValueError("shape_m must be positive")
         if layer_config.mma_type == MmaType.UMMA:
-            if not use_f16_accum and not cls._should_use_mma(layer_config, shape_m):
+            has_native_mixed_operands = (
+                layer_config.a_dtype.num_bits == 8 and layer_config.b_dtype != layer_config.a_dtype
+            )
+            requires_umma = layer_config.use_block_scaled_mma or has_native_mixed_operands
+            keep_umma = requires_umma or not cls._should_use_mma(layer_config, shape_m)
+            if not use_f16_accum and keep_umma:
                 return Sm100UmmaHeuristics.get_config(
                     layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type
                 )

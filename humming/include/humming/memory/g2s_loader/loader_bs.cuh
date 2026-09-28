@@ -11,7 +11,7 @@ private:
   using BlockShape = typename Ctx::BlockShape;
   using ElementBS = typename Ctx::ElementBS;
 
-  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
+  static constexpr bool kUseBlockScaledMma = Ctx::kUseBlockScaledMma;
   static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
   static constexpr bool kUseTma = Ctx::kUseTmaBS;
   static constexpr bool kEvictWeightsFirst = Ctx::kUseUmmaSplitLoads && Ctx::kRasterGroupM > 1;
@@ -23,7 +23,7 @@ private:
   static constexpr bool kIsGroup = Ctx::kIsGroupWeightScale;
   static constexpr bool kIsBlock = Ctx::kIsBlockWeightScale;
   static constexpr bool kIsGroupOrBlock = kIsGroup || kIsBlock;
-  static constexpr bool kUseMxScale = kUseMxmma && kIsGroupOrBlock;
+  static constexpr bool kUseMxScale = kUseBlockScaledMma && kIsGroupOrBlock;
   static constexpr uint32_t kGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : ProblemShape::K;
   static constexpr uint32_t kGroupSizeN = kIsBlock ? Ctx::kWeightScaleGroupSizeN : 1;
 

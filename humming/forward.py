@@ -3,7 +3,7 @@ import json
 import torch
 
 from humming import ops
-from humming.config import LayerConfig, MmaType
+from humming.config import LayerConfig
 from humming.tune import get_heuristics_class
 
 
@@ -131,7 +131,7 @@ def may_quant_input(
         config,
         inputs=inputs,
         outputs=quanted_input,
-        m_major_scale=(config.mma_type == MmaType.MXMMA and config.input_scale_group_size > 0),
+        m_major_scale=(config.use_block_scaled_mma and config.input_scale_group_size > 0),
         use_pdl=use_pdl,
     )
     scale = group_scales if group_scales is not None else token_scales

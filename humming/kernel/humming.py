@@ -120,7 +120,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.use_mbarrier = True
         TuningConfig.__post_init__(self)
         if self.use_umma_pipeline:
-            self.num_threads = 384
+            self.num_threads = 256 + 128 * self.umma_num_dequant_warpgroups
             self.num_math_threads = 128
         KernelRuntime.__post_init__(self)
 
@@ -307,7 +307,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)
             and self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
         )
-        self.mma_b_dtype = self.b_dtype if mma_native_mixed else self.a_dtype
+        umma_native_mixed = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits == 8
+        self.mma_b_dtype = self.b_dtype if mma_native_mixed or umma_native_mixed else self.a_dtype
 
         return MmaOpClass.from_config(
             self.mma_type,
@@ -417,8 +418,10 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert self.b_dtype.num_bits <= self.a_dtype.mantissa_bits + 2
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_floating_point_type:
             assert self.b_dtype.is_signed
-            assert self.b_dtype.exponent_bits <= self.a_dtype.exponent_bits
-            assert self.b_dtype.mantissa_bits <= self.a_dtype.mantissa_bits
+            uses_native_umma = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits == 8
+            if not self.use_block_scaled_mma and not uses_native_umma:
+                assert self.b_dtype.exponent_bits <= self.a_dtype.exponent_bits
+                assert self.b_dtype.mantissa_bits <= self.a_dtype.mantissa_bits
             assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_integer_type:
             assert self.use_fused_e8m0_scale
@@ -437,14 +440,35 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     def check_config(self):
         assert self.num_threads <= 1024
         if self.mma_type == MmaType.UMMA:
-            assert self.a_dtype in (dtypes.bfloat16, dtypes.float16)
+            assert self.umma_num_dequant_warpgroups in (1, 2)
+            assert self.a_dtype in (dtypes.bfloat16, dtypes.float16, dtypes.float8e4m3, dtypes.float8e5m2)
+            if self.a_dtype.num_bits == 8:
+                assert self.b_dtype in (
+                    dtypes.float8e4m3,
+                    dtypes.float8e5m2,
+                    dtypes.float4e2m1,
+                    dtypes.float6e3m2,
+                    dtypes.float6e2m3,
+                )
+                assert not self.is_block_weight_scale and not self.has_zero_point
+                if self.use_block_scaled_mma:
+                    for group_size, scale_dtype in (
+                        (self.input_scale_group_size, self.as_dtype),
+                        (self.weight_scale_group_size, self.bs_dtype),
+                    ):
+                        if group_size:
+                            assert group_size == 32 and scale_dtype == dtypes.float8e8m0, (
+                                "mxf8f6f4 requires E8M0 scales with group size 32"
+                            )
             block_m, block_n, block_k = self.block_shape
             warp_m, warp_n, warp_k = self.warp_shape
             assert block_m == warp_m, "UMMA requires block M to equal warp M"
             assert block_k == warp_k, "UMMA requires block K to equal warp K"
             assert 8 <= warp_m <= 256 and warp_m % 8 == 0, "UMMA requires warp M in [8, 256], divisible by 8"
             assert warp_n == 32
-            assert block_k >= 32, "UMMA requires K >= 32"
+            assert block_k * self.a_dtype.num_bits >= 512, (
+                "UMMA requires at least 64 bytes per activation row"
+            )
             assert self.num_write_splits == 1, "UMMA requires num_write_splits == 1"
             assert self.num_stages >= 2
             assert not self.use_f16_accum

@@ -89,8 +89,6 @@
 #endif
 
 
-
-
 template <
     class MmaOpClass,
     class BlockShape, class WarpShape,
@@ -101,7 +99,7 @@ private:
   static_assert(!ComputeConfig::kUseBatchInvariant || !TuningConfig::kUseStreamK);
   static_assert(!ComputeConfig::kUseBatchInvariant || BlockShape::K == WarpShape::K);
 
-  static constexpr bool kUseMxmma = MmaOpClass::kMmaType == MmaType::MXMMA;
+  static constexpr bool kUseBlockScaledMma = LayerConfig::kUseBlockScaledMma;
   static constexpr bool kHasInputScale = LayerConfig::kHasInputScale;
   static constexpr bool kHasInputScale2 = LayerConfig::kHasInputScale2;
   static constexpr bool kIsChannelInputScale = kHasInputScale && !LayerConfig::kIsGroupInputScale && !LayerConfig::kIsTensorInputScale;
@@ -150,7 +148,7 @@ public:
   static constexpr uint32_t kStageSizeA = BlockShape::M * kSmemStrideA;
   static constexpr uint32_t kStageSizeB = BlockShape::K / kPartMmaShapeK * kSmemStrideB;
   static constexpr uint32_t kNumGroupsAStorage = CEIL_DIV(kNumGroupsA, 4) * 4;
-  static constexpr uint32_t kStageSizeAS = kUseMxmma
+  static constexpr uint32_t kStageSizeAS = kUseBlockScaledMma
                                                ? CEIL_DIV(kNumGroupsAStorage * kScaleBlockM, sizeof(int4))
                                                : kNumGroupsA * kScaleBlockM / 4;
   static constexpr uint32_t kStageSizeBS = kNumGroupsB * kSmemStrideBS;

@@ -85,7 +85,7 @@ public:
         loader_as.load_sf(smem.stages[stage_id].as, mma.regs_sfa_as_ptr(buffer_id), k_iter_id);
       if constexpr (kIsGroupOrBlockWeightScale)
         loader_bs.load_sf(smem.stages[stage_id].bs, mma.regs_sfb_as_ptr(buffer_id), k_iter_id);
-    } else {
+    } else if constexpr (!Ctx::kUseBlockScaledMma) {
       if constexpr (kIsGroupInputScale)
         loader_as.load(smem.stages[stage_id].as, mma.arith.regs_as_as_ptr(buffer_id), k_iter_id);
       if constexpr (!USE_PPU && kIsGroupOrBlockWeightScale)

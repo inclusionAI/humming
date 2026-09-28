@@ -239,10 +239,10 @@ public:
         uint32_t values[4];
         // TMEM holds N in rows and M in columns. stmatrix writes four 8-column
         // matrices from the two 16-row TMEM loads.
-        values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 2]);
-        values[1] = convert_umma_pair(lower[group * 4 + 1], lower[group * 4 + 3]);
-        values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 2]);
-        values[3] = convert_umma_pair(upper[group * 4 + 1], upper[group * 4 + 3]);
+        values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 2], m * 4 + group, 0);
+        values[1] = convert_umma_pair(lower[group * 4 + 1], lower[group * 4 + 3], m * 4 + group, 1);
+        values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 2], m * 4 + group, 2);
+        values[3] = convert_umma_pair(upper[group * 4 + 1], upper[group * 4 + 3], m * 4 + group, 3);
         uint32_t row = m * 32 + group * 8 + row_in_matrix;
         uint32_t swizzled_column = ((column % 64 / 8) ^ ((row + smem_base) % 8)) * 8;
         uint32_t output_offset = (row + BlockShape::M * (column / 64)) * 64 + swizzled_column;
@@ -253,10 +253,10 @@ public:
   }
 
 private:
-  CUDA_INLINE uint32_t convert_umma_pair(uint32_t first, uint32_t second) {
+  CUDA_INLINE uint32_t convert_umma_pair(uint32_t first, uint32_t second, uint32_t row_group, uint32_t column_group) {
     float first_value = __uint_as_float(first);
     float second_value = __uint_as_float(second);
-    arith.apply_native_f32_output_scale(first_value, second_value);
+    arith.apply_native_f32_output_scale(first_value, second_value, row_group, column_group);
     float2 values = {first_value, second_value};
     auto packed = this->float22num2(values);
     return *reinterpret_cast<uint32_t *>(&packed);

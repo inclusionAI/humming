@@ -28,8 +28,8 @@ private:
   static constexpr uint32_t kWeightScaleGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : 1;
   static constexpr uint32_t kMaxGroupSize = MAX(kInputScaleGroupSize, kWeightScaleGroupSize);
 
-  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
-  static constexpr uint32_t kAsBlocksPerWord = kUseMxmma ? MAX(1u, 4 * kInputScaleGroupSize / BlockShape::K) : 1;
+  static constexpr bool kUseBlockScaledMma = Ctx::kUseBlockScaledMma;
+  static constexpr uint32_t kAsBlocksPerWord = kUseBlockScaledMma ? MAX(1u, 4 * kInputScaleGroupSize / BlockShape::K) : 1;
 
   static constexpr uint32_t N_BLOCKS = ProblemShape::N / BlockShape::N / kMultiCastSizeA;
   static constexpr uint32_t K_BLOCKS = ProblemShape::K / BlockShape::K;

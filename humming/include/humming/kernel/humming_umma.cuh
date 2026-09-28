@@ -61,7 +61,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   constexpr uint32_t kNumStages = Ctx::kNumStages;
   constexpr uint32_t kNumOperandBuffers = MMA::kNumOperandBuffers;
   constexpr uint32_t kOutputGroups = MMA::kOutputGroups;
-  static_assert(TuningConfig::kNumThreads == 384);
+  constexpr uint32_t kDequantGroups = TuningConfig::kUmmaNumDequantWarpgroups;
+  constexpr uint32_t kNumDequantThreads = 128 * kDequantGroups;
+  static_assert(kDequantGroups == 1 || kDequantGroups == 2);
+  static_assert(TuningConfig::kNumThreads == 256 + kNumDequantThreads);
   constexpr bool kSeparateOutputStorage = Ctx::kSmemReuseMode == SmemReuseMode::NONE;
   constexpr bool kNeedsEpilogueGate = !kSeparateOutputStorage || Consumer::kHasChannelData;
 
@@ -78,12 +81,12 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
   if (ctx.is_load_thread()) Producer::template init_mbarrier<1>(ctx);
   if (threadIdx.x < kNumOperandBuffers) {
-    __mbarrier_init(&smem.umma_operand_ready[threadIdx.x], 128);
+    __mbarrier_init(&smem.umma_operand_ready[threadIdx.x], kNumDequantThreads);
     __mbarrier_init(&smem.umma_operand_free[threadIdx.x], 1);
   }
   if constexpr (Ctx::kUseUmmaSplitLoads) {
     if (threadIdx.x < kNumStages + 1) __mbarrier_init(&smem.umma_weight_ready[threadIdx.x], 1);
-    if (threadIdx.x < kNumStages) __mbarrier_init(&smem.umma_weight_free[threadIdx.x], 128);
+    if (threadIdx.x < kNumStages) __mbarrier_init(&smem.umma_weight_free[threadIdx.x], kNumDequantThreads);
   }
   mbarrier_init_sync<false>();
   if (threadIdx.x < 128) asm volatile("setmaxnreg.dec.sync.aligned.u32 40;" ::: "memory");
@@ -169,8 +172,13 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     // Divide the register budget among the output and dequantization WGs.
     constexpr uint32_t kMathRegisterLimit = TuningConfig::kNumCtasPerSm == 2 ? 96 : 224;
     constexpr uint32_t kMathRegisters = MIN(kMathRegisterLimit,
-                                            ((65536 / TuningConfig::kNumCtasPerSm - 128 * 40) / 256 / 8) * 8);
-    asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(kMathRegisters) : "memory");
+                                            ((65536 / TuningConfig::kNumCtasPerSm - 128 * 40) / (128 * (1 + kDequantGroups)) / 8) * 8);
+    if constexpr (kDequantGroups == 2 && TuningConfig::kNumCtasPerSm == 1) {
+      if (ctx.is_math_thread()) asm volatile("setmaxnreg.inc.sync.aligned.u32 200;" ::: "memory");
+      else asm volatile("setmaxnreg.inc.sync.aligned.u32 128;" ::: "memory");
+    } else {
+      asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(kMathRegisters) : "memory");
+    }
     MainloopArith mainloop_arith;
     EpilogueArith epilogue_arith;
     MMA mma(ctx, mainloop_arith);
@@ -192,6 +200,15 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       }
       s2r.seek(scheduler.m_offset);
       if (ctx.is_dequant_thread()) {
+        // Cooperate on every stage: split 128-column N partitions when
+        // available, otherwise split the K fragments of one partition.
+        constexpr bool kSplitN = kOutputGroups >= kDequantGroups;
+        constexpr uint32_t kGroupStride = kSplitN ? kDequantGroups : 1;
+        constexpr uint32_t kGroupsPerWarpgroup = kOutputGroups / kGroupStride;
+        constexpr uint32_t kFragmentsPerGroup = Ctx::kWarpIters / (kSplitN ? 1 : kDequantGroups);
+        static_assert(kSplitN || Ctx::kWarpIters % kDequantGroups == 0);
+        uint32_t first_group = kSplitN && kDequantGroups > 1 ? ctx.dequant_group_id() : 0;
+        uint32_t first_fragment = kSplitN ? 0 : ctx.dequant_group_id() * kFragmentsPerGroup;
         for (uint32_t base_iter = 0; base_iter < scheduler.slice_iters; base_iter += 2 * kNumStages) {
           static_for<0, 2 * kNumStages>([&](auto step) {
             uint32_t iter = base_iter + decltype(step)::value;
@@ -218,12 +235,14 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             if constexpr (Ctx::kUseUmmaSplitLoads) tcgen05_fence_after_thread_sync();
             mma.set_operand_buffer(buffer);
             PRAGMA_UNROLL
-            for (uint32_t group = 0; group < kOutputGroups; group++) {
+            for (uint32_t group_index = 0; group_index < kGroupsPerWarpgroup; group_index++) {
+              uint32_t group = first_group + group_index * kGroupStride;
               ctx.math_group = group;
-              constexpr uint32_t kPreparedFragments = MIN(Ctx::kWarpIters, 4);
+              constexpr uint32_t kPreparedFragments = MIN(kFragmentsPerGroup, 4);
               constexpr uint32_t kFragmentWords = sizeof(mma.regs_b[0]) / sizeof(uint32_t);
               PRAGMA_UNROLL
-              for (uint32_t fragment = 0; fragment < Ctx::kWarpIters; fragment += kPreparedFragments) {
+              for (uint32_t fragment_index = 0; fragment_index < kFragmentsPerGroup; fragment_index += kPreparedFragments) {
+                uint32_t fragment = first_fragment + fragment_index;
                 // Prepare a wider store while UMMA still owns the TMEM buffer.
                 uint32_t prepared[kPreparedFragments][kFragmentWords];
                 PRAGMA_UNROLL
@@ -237,15 +256,31 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                     prepared[part][word] = values[word];
                   }
                 }
-                if (group == 0 && fragment == 0) wait_for_operand();
+                if (group_index == 0 && fragment_index == 0) wait_for_operand();
+                if (fragment_index == 0) {
+                  mma.store_weight_scales(stage);
+                }
+                mma.store_b(prepared, fragment);
                 if constexpr (Ctx::kUseUmmaSplitLoads) {
-                  if (group + 1 == kOutputGroups && fragment + kPreparedFragments >= Ctx::kWarpIters) {
-                    // All raw weights have been consumed; TMEM stores need
-                    // not delay the producer's next shared-memory load.
+                  if (group_index + 1 == kGroupsPerWarpgroup && fragment_index + kPreparedFragments >= kFragmentsPerGroup) {
+                    // Issuing the store consumes every loaded register, including
+                    // the native path where transform_b performs no arithmetic.
+                    // The producer need not wait for the TMEM store to complete.
                     __mbarrier_arrive(&smem.umma_weight_free[stage]);
                   }
                 }
-                mma.store_b(prepared, fragment);
+              }
+            }
+            if constexpr (Ctx::kUseBlockScaledMma) {
+              // Prepare and release B before waiting for the activation scales.
+              if constexpr (Ctx::kUseUmmaSplitLoads) {
+                if (iter == 0) consumer.template wait_activation<true, true>(0);
+                else consumer.template wait_activation<false, true>(stage);
+              }
+              PRAGMA_UNROLL
+              for (uint32_t group_index = 0; group_index < kGroupsPerWarpgroup; group_index++) {
+                ctx.math_group = first_group + group_index * kGroupStride;
+                mma.store_input_scales(stage, buffer, scheduler.k_block_id + iter, scheduler.m_offset);
               }
             }
             tcgen05_wait_st();

@@ -84,7 +84,18 @@ class LayerConfig(BaseHummingConfig):
         "is_token_input_scale_2",
         "is_tensor_input_scale_2",
         "use_native_dequant",
+        "use_block_scaled_mma",
     )
+
+    @property
+    def use_block_scaled_mma(self):
+        if self.mma_type == MmaType.MXMMA:
+            return True
+        return (
+            self.mma_type == MmaType.UMMA
+            and self.a_dtype.num_bits == 8
+            and (self.input_scale_group_size > 0 or self.weight_scale_group_size > 0)
+        )
 
     @property
     def use_native_dequant(self):
@@ -229,11 +240,34 @@ class LayerConfig(BaseHummingConfig):
             self.mma_type = MmaType(self.mma_type)
         elif self.mma_type is None:
             assert self.sm_version is not None
+            has_fp8_epilogue_scales = (
+                not self.is_group_input_scale
+                and not self.is_group_weight_scale
+                and not self.is_block_weight_scale
+            )
+            has_fp8_output = self.c_dtype in (dtypes.float16, dtypes.bfloat16)
+            has_fp8_operands = self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2) and self.b_dtype in (
+                dtypes.float8e4m3,
+                dtypes.float8e5m2,
+                dtypes.float4e2m1,
+                dtypes.float6e3m2,
+                dtypes.float6e2m3,
+            )
+            has_mx_scales = (
+                self.input_scale_group_size == self.weight_scale_group_size == 32
+                and self.bs_dtype == dtypes.float8e8m0
+                and self.as_dtype in (None, dtypes.float8e8m0)
+                and not self.has_zero_point
+                and not self.is_block_weight_scale
+            )
+            has_supported_fp8_scales = has_fp8_epilogue_scales or has_mx_scales
+            use_fp8_umma = has_fp8_output and has_fp8_operands and has_supported_fp8_scales
+            use_bf16_umma = self.a_dtype == self.c_dtype == dtypes.bfloat16
             if self.sm_version // 10 == 9:
                 self.mma_type = MmaType.WGMMA
             elif self.mxmma_supported:
                 self.mma_type = MmaType.MXMMA
-            elif self.sm_version // 10 == 10 and self.a_dtype == self.c_dtype == dtypes.bfloat16:
+            elif self.sm_version // 10 == 10 and (use_bf16_umma or use_fp8_umma):
                 from humming.jit.runtime import KernelRuntime
 
                 version = _cuda_compiler_version(KernelRuntime._get_compiler())
@@ -242,7 +276,7 @@ class LayerConfig(BaseHummingConfig):
                 self.mma_type = MmaType.MMA
         if self.has_input_scale_2:
             assert self.mma_type == MmaType.MXMMA, f"{self.input_quant_mode.value} requires mma_type='mxmma'"
-        if self.mma_type == MmaType.MXMMA and self.is_group_weight_scale and self.input_scale_group_size > 0:
+        if self.use_block_scaled_mma and self.is_group_weight_scale and self.input_scale_group_size > 0:
             assert self.input_scale_group_size == self.weight_scale_group_size
         if self.input_quant_mode == InputQuantizationMode.DynamicGroupToken:
             assert self.a_dtype in (dtypes.float4e2m1, dtypes.float4e0m3)
@@ -251,7 +285,7 @@ class LayerConfig(BaseHummingConfig):
         if not self.has_input_scale:
             self.as_dtype = None
         elif self.as_dtype is None:
-            if self.mma_type == MmaType.MXMMA and self.input_scale_group_size > 0:
+            if self.use_block_scaled_mma and self.input_scale_group_size > 0:
                 if self.is_group_weight_scale:
                     self.as_dtype = self.bs_dtype
                 elif self.input_scale_group_size == 16:
@@ -263,13 +297,13 @@ class LayerConfig(BaseHummingConfig):
 
         if self.input_quant_mode == InputQuantizationMode.DynamicGroupToken:
             assert self.as_dtype == dtypes.float8e4m3
-        if self.mma_type == MmaType.MXMMA and self.is_group_input_scale and self.is_group_weight_scale:
+        if self.use_block_scaled_mma and self.is_group_input_scale and self.is_group_weight_scale:
             assert self.as_dtype == self.bs_dtype
 
         is_channel_scale_2 = self.weight_scale_2_type == WeightScale2Type.CHANNEL
 
         if self.use_fused_e8m0_scale is None:
-            has_native_mxf8f6f4 = self.mma_type == MmaType.MXMMA and self.a_dtype == dtypes.float8e4m3
+            has_native_mxf8f6f4 = self.use_block_scaled_mma and self.a_dtype == dtypes.float8e4m3
             self.use_fused_e8m0_scale = (
                 not has_native_mxf8f6f4
                 and self.a_dtype in [dtypes.float8e4m3, dtypes.int8]
@@ -438,6 +472,7 @@ class TuningConfig(BaseHummingConfig):
 
     num_stages: int = 2
     num_ctas_per_sm: int = 1
+    umma_num_dequant_warpgroups: int = 1
 
     use_warp_spec: bool | None = None
     use_mbarrier: bool | None = None

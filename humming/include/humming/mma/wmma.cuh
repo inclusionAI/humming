@@ -54,10 +54,7 @@ public:
         uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id][i * 16 / MmaShape::N]);
         repack_native_mxf8f6f4<ElementB>(regs_qb[buffer_id], regs_b_ptr, i);
       }
-      return;
-    }
-
-    if constexpr (kUseFusedE8m0Scale) {
+    } else if constexpr (kUseFusedE8m0Scale) {
       uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
       fused_dequant_for_mxfp4<ElementA, WarpShape::N / 16, false>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
     } else {
