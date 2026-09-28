@@ -229,14 +229,14 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         if k_iters < 4 * num_stages:
             return config
 
-        # Cooperative tiles cannot use Stream-K. Retain it for sparse grids or
-        # expensive partial waves, where independent CTAs provide better balance.
+        # Stream-K balances partial waves across CTA pairs. Without it, retain
+        # independent CTAs when cooperative output waves would be underfilled.
         output_tiles = math.ceil(shape_m / block_m) * (layer_config.shape_n // block_n)
         num_sms = current_device.sm_count // 2 * 2
         if not num_sms:
             return config
         scheduled_tiles = math.ceil(output_tiles / num_sms) * num_sms
-        if output_tiles < 0.8 * scheduled_tiles:
+        if not config["use_stream_k"] and output_tiles < 0.8 * scheduled_tiles:
             return config
 
         smem_size = estimate_smem_size_layer(
@@ -255,7 +255,6 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             "umma_cta_group_size": 2,
             "umma_output_chunk_rows": 32,
             "num_stages": num_stages,
-            "use_stream_k": False,
         }
 
     @classmethod

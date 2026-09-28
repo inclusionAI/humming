@@ -299,7 +299,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
               consumer.arrive(kNumStages);
             }
           }
-          epilogue.smem_writer.write_umma(mma, scheduler.m_block_id, scheduler.n_block_id);
+          epilogue.smem_writer.write_umma(mma, scheduler.m_block_id, scheduler.n_block_id,
+                                          scheduler.slice_id, scheduler.slice_count);
         }
         if constexpr (!Ctx::kUmmaOutputChunkRows && !Ctx::kIsIndexedGemm) release_accumulator();
         if constexpr (Ctx::kUseTmaC) tma_fence_async_shared();

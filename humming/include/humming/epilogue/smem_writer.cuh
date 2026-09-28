@@ -219,7 +219,7 @@ public:
   }
 
   CUDA_INLINE
-  void write_umma(MMA &mma, uint32_t block_m = 0, uint32_t block_n = 0) {
+  void write_umma(MMA &mma, uint32_t block_m, uint32_t block_n, uint32_t slice_id, uint32_t slice_count) {
     constexpr bool kChunked = Ctx::kUmmaOutputChunkRows != 0;
     constexpr uint32_t kStorageRows = kChunked ? Ctx::kUmmaOutputChunkRows : BlockShape::M;
     uint32_t lane = ctx.lane_id();
@@ -284,11 +284,19 @@ public:
         if (store_thread < BlockShape::N / 64) {
           uint32_t offset = (buffer_offset + store_thread * kStorageRows * 64) / 8;
           auto descriptor = reinterpret_cast<const CUtensorMap *>(ctx.params.c);
-          tma_store_2d(ctx.smem.reduce + offset, descriptor,
-                       block_n * BlockShape::N + store_thread * 64, block_m * BlockShape::M + m * 32);
+          uint32_t output_column = block_n * BlockShape::N + store_thread * 64;
+          uint32_t output_row = block_m * BlockShape::M + m * 32;
+          if (!Ctx::kUseStreamK || slice_count == 1 || slice_id == 0)
+            tma_store_2d(ctx.smem.reduce + offset, descriptor, output_column, output_row);
+          else
+            tma_reduce_add_2d(ctx.smem.reduce + offset, descriptor, output_column, output_row);
           tma_commit_store_group();
         }
       }
+    }
+    // Publish all partial sums before another slice acquires the output lock.
+    if constexpr (kChunked && Ctx::kUseStreamK) {
+      if (slice_count > 1 && slice_id != slice_count - 1) tma_wait_store_group<0>();
     }
     if constexpr (kChunked) output_chunk_phase ^= CEIL_DIV(WarpShape::M, 32) % 2;
     else if constexpr (ArithClass::kNeedsPackedOutputTransform) apply_umma_packed_output_arithmetic();

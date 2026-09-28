@@ -113,20 +113,24 @@ tile of B. Both CTAs retain the existing compressed weight
 layout and register-to-TMEM conversion. MMA completion releases operands in both
 CTAs through multicast barrier commits; this does not enable TMA multicast.
 
-Chunked output currently requires dense GEMM, TMA output, no Stream-K, separate
+Chunked output currently requires dense GEMM, TMA output, separate
 output storage (`smem_reuse_mode="none"`), block N=128, and block M divisible by
 32. Two-CTA execution additionally requires chunked output, N divisible by 256,
 TMA stage loads, and `num_ctas_per_sm=1`. Activation scales are not supported in
 this pipeline. Channel weight scales, channel secondary scales, bias, and
 channel/group zero points reuse the existing loaders and output arithmetic.
 Channel parameters are released once all consuming threads have read them into
-registers, allowing the next tile's channel loads to overlap output.
+registers, allowing the next tile's channel loads to overlap output. Chunked
+output supports Stream-K for both one- and two-CTA execution: the first slice
+stores each chunk, later slices use TMA reduce-add, and partial writes complete
+before releasing the output lock. Bias is applied only by the first slice.
 
 SM100 dense heuristics select two CTAs with six stages when the tile is suitable,
-K is long enough to amortize the pipeline, output waves are well occupied, and
-the estimated shared-memory allocation fits. Sparse grids retain the existing
-single-CTA/Stream-K selection. Chunked output remains opt-in for single-CTA
-execution because it did not improve the measured large dense cases by itself.
+K is long enough to amortize the pipeline, and the estimated shared-memory
+allocation fits. The existing Stream-K decision is preserved for CTA pairs.
+Without Stream-K, underfilled output waves retain single-CTA execution. Chunked
+output remains opt-in for single-CTA execution because it did not improve the
+measured large dense cases by itself.
 
 ### SM100 MoE tile selection
 
