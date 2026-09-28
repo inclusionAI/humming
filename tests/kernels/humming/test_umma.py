@@ -690,8 +690,17 @@ def test_umma_operand_buffer_selection(
     ),
 )
 @pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
+@pytest.mark.parametrize("use_stream_k", (False, True))
 def test_umma_chunked_output(
-    cta_group_size, block_m, block_k, num_stages, weight_name, output_dtype, compiler, monkeypatch
+    cta_group_size,
+    block_m,
+    block_k,
+    num_stages,
+    weight_name,
+    output_dtype,
+    compiler,
+    use_stream_k,
+    monkeypatch,
 ):
     """Reuse both output buffers across tiles, including odd chunk counts and M tails."""
     monkeypatch.setenv("HUMMING_COMPILER", compiler)
@@ -705,10 +714,10 @@ def test_umma_chunked_output(
             "block_shape": (block_m, 128, block_k),
             "warp_shape": (block_m, 32, block_k),
             "num_stages": num_stages,
-            "num_sms": 4,
+            "num_sms": 6,
             "num_ctas_per_sm": 1,
             "use_tma": True,
-            "use_stream_k": False,
+            "use_stream_k": use_stream_k,
             "smem_reuse_mode": "none",
             "umma_cta_group_size": cta_group_size,
             "umma_output_chunk_rows": 32,
@@ -759,7 +768,10 @@ def test_umma_chunked_output(
     ),
 )
 @pytest.mark.parametrize("output_dtype", (dtypes.bfloat16, dtypes.float16))
-def test_umma_cooperative_channel_parameters(weight_values, use_tma_channel, output_dtype, monkeypatch):
+@pytest.mark.parametrize("use_stream_k", (False, True))
+def test_umma_cooperative_channel_parameters(
+    weight_values, use_tma_channel, output_dtype, use_stream_k, monkeypatch
+):
     """Channel buffers may be reused only after output and dequant consumers read them."""
 
     def select_output(layer_config, shape_m, gemm_type, **kwargs):
@@ -768,14 +780,14 @@ def test_umma_cooperative_channel_parameters(weight_values, use_tma_channel, out
             "block_shape": (96, 128, 64),
             "warp_shape": (96, 32, 64),
             "num_stages": 6,
-            "num_sms": 4,
+            "num_sms": 6,
             "num_ctas_per_sm": 1,
             "use_tma": True,
             "use_tma_bs": layer_config.is_group_weight_scale or use_tma_channel,
             "use_tma_bs2": use_tma_channel,
             "use_tma_bias": use_tma_channel,
             "use_tma_bzp": use_tma_channel,
-            "use_stream_k": False,
+            "use_stream_k": use_stream_k,
             "smem_reuse_mode": "none",
             "umma_cta_group_size": 2,
             "umma_output_chunk_rows": 32,

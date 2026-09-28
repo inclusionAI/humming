@@ -463,8 +463,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.umma_cta_group_size in (1, 2)
             assert self.umma_output_chunk_rows in (0, 32)
             if self.umma_output_chunk_rows:
-                assert self.gemm_type == GemmType.DENSE and self.use_tma_c and not self.use_stream_k, (
-                    "chunked UMMA output requires dense TMA output without Stream-K"
+                assert self.gemm_type == GemmType.DENSE and self.use_tma_c, (
+                    "chunked UMMA output requires dense TMA output"
                 )
                 assert block_m % 32 == 0 and block_n == 128
                 assert self.smem_reuse_mode.value == "none"
