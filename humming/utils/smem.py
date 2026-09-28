@@ -87,6 +87,8 @@ def estimate_smem_size_layer(
     use_warp_spec: bool = False,
     num_write_splits: int = 1,
     mma_accum_bits: int = 32,
+    umma_cta_group_size: int = 1,
+    umma_output_chunk_rows: int = 0,
 ) -> int:
     if smem_reuse_mode is None:
         smem_reuse_mode = SmemReuseMode.ALL_STAGES
@@ -104,7 +106,8 @@ def estimate_smem_size_layer(
     bs_bits = (layer_config.bs_dtype or layer_config.c_dtype).num_bits
     zp_bits = 16 if layer_config.is_fp_zero_point else max(4, _next_pow2(layer_config.b_dtype.num_bits))
 
-    stage_bytes = _stage_storage_bytes(layer_config, block_shape, is_mxmma, scale_block_m)
+    stage_shape = (block_m // umma_cta_group_size, block_n, block_k)
+    stage_bytes = _stage_storage_bytes(layer_config, stage_shape, is_mxmma, scale_block_m)
 
     channel_zp = layer_config.has_zero_point and layer_config.is_channel_weight_scale
     channel_zp_bytes = (block_n * zp_bits // 8) if channel_zp else 0
@@ -137,7 +140,8 @@ def estimate_smem_size_layer(
         m_warps = block_m // warp_shape[0]
         reduce_buffers = n_warps_k - 1 if n_warps_k <= 4 else n_warps_k // 2
         warp_reduce = m_warps * 16 * block_n * mma_accum_bits // 128 * reduce_buffers
-    block_output = block_m * block_n // 2 // 4 // max(1, num_write_splits)
+    output_rows = 2 * umma_output_chunk_rows if umma_output_chunk_rows else block_m
+    block_output = output_rows * block_n // 2 // 4 // max(1, num_write_splits)
     reduce_bytes = max(warp_reduce, block_output) * _INT4
 
     skipped_stages = {
@@ -173,10 +177,11 @@ def estimate_smem_size_layer(
         add(num_math_mbarriers * 8, 8)  # math_mbar
 
     if layer_config.mma_type == MmaType.UMMA:
+        add(16, 8)  # Accumulator ready/free
         add(4, 4)  # TMEM allocation
-        operand_barrier_bytes = 64 if num_stages == 4 else 48
+        operand_barrier_bytes = 8 * (num_stages + max(num_stages, 4))
         add(operand_barrier_bytes, 8)  # Operand ready/free barriers
-        add((num_stages + 1) * 8, 8)  # Independent weight readiness
+        add(num_stages * 8, 8)  # Independent weight readiness
         add(num_stages * 8, 8)  # Weight stage consumed by dequantization
 
     return round_up(offset, 1024)
@@ -204,6 +209,8 @@ def estimate_smem_size_config(
         use_warp_spec=bool(tuning_config.use_warp_spec),
         num_write_splits=tuning_config.num_write_splits,
         mma_accum_bits=16 if compute_config.use_f16_accum else 32,
+        umma_cta_group_size=tuning_config.umma_cta_group_size,
+        umma_output_chunk_rows=tuning_config.umma_output_chunk_rows,
     )
 
 

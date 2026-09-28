@@ -79,7 +79,7 @@ public:
     if constexpr (Ctx::kUseUmmaSplitLoads) thread_id -= 32;
     if (thread_id < kNumTmaLoadsPerLine) {
       const uint32_t block_idx = thread_id;
-      const uint32_t smem_offset = BlockShape::M * 8 * block_idx;
+      const uint32_t smem_offset = BlockShape::M / Ctx::kUmmaCtaGroupSize * 8 * block_idx;
       const uint32_t col_offset2 = col_offset + (1024 / MAX(ElementA::kBits, 8)) * block_idx;
       if constexpr (kMultiCastSizeA == 1) {
         tma_load_2d(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
@@ -187,6 +187,7 @@ public:
     } else {
       row_offset = m_block_id * BlockShape::M;
     }
+    if constexpr (Ctx::kUmmaCtaGroupSize == 2) row_offset += (blockIdx.x % 2) * (BlockShape::M / 2);
     col_offset = k_block_id * (BlockShape::K * ElementA::kBits / MAX(ElementA::kBits, 8));
     block_shape_m = row_offset < shape_m ? MIN(shape_m - row_offset, BlockShape::M) : 0;
 

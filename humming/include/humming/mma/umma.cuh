@@ -18,7 +18,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr uint32_t kOutputGroups = CEIL_DIV(BlockShape::N, 128);
   static constexpr uint32_t kStageTmemColumns = static_next_power_of_2(kOutputGroups * (Ctx::kNumStages * kOperandColumns + WarpShape::M));
   static constexpr bool kStageOperandsFit = kStageTmemColumns * Ctx::kNumCtasPerSm <= 512;
-  static constexpr uint32_t kNumOperandBuffers = kStageOperandsFit ? Ctx::kNumStages : 2;
+  static constexpr uint32_t kNumOperandBuffers = Ctx::kUmmaCtaGroupSize == 2 ? 4 : (kStageOperandsFit ? Ctx::kNumStages : 2);
   static constexpr uint32_t kAccumulatorColumn = kNumOperandBuffers * kOperandColumns;
   // Logical 128-channel partitions share one physical dequantization WG.
   static constexpr uint32_t kGroupColumns = kAccumulatorColumn + WarpShape::M;
@@ -40,13 +40,13 @@ struct UMMA : WMMA<Ctx, ArithClass> {
 
   CUDA_INLINE static void init(SharedStorage &smem) {
     if (threadIdx.x < 32) {
-      tcgen05_alloc<kTmemColumns>(cast_smem_ptr_to_uint(&smem.umma_tmem_col));
+      tcgen05_alloc<kTmemColumns, Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.umma_tmem_col));
     }
     __syncthreads();
   }
 
   CUDA_INLINE static void dealloc(SharedStorage &smem) {
-    if (threadIdx.x < 32) tcgen05_dealloc<kTmemColumns>(smem.umma_tmem_col);
+    if (threadIdx.x < 32) tcgen05_dealloc<kTmemColumns, Ctx::kUmmaCtaGroupSize>(smem.umma_tmem_col);
   }
 
   template <uint32_t kFragments>
@@ -68,39 +68,42 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   CUDA_INLINE void load_output_chunk(uint32_t m, uint32_t rows, uint32_t *lower, uint32_t *upper) {
     uint32_t address = tmem_column + ctx.math_group * kGroupColumns +
                        kAccumulatorColumn + m * 32;
-    if (rows == 8) {
-      tcgen05_ld_16x128b_x2(address, lower);
-      tcgen05_ld_16x128b_x2(address | (16u << 16), upper);
-    } else if (rows <= 24) {
-      tcgen05_ld_16x128b_x4(address, lower);
-      tcgen05_ld_16x128b_x4(address | (16u << 16), upper);
-      if (rows == 24) {
-        tcgen05_ld_16x128b_x2(address + 16, lower + 8);
-        tcgen05_ld_16x128b_x2((address + 16) | (16u << 16), upper + 8);
-      }
+    if constexpr (Ctx::kUmmaCtaGroupSize == 2) {
+      tcgen05_ld_16x256b_x4(address, lower);
+      tcgen05_ld_16x256b_x4(address | (16u << 16), upper);
     } else {
-      tcgen05_ld_16x128b_x8(address, lower);
-      tcgen05_ld_16x128b_x8(address | (16u << 16), upper);
+      if (rows == 8) {
+        tcgen05_ld_16x128b_x2(address, lower);
+        tcgen05_ld_16x128b_x2(address | (16u << 16), upper);
+      } else if (rows <= 24) {
+        tcgen05_ld_16x128b_x4(address, lower);
+        tcgen05_ld_16x128b_x4(address | (16u << 16), upper);
+        if (rows == 24) {
+          tcgen05_ld_16x128b_x2(address + 16, lower + 8);
+          tcgen05_ld_16x128b_x2((address + 16) | (16u << 16), upper + 8);
+        }
+      } else {
+        tcgen05_ld_16x128b_x8(address, lower);
+        tcgen05_ld_16x128b_x8(address | (16u << 16), upper);
+      }
     }
     tcgen05_wait_ld();
   }
 
-  // The caller publishes operand stores and synchronizes the issuing warp.
+  // Called by one elected lane after operand readiness and proxy fencing.
   CUDA_INLINE void issue(uint32_t stage_id, uint32_t buffer, bool is_first) {
-    if (ctx.math_thread_id() % 128 < 32) {
-      uint32_t base = tmem_column + ctx.math_group * kGroupColumns;
-      uint32_t accumulator = base + kAccumulatorColumn;
-      PRAGMA_UNROLL
-      for (uint32_t k = 0; k < Ctx::kWarpIters; k++) {
-        uint32_t k_offset = k * 16;
-        constexpr uint32_t kSwizzleK = MIN(BlockShape::K, 64);
-        uint32_t row = k_offset / kSwizzleK * BlockShape::M;
-        uint32_t offset = row * (kSwizzleK / 8) + k_offset % kSwizzleK / 8;
-        uint64_t descriptor = tcgen05_smem_desc_f16<kSwizzleK * 2>(&ctx.smem.stages[stage_id].a[offset]);
-        tcgen05_mma_f16<WarpShape::M, kUseBf16>(accumulator,
-                                       base + buffer * kOperandColumns + k * 8,
-                                       descriptor, !is_first || k != 0);
-      }
+    uint32_t base = tmem_column + ctx.math_group * kGroupColumns;
+    uint32_t accumulator = base + kAccumulatorColumn;
+    PRAGMA_UNROLL
+    for (uint32_t k = 0; k < Ctx::kWarpIters; k++) {
+      uint32_t k_offset = k * 16;
+      constexpr uint32_t kSwizzleK = MIN(BlockShape::K, 64);
+      uint32_t row = k_offset / kSwizzleK * (BlockShape::M / Ctx::kUmmaCtaGroupSize);
+      uint32_t offset = row * (kSwizzleK / 8) + k_offset % kSwizzleK / 8;
+      uint64_t descriptor = tcgen05_smem_desc_f16<kSwizzleK * 2>(&ctx.smem.stages[stage_id].a[offset]);
+      tcgen05_mma_f16<WarpShape::M, kUseBf16, Ctx::kUmmaCtaGroupSize>(accumulator,
+                                                                      base + buffer * kOperandColumns + k * 8,
+                                                                      descriptor, !is_first || k != 0);
     }
   }
 

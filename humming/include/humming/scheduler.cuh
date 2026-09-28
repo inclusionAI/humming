@@ -20,9 +20,11 @@ private:
   static constexpr uint32_t kNumMathThreads = Ctx::kNumMathThreads;
   static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
   static constexpr uint32_t kLoadThreadOffset = Ctx::kLoadThreadOffset;
-  static constexpr uint32_t kMultiCastSizeA = Ctx::kMultiCastSizeA;
-  static constexpr uint32_t kMultiCastSizeB = Ctx::kMultiCastSizeB;
-  static constexpr uint32_t kMultiCastSize = kMultiCastSizeA * kMultiCastSizeB;
+  // Multicast shares A; cooperative UMMA loads distinct halves of A.
+  // Both group adjacent output tiles along N.
+  static constexpr uint32_t kNumCtasDimN = Ctx::kMultiCastSizeA * Ctx::kUmmaCtaGroupSize;
+  static constexpr uint32_t kNumCtasDimM = Ctx::kMultiCastSizeB;
+  static constexpr uint32_t kCtaGroupSize = kNumCtasDimN * kNumCtasDimM;
 
   static constexpr uint32_t kInputScaleGroupSize = Ctx::kInputScaleGroupSize > 0 ? Ctx::kInputScaleGroupSize : 1;
   static constexpr uint32_t kWeightScaleGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : 1;
@@ -31,7 +33,7 @@ private:
   static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr uint32_t kAsBlocksPerWord = kUseMxmma ? MAX(1u, 4 * kInputScaleGroupSize / BlockShape::K) : 1;
 
-  static constexpr uint32_t N_BLOCKS = ProblemShape::N / BlockShape::N / kMultiCastSizeA;
+  static constexpr uint32_t N_BLOCKS = ProblemShape::N / BlockShape::N / kNumCtasDimN;
   static constexpr uint32_t K_BLOCKS = ProblemShape::K / BlockShape::K;
 
   static constexpr uint32_t kRasterGroupM = Ctx::kRasterGroupM;
@@ -65,7 +67,7 @@ public:
   uint32_t locks_offset = 0;
 
   // for tma multi-cast
-  uint32_t cluster_rank = blockIdx.x % kMultiCastSize;
+  uint32_t cluster_rank = blockIdx.x % kCtaGroupSize;
 
   // for moe gemm (indexed gemm or grouped gemm)
   uint32_t old_expert_id = (1 << 30);
@@ -96,7 +98,7 @@ public:
     }
     mn_blocks = m_blocks * N_BLOCKS;
     mnk_blocks = mn_blocks * K_BLOCKS;
-    uint32_t kNumCtaGroups = gridDim.x / kMultiCastSize;
+    uint32_t kNumCtaGroups = gridDim.x / kCtaGroupSize;
 
     if constexpr (kUseStreamK) {
       uint32_t streamk_mn_blocks = mn_blocks;
@@ -125,7 +127,7 @@ public:
         streamk_mnk_total_iters = align_iters * CEIL_DIV(streamk_mnk_total_iters, align_iters);
       };
 
-      streamk_mnk_next_index = kNumCtaGroups * dp_mn_iters * K_BLOCKS + streamk_mnk_total_iters * (blockIdx.x / kMultiCastSize);
+      streamk_mnk_next_index = kNumCtaGroups * dp_mn_iters * K_BLOCKS + streamk_mnk_total_iters * (blockIdx.x / kCtaGroupSize);
 
       if (streamk_mnk_next_index >= mnk_blocks) {
         streamk_mnk_iters = 0;
@@ -134,23 +136,23 @@ public:
         if (streamk_mnk_iters > streamk_mnk_total_iters) streamk_mnk_iters = streamk_mnk_total_iters;
       };
     } else {
-      dp_mn_next_index = blockIdx.x / kMultiCastSize;
+      dp_mn_next_index = blockIdx.x / kCtaGroupSize;
       dp_mn_iters = dp_mn_next_index < mn_blocks;
     }
 
     dp_mn_total_iters = dp_mn_iters;
     if constexpr (kUseStreamK) {
-      if (dp_mn_iters) dp_mn_next_index = blockIdx.x / kMultiCastSize;
+      if (dp_mn_iters) dp_mn_next_index = blockIdx.x / kCtaGroupSize;
     }
   };
 
   CUDA_INLINE
   void calc_m_blocks() {
     if constexpr (kIsDenseGemm) {
-      m_blocks = CEIL_DIV(ctx.params.shape_m, BlockShape::M * kMultiCastSizeB);
+      m_blocks = CEIL_DIV(ctx.params.shape_m, BlockShape::M * kNumCtasDimM);
     } else if constexpr (kIsIndexedGemm) {
       uint32_t padded_shape_m = ctx.params.num_tokens_padded_ptr[0];
-      m_blocks = CEIL_DIV(padded_shape_m, BlockShape::M * kMultiCastSizeB);
+      m_blocks = CEIL_DIV(padded_shape_m, BlockShape::M * kNumCtasDimM);
     } else if constexpr (kIsGroupedGemm) {
       auto &expert_layout = ctx.params.expert_layout_ptr;
       if constexpr (kIsGroupedContiguousGemm) {
@@ -220,13 +222,13 @@ public:
 
       map_mn_block(dp_mn_next_index, m_block_id, n_block_id);
 
-      if constexpr (kMultiCastSizeB > 1) {
-        m_block_id = m_block_id * kMultiCastSizeB + cluster_rank;
-      } else if constexpr (kMultiCastSizeA > 1) {
-        n_block_id = n_block_id * kMultiCastSizeA + cluster_rank;
+      if constexpr (kNumCtasDimM > 1) {
+        m_block_id = m_block_id * kNumCtasDimM + cluster_rank;
+      } else if constexpr (kNumCtasDimN > 1) {
+        n_block_id = n_block_id * kNumCtasDimN + cluster_rank;
       }
       k_block_id = 0;
-      dp_mn_next_index += gridDim.x / kMultiCastSize;
+      dp_mn_next_index += gridDim.x / kCtaGroupSize;
       if constexpr (kUseStreamK) dp_mn_iters--;
       else dp_mn_iters = dp_mn_next_index < mn_blocks;
       has_next_block = true;
@@ -250,10 +252,10 @@ public:
     uint32_t streamk_mn_index = streamk_mnk_next_index / K_BLOCKS;
 
     map_mn_block(streamk_mn_index, m_block_id, n_block_id);
-    if constexpr (kMultiCastSizeB > 1) {
-      m_block_id = m_block_id * kMultiCastSizeB + cluster_rank;
-    } else if constexpr (kMultiCastSizeA > 1) {
-      n_block_id = n_block_id * kMultiCastSizeA + cluster_rank;
+    if constexpr (kNumCtasDimM > 1) {
+      m_block_id = m_block_id * kNumCtasDimM + cluster_rank;
+    } else if constexpr (kNumCtasDimN > 1) {
+      n_block_id = n_block_id * kNumCtasDimN + cluster_rank;
     }
     k_block_id = streamk_mnk_next_index - streamk_mn_index * K_BLOCKS;
 
@@ -278,8 +280,8 @@ public:
 
     slice_id = slice_count - 1 - slice_id;
 
-    locks_offset = streamk_mn_index - dp_mn_total_iters * gridDim.x / kMultiCastSize;
-    locks_offset = locks_offset * kMultiCastSize + cluster_rank;
+    locks_offset = streamk_mn_index - dp_mn_total_iters * gridDim.x / kCtaGroupSize;
+    locks_offset = locks_offset * kCtaGroupSize + cluster_rank;
 
     return true;
   };

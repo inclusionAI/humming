@@ -126,6 +126,8 @@ struct KernelData {
   uint32_t weight_scale_group_size;
   uint32_t weight_scale_group_size_n;
   uint32_t num_ctas_per_sm;
+  uint32_t umma_cta_group_size;
+  uint32_t umma_output_chunk_rows;
   uint32_t multi_cast_size_a;
   uint32_t multi_cast_size_b;
   uint32_t gemm_type_id;

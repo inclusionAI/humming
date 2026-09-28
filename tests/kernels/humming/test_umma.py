@@ -80,7 +80,7 @@ def _assert_results(case, shape_ms):
             assert compiled.mma_type == MmaType.UMMA
             assert compiled.num_threads == 384
             assert compiled.num_math_threads == 128
-            assert compiled.num_load_threads == 128
+            assert compiled.num_load_threads in (64, 96)
             compiled.assert_smem_size_matches_estimate()
     results = runner.run(shape_ms)
     assert {result.shape_m for result in results} == set(shape_ms)
@@ -654,6 +654,10 @@ def test_umma_operand_buffer_selection(
     """Exercise stage-matched and capacity-limited operands with either loading path."""
     monkeypatch.setenv("HUMMING_COMPILER", compiler)
 
+    # Compiler versions can select different native dequantization and packing.
+    monkeypatch.setattr(KernelRuntime, "_instances", {})
+    monkeypatch.setattr(HummingKernel, "_str2kernel_cache", {})
+
     def select_operands(layer_config, shape_m, gemm_type, **kwargs):
         return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
             "block_shape": (32, block_n, 64),
@@ -670,3 +674,122 @@ def test_umma_operand_buffer_selection(
     case = _case("operand-buffers", gemm_type, **WEIGHT_CONFIGS[weight_name])
     layer_config = dataclasses.replace(case.layer_config, shape_n=1024, shape_k=1024)
     _assert_results(dataclasses.replace(case, layer_config=layer_config), (17, 257))
+
+
+@pytest.mark.parametrize(
+    "cta_group_size,block_m,block_k,num_stages,weight_name,output_dtype",
+    (
+        (1, 96, 64, 4, "uint4", dtypes.bfloat16),
+        (1, 256, 64, 4, "nvfp4", dtypes.bfloat16),
+        (2, 96, 32, 3, "uint4", dtypes.bfloat16),
+        (2, 256, 64, 6, "uint4", dtypes.bfloat16),
+        (2, 256, 64, 9, "nvfp4", dtypes.bfloat16),
+        (2, 192, 128, 4, "uint4-zp", dtypes.bfloat16),
+        (2, 96, 64, 5, "uint4-fp-zp", dtypes.float16),
+        (2, 256, 64, 6, "nvfp4", dtypes.float16),
+    ),
+)
+@pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
+def test_umma_chunked_output(
+    cta_group_size, block_m, block_k, num_stages, weight_name, output_dtype, compiler, monkeypatch
+):
+    """Reuse both output buffers across tiles, including odd chunk counts and M tails."""
+    monkeypatch.setenv("HUMMING_COMPILER", compiler)
+    # Compiler versions can select different native dequantization and packing.
+    monkeypatch.setattr(KernelRuntime, "_instances", {})
+    monkeypatch.setattr(HummingKernel, "_str2kernel_cache", {})
+
+    def select_output(layer_config, shape_m, gemm_type, **kwargs):
+        return {
+            "mma_type": "umma",
+            "block_shape": (block_m, 128, block_k),
+            "warp_shape": (block_m, 32, block_k),
+            "num_stages": num_stages,
+            "num_sms": 4,
+            "num_ctas_per_sm": 1,
+            "use_tma": True,
+            "use_stream_k": False,
+            "smem_reuse_mode": "none",
+            "umma_cta_group_size": cta_group_size,
+            "umma_output_chunk_rows": 32,
+        }
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
+    case = _case("chunked-output", GemmType.DENSE, **WEIGHT_CONFIGS[weight_name])
+    bs_dtype = output_dtype if weight_name.startswith("uint4") else case.layer_config.bs_dtype
+    layer_config = dataclasses.replace(
+        case.layer_config,
+        shape_n=512,
+        shape_k=1024,
+        a_dtype=output_dtype,
+        c_dtype=output_dtype,
+        bs_dtype=bs_dtype,
+    )
+    _assert_results(dataclasses.replace(case, layer_config=layer_config), (17, 13 * block_m + 1))
+
+
+@pytest.mark.parametrize(
+    "weight_values,use_tma_channel",
+    (
+        (dict(b_dtype="uint4", weight_scale_group_size=128, has_bias=True), True),
+        (dict(b_dtype="uint4", weight_scale_group_size=0, has_bias=True), True),
+        (dict(b_dtype="uint4", weight_scale_group_size=0, has_zero_point=True), True),
+        (
+            dict(
+                b_dtype="uint4",
+                weight_scale_group_size=0,
+                has_zero_point=True,
+                is_fp_zero_point=True,
+                has_bias=True,
+            ),
+            False,
+        ),
+        (dict(b_dtype="uint4", bs_dtype="float8e4m3", weight_scale_group_size=0, has_bias=True), False),
+        (dict(b_dtype="uint4", bs_dtype="float8e8m0", weight_scale_group_size=0, has_bias=True), True),
+        (
+            dict(
+                b_dtype="float4e2m1",
+                bs_dtype="float8e4m3",
+                weight_scale_group_size=16,
+                weight_scale_2_type="channel",
+                has_bias=True,
+            ),
+            False,
+        ),
+    ),
+)
+@pytest.mark.parametrize("output_dtype", (dtypes.bfloat16, dtypes.float16))
+def test_umma_cooperative_channel_parameters(weight_values, use_tma_channel, output_dtype, monkeypatch):
+    """Channel buffers may be reused only after output and dequant consumers read them."""
+
+    def select_output(layer_config, shape_m, gemm_type, **kwargs):
+        return {
+            "mma_type": "umma",
+            "block_shape": (96, 128, 64),
+            "warp_shape": (96, 32, 64),
+            "num_stages": 6,
+            "num_sms": 4,
+            "num_ctas_per_sm": 1,
+            "use_tma": True,
+            "use_tma_bs": layer_config.is_group_weight_scale or use_tma_channel,
+            "use_tma_bs2": use_tma_channel,
+            "use_tma_bias": use_tma_channel,
+            "use_tma_bzp": use_tma_channel,
+            "use_stream_k": False,
+            "smem_reuse_mode": "none",
+            "umma_cta_group_size": 2,
+            "umma_output_chunk_rows": 32,
+        }
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
+    case = _case("cooperative-channel", GemmType.DENSE, **weight_values)
+    bs_dtype = weight_values.get("bs_dtype", output_dtype)
+    layer_config = dataclasses.replace(
+        case.layer_config,
+        shape_n=512,
+        shape_k=1024,
+        a_dtype=output_dtype,
+        c_dtype=output_dtype,
+        bs_dtype=bs_dtype,
+    )
+    _assert_results(dataclasses.replace(case, layer_config=layer_config), (17, 1249))

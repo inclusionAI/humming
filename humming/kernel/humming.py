@@ -122,6 +122,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.use_umma_pipeline:
             self.num_threads = 384
             self.num_math_threads = 128
+            activation_bytes = self.block_shape[0] * self.block_shape[2] * self.a_dtype.num_bits // 8
+            # Wider cp.async tiles benefit from a third loading warp. Keep the
+            # readiness warp for small tiles and independently loaded TMA operands.
+            use_wide_async_load = not self.use_tma_a and activation_bytes >= 12 * 1024
+            self.num_load_threads = 96 if use_wide_async_load else 64
         KernelRuntime.__post_init__(self)
 
     def init_sm_version(self):
@@ -436,6 +441,12 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
     def check_config(self):
         assert self.num_threads <= 1024
+        if self.gemm_type is None and self.num_experts == 0:
+            self.gemm_type = GemmType.DENSE
+        if self.mma_type != MmaType.UMMA:
+            assert self.umma_cta_group_size == 1 and self.umma_output_chunk_rows == 0, (
+                "UMMA cooperative execution and chunked output require mma_type=umma"
+            )
         if self.mma_type == MmaType.UMMA:
             assert self.a_dtype in (dtypes.bfloat16, dtypes.float16)
             block_m, block_n, block_k = self.block_shape
@@ -449,6 +460,23 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.num_stages >= 2
             assert not self.use_f16_accum
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
+            assert self.umma_cta_group_size in (1, 2)
+            assert self.umma_output_chunk_rows in (0, 32)
+            if self.umma_output_chunk_rows:
+                assert self.gemm_type == GemmType.DENSE and self.use_tma_c and not self.use_stream_k, (
+                    "chunked UMMA output requires dense TMA output without Stream-K"
+                )
+                assert block_m % 32 == 0 and block_n == 128
+                assert self.smem_reuse_mode.value == "none"
+            if self.umma_cta_group_size == 2:
+                assert self.umma_output_chunk_rows == 32
+                assert self.problem_shape[1] % (2 * block_n) == 0
+                assert self.use_tma_a and self.use_tma_b
+                assert not self.has_input_scale and not self.has_input_scale_2
+                assert not self.is_group_weight_scale or self.use_tma_bs
+                assert not self.has_zero_point or self.is_channel_weight_scale or self.use_tma_bzp
+                assert self.num_ctas_per_sm == 1
+
         assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
             "MXMMA does not support FP16 accumulation"
         )

@@ -231,9 +231,12 @@ Tensor launch_kernel_impl(
 
   CUlaunchAttribute attrs[2];
   uint32_t num_attrs = 0;
-  if (kernel_data.multi_cast_size_a * kernel_data.multi_cast_size_b > 1) {
+  uint32_t cluster_size = kernel_data.multi_cast_size_a * kernel_data.multi_cast_size_b * kernel_data.umma_cta_group_size;
+  config.gridDimX = (num_ctas / cluster_size) * cluster_size;
+  ASSERT_CHECK(config.gridDimX > 0, "not enough SMs for the requested CTA cluster");
+  if (cluster_size > 1) {
     attrs[num_attrs].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
-    attrs[num_attrs].value.clusterDim.x = kernel_data.multi_cast_size_a * kernel_data.multi_cast_size_b;
+    attrs[num_attrs].value.clusterDim.x = cluster_size;
     attrs[num_attrs].value.clusterDim.y = 1;
     attrs[num_attrs].value.clusterDim.z = 1;
     num_attrs++;
@@ -295,6 +298,8 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getUint32("WEIGHT_SCALE_GROUP_SIZE"),
       reader.getUint32("WEIGHT_SCALE_GROUP_SIZE_N"),
       reader.getUint32("NUM_CTAS_PER_SM"),
+      reader.getUint32("UMMA_CTA_GROUP_SIZE"),
+      reader.getUint32("UMMA_OUTPUT_CHUNK_ROWS"),
       reader.getUint32("MULTI_CAST_SIZE_A"),
       reader.getUint32("MULTI_CAST_SIZE_B"),
       reader.getUint32("GEMM_TYPE_ID"),
