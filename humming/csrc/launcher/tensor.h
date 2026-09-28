@@ -287,7 +287,7 @@ inline void check_tensor_moe(
 inline CUtensorMap make_tma_desc_a(Tensor tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_a) return CUtensorMap();
 
-  uint32_t tma_block_shape_m = kernel_data.block_shape_m;
+  uint32_t tma_block_shape_m = kernel_data.block_shape_m / kernel_data.umma_cta_group_size;
   uint32_t tma_block_shape_k = kernel_data.block_shape_k;
   uint32_t swizzle_bytes = 128;
   uint32_t a_dtype_num_bits = get_dtype_num_bits(kernel_data.a_dtype_id);
@@ -357,7 +357,12 @@ inline CUtensorMap make_tma_desc_b(Tensor &tensor, KernelData &kernel_data) {
 inline CUtensorMap make_tma_desc_c(Tensor tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_c) return CUtensorMap();
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  return make_tma_desc(tensor, {64, kernel_data.block_shape_m}, 128, "c");
+  uint32_t rows = kernel_data.umma_output_chunk_rows ? kernel_data.umma_output_chunk_rows : kernel_data.block_shape_m;
+  if (kernel_data.umma_output_chunk_rows) {
+    while (kernel_data.block_shape_m % rows)
+      rows /= 2;
+  }
+  return make_tma_desc(tensor, {64, rows}, 128, "c");
 }
 
 inline CUtensorMap make_tma_desc_bs(Tensor tensor, KernelData &kernel_data) {

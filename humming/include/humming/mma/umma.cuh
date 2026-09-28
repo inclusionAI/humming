@@ -25,7 +25,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr uint32_t kOutputGroups = CEIL_DIV(BlockShape::N, 128);
   static constexpr uint32_t kStageTmemColumns = static_next_power_of_2(kOutputGroups * (Ctx::kNumStages * kOperandBufferColumns + WarpShape::M));
   static constexpr bool kStageOperandsFit = kStageTmemColumns * Ctx::kNumCtasPerSm <= 512;
-  static constexpr uint32_t kNumOperandBuffers = kStageOperandsFit ? Ctx::kNumStages : 2;
+  static constexpr uint32_t kNumOperandBuffers = Ctx::kUmmaCtaGroupSize == 2 ? 4 : (kStageOperandsFit ? Ctx::kNumStages : 2);
   static constexpr uint32_t kAccumulatorColumn = kNumOperandBuffers * kOperandBufferColumns;
   // Each logical 128-channel partition has its own operands and accumulator.
   static constexpr uint32_t kGroupColumns = kAccumulatorColumn + WarpShape::M;
@@ -36,8 +36,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
                                   std::is_same<typename Ctx::ElementA, Float8E5M2>::value;
   static_assert(kUseFp8 || kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
   static_assert(BlockShape::N == 64 || BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512);
-  static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % 8 == 0,
-                "UMMA requires warp M in [8, 256], divisible by 8");
+  static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
+                "UMMA requires warp M in [8, 256], divisible by 8 (one CTA) or 16 (two CTAs)");
   static_assert(WarpShape::N == 32);
   static_assert(WarpShape::K >= 32 && WarpShape::K % 32 == 0,
                 "UMMA requires K divisible by 32");
@@ -49,13 +49,13 @@ struct UMMA : WMMA<Ctx, ArithClass> {
 
   CUDA_INLINE static void init(SharedStorage &smem) {
     if (threadIdx.x < 32) {
-      tcgen05_alloc<kTmemColumns>(cast_smem_ptr_to_uint(&smem.umma_tmem_col));
+      tcgen05_alloc<kTmemColumns, Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.umma_tmem_col));
     }
     __syncthreads();
   }
 
   CUDA_INLINE static void dealloc(SharedStorage &smem) {
-    if (threadIdx.x < 32) tcgen05_dealloc<kTmemColumns>(smem.umma_tmem_col);
+    if (threadIdx.x < 32) tcgen05_dealloc<kTmemColumns, Ctx::kUmmaCtaGroupSize>(smem.umma_tmem_col);
   }
 
   CUDA_INLINE void transform_b(uint32_t buffer_id, uint32_t iter_id) {
@@ -161,55 +161,58 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   CUDA_INLINE void load_output_chunk(uint32_t m, uint32_t rows, uint32_t *lower, uint32_t *upper) {
     uint32_t address = tmem_column + ctx.math_group * kGroupColumns +
                        kAccumulatorColumn + m * 32;
-    if (rows == 8) {
-      tcgen05_ld_16x128b_x2(address, lower);
-      tcgen05_ld_16x128b_x2(address | (16u << 16), upper);
-    } else if (rows <= 24) {
-      tcgen05_ld_16x128b_x4(address, lower);
-      tcgen05_ld_16x128b_x4(address | (16u << 16), upper);
-      if (rows == 24) {
-        tcgen05_ld_16x128b_x2(address + 16, lower + 8);
-        tcgen05_ld_16x128b_x2((address + 16) | (16u << 16), upper + 8);
-      }
+    if constexpr (Ctx::kUmmaCtaGroupSize == 2) {
+      tcgen05_ld_16x256b_x4(address, lower);
+      tcgen05_ld_16x256b_x4(address | (16u << 16), upper);
     } else {
-      tcgen05_ld_16x128b_x8(address, lower);
-      tcgen05_ld_16x128b_x8(address | (16u << 16), upper);
+      if (rows == 8) {
+        tcgen05_ld_16x128b_x2(address, lower);
+        tcgen05_ld_16x128b_x2(address | (16u << 16), upper);
+      } else if (rows <= 24) {
+        tcgen05_ld_16x128b_x4(address, lower);
+        tcgen05_ld_16x128b_x4(address | (16u << 16), upper);
+        if (rows == 24) {
+          tcgen05_ld_16x128b_x2(address + 16, lower + 8);
+          tcgen05_ld_16x128b_x2((address + 16) | (16u << 16), upper + 8);
+        }
+      } else {
+        tcgen05_ld_16x128b_x8(address, lower);
+        tcgen05_ld_16x128b_x8(address | (16u << 16), upper);
+      }
     }
     tcgen05_wait_ld();
   }
 
-  // The caller publishes operand stores and synchronizes the issuing warp.
+  // Called by one elected lane after operand readiness and proxy fencing.
   CUDA_INLINE void issue(uint32_t stage_id, uint32_t buffer, bool is_first) {
-    if (ctx.math_thread_id() % 128 < 32) {
-      uint32_t base = tmem_column + ctx.math_group * kGroupColumns;
-      uint32_t accumulator = base + kAccumulatorColumn;
-      PRAGMA_UNROLL
-      for (uint32_t k = 0; k < Ctx::kWarpIters; k++) {
-        uint32_t k_offset = k * Ctx::kPartMmaShapeK;
-        constexpr uint32_t kElementsPerInt4 = 128 / Ctx::ElementA::kBits;
-        constexpr uint32_t kSwizzleK = MIN(BlockShape::K, 8 * kElementsPerInt4);
-        uint32_t row = k_offset / kSwizzleK * BlockShape::M;
-        uint32_t offset = row * (kSwizzleK / kElementsPerInt4) + k_offset % kSwizzleK / kElementsPerInt4;
-        uint64_t descriptor = tcgen05_smem_desc<kSwizzleK * Ctx::ElementA::kBits / 8>(&ctx.smem.stages[stage_id].a[offset]);
-        using ElementB = typename Ctx::ElementB;
-        constexpr uint32_t kWeightFormat = std::is_same<ElementB, Float4E2M1>::value ? 5 : std::is_same<ElementB, Float6E3M2>::value ? 4
-                                                                                       : std::is_same<ElementB, Float6E2M3>::value   ? 3
-                                                                                       : std::is_same<ElementB, Float8E5M2>::value   ? 1
-                                                                                                                                     : 0;
-        constexpr uint32_t kInputFormat = std::is_same<typename Ctx::ElementA, Float8E5M2>::value ? 1 : 0;
-        if constexpr (kUseBlockScale) {
-          uint32_t scale_base = base + buffer * kOperandBufferColumns + kOperandColumns;
-          tcgen05_mma_mxf8f6f4<WarpShape::M, kWeightFormat, kInputFormat>(
-              accumulator, base + buffer * kOperandBufferColumns + k * 8, descriptor,
-              scale_base + k / 4 * 4,
-              scale_base + kWeightScaleColumns + k / 4 * kInputScaleStride, k % 4, !is_first || k != 0);
-        } else if constexpr (kUseFp8) {
-          tcgen05_mma_f8f6f4<WarpShape::M, kWeightFormat, kInputFormat>(accumulator,
+    uint32_t base = tmem_column + ctx.math_group * kGroupColumns;
+    uint32_t accumulator = base + kAccumulatorColumn;
+    PRAGMA_UNROLL
+    for (uint32_t k = 0; k < Ctx::kWarpIters; k++) {
+      uint32_t k_offset = k * Ctx::kPartMmaShapeK;
+      constexpr uint32_t kElementsPerInt4 = 128 / Ctx::ElementA::kBits;
+      constexpr uint32_t kSwizzleK = MIN(BlockShape::K, 8 * kElementsPerInt4);
+      uint32_t row = k_offset / kSwizzleK * (BlockShape::M / Ctx::kUmmaCtaGroupSize);
+      uint32_t offset = row * (kSwizzleK / kElementsPerInt4) + k_offset % kSwizzleK / kElementsPerInt4;
+      uint64_t descriptor = tcgen05_smem_desc<kSwizzleK * Ctx::ElementA::kBits / 8>(&ctx.smem.stages[stage_id].a[offset]);
+      using ElementB = typename Ctx::ElementB;
+      constexpr uint32_t kWeightFormat = std::is_same<ElementB, Float4E2M1>::value ? 5 : std::is_same<ElementB, Float6E3M2>::value ? 4
+                                                                                     : std::is_same<ElementB, Float6E2M3>::value   ? 3
+                                                                                     : std::is_same<ElementB, Float8E5M2>::value   ? 1
+                                                                                                                                   : 0;
+      constexpr uint32_t kInputFormat = std::is_same<typename Ctx::ElementA, Float8E5M2>::value ? 1 : 0;
+      if constexpr (kUseBlockScale) {
+        uint32_t scale_base = base + buffer * kOperandBufferColumns + kOperandColumns;
+        tcgen05_mma_mxf8f6f4<WarpShape::M, kWeightFormat, kInputFormat>(
+            accumulator, base + buffer * kOperandBufferColumns + k * 8, descriptor,
+            scale_base + k / 4 * 4,
+            scale_base + kWeightScaleColumns + k / 4 * kInputScaleStride, k % 4, !is_first || k != 0);
+      } else if constexpr (kUseFp8) {
+        tcgen05_mma_f8f6f4<WarpShape::M, kWeightFormat, kInputFormat>(accumulator,
+                                                                      base + buffer * kOperandBufferColumns + k * 8, descriptor, !is_first || k != 0);
+      } else {
+        tcgen05_mma_f16<WarpShape::M, kUseBf16, Ctx::kUmmaCtaGroupSize>(accumulator,
                                                                         base + buffer * kOperandBufferColumns + k * 8, descriptor, !is_first || k != 0);
-        } else {
-          tcgen05_mma_f16<WarpShape::M, kUseBf16>(accumulator,
-                                                  base + buffer * kOperandBufferColumns + k * 8, descriptor, !is_first || k != 0);
-        }
       }
     }
   }

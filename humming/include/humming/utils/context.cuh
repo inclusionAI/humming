@@ -135,13 +135,15 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
   static_assert(TuningConfig::kNumWriteSplits == 1, "UMMA requires num_write_splits == 1");
   static constexpr bool kHasStageWeightScale = Base::kIsGroupWeightScale || Base::kIsBlockWeightScale;
   static constexpr bool kCanSplitWeightScaleLoad = !kHasStageWeightScale || Base::kUseTmaBS;
-  static constexpr bool kCanSplitZeroPointLoad = !Base::kHasZeroPoint || (Base::kIsGroupWeightScale && Base::kUseTmaBZP);
+  static constexpr bool kCanSplitZeroPointLoad =
+      !Base::kHasZeroPoint || (Base::kIsGroupWeightScale && Base::kUseTmaBZP) ||
+      Base::kIsChannelWeightScale;
   static constexpr bool kCanSplitInputScaleLoad = !Base::kIsGroupInputScale || Base::kUseTmaAS;
   static constexpr bool kHasTmaWeightLoads = Base::kUseTmaB && kCanSplitWeightScaleLoad && kCanSplitZeroPointLoad;
   static constexpr bool kHasTmaActivationLoads = Base::kUseTmaA && kCanSplitInputScaleLoad;
   static constexpr bool kUseUmmaSplitLoads = kHasTmaActivationLoads && kHasTmaWeightLoads;
   static constexpr uint32_t kLoadThreadOffset = 0;
-  static constexpr uint32_t kNumLoadThreads = 128;
+  static constexpr uint32_t kNumLoadThreads = TuningConfig::kNumLoadThreads;
   static constexpr uint32_t kNumMathThreads = 128;
   uint32_t math_group = 0;
 
@@ -160,9 +162,7 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
   CUDA_INLINE bool is_dequant_thread() { return threadIdx.x >= 256; }
   CUDA_INLINE uint32_t dequant_group_id() { return (threadIdx.x - 256) / 128; }
 
-  CUDA_INLINE bool is_issuer_thread() {
-    return is_math_thread() && math_thread_id() < 32;
-  }
+  CUDA_INLINE bool is_issuer_thread() { return threadIdx.x >= kNumLoadThreads && threadIdx.x < kNumLoadThreads + 32; }
 
   CUDA_INLINE static void sync_math_threads() {
     if constexpr (TuningConfig::kNumCtasPerSm > 2) {

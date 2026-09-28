@@ -1,6 +1,7 @@
 #pragma once
 
 #include <humming/utils/all.cuh>
+#include <humming/utils/ptx/tcgen05.cuh>
 
 
 CUDA_INLINE void shlf_trans_mma_c_32b(void *vals_ptr) {
@@ -217,14 +218,16 @@ public:
     }
   }
 
-  CUDA_INLINE
-  void write_umma(MMA &mma) {
+  template <class WriteChunk>
+  CUDA_INLINE void write_umma(MMA &mma, uint32_t slice_id, uint32_t slice_count, WriteChunk write_chunk) {
+    constexpr bool kChunked = Ctx::kUmmaOutputChunkRows != 0;
+    constexpr uint32_t kStorageRows = kChunked ? Ctx::kUmmaOutputChunkRows : BlockShape::M;
     uint32_t lane = ctx.lane_id();
     uint32_t warp = ctx.math_thread_id() / 32;
     uint32_t n_partition = ctx.math_group;
     uint32_t column = n_partition * 128 + warp * 32 + (lane / 8) * 8;
-    if (column >= BlockShape::N) return;
-    uint32_t row_in_matrix = (lane % 8) / 2 + (lane % 2) * 4;
+    bool has_output = column < BlockShape::N;
+    uint32_t row_in_matrix = Ctx::kUmmaCtaGroupSize == 2 ? lane % 8 : (lane % 8) / 2 + (lane % 2) * 4;
     uint32_t smem_base = offsetof(SharedStorage, reduce) / 128 % 8;
     uint32_t output_base = cast_smem_ptr_to_uint(ctx.smem.reduce);
 
@@ -233,26 +236,69 @@ public:
       uint32_t lower[16];
       uint32_t upper[16];
       uint32_t rows = MIN(32, WarpShape::M - m * 32);
-      mma.load_output_chunk(m, rows, lower, upper);
-      PRAGMA_UNROLL
-      for (uint32_t group = 0; group < rows / 8; group++) {
-        uint32_t values[4];
-        // TMEM holds N in rows and M in columns. stmatrix writes four 8-column
-        // matrices from the two 16-row TMEM loads.
-        values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 2], m * 4 + group, 0);
-        values[1] = convert_umma_pair(lower[group * 4 + 1], lower[group * 4 + 3], m * 4 + group, 1);
-        values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 2], m * 4 + group, 2);
-        values[3] = convert_umma_pair(upper[group * 4 + 1], upper[group * 4 + 3], m * 4 + group, 3);
-        uint32_t row = m * 32 + group * 8 + row_in_matrix;
-        uint32_t swizzled_column = ((column % 64 / 8) ^ ((row + smem_base) % 8)) * 8;
-        uint32_t output_offset = (row + BlockShape::M * (column / 64)) * 64 + swizzled_column;
-        st_shared<4, true>(output_base + output_offset * 2, values);
+      if (has_output) mma.load_output_chunk(m, rows, lower, upper);
+      if constexpr (kChunked && !Ctx::kIsIndexedGemm) {
+        if (m + 1 == CEIL_DIV(WarpShape::M, 32) && ctx.math_group + 1 == MMA::kOutputGroups) {
+          tcgen05_fence_before_thread_sync();
+          ctx.sync_math_threads();
+          if (ctx.math_thread_id() == 0) {
+            if constexpr (Ctx::kUmmaCtaGroupSize == 2)
+              mbarrier_arrive<true>(__cluster_map_shared_rank(&ctx.smem.umma_accumulator_free, 0));
+            else mbarrier_arrive(&ctx.smem.umma_accumulator_free);
+          }
+        }
+      }
+      uint32_t buffer_offset = 0;
+      if constexpr (kChunked) {
+        buffer_offset = ((m + output_chunk_phase) % 2) * kStorageRows * BlockShape::N;
+        if constexpr (Ctx::kUseTmaC) tma_wait_store_group<1, true>();
+        ctx.sync_math_threads();
+      }
+      if (has_output) {
+        PRAGMA_UNROLL
+        for (uint32_t group = 0; group < rows / 8; group++) {
+          uint32_t values[4];
+          // TMEM holds N in rows and M in columns. stmatrix writes four 8-column
+          // matrices from the two 16-row TMEM loads.
+          if constexpr (Ctx::kUmmaCtaGroupSize == 2) {
+            values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 1], m * 4 + group, 0);
+            values[1] = convert_umma_pair(lower[group * 4 + 2], lower[group * 4 + 3], m * 4 + group, 1);
+            values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 1], m * 4 + group, 2);
+            values[3] = convert_umma_pair(upper[group * 4 + 2], upper[group * 4 + 3], m * 4 + group, 3);
+          } else {
+            values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 2], m * 4 + group, 0);
+            values[1] = convert_umma_pair(lower[group * 4 + 1], lower[group * 4 + 3], m * 4 + group, 1);
+            values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 2], m * 4 + group, 2);
+            values[3] = convert_umma_pair(upper[group * 4 + 1], upper[group * 4 + 3], m * 4 + group, 3);
+          }
+          uint32_t row = (kChunked ? 0 : m * 32) + group * 8 + row_in_matrix;
+          uint32_t swizzled_column = ((column % 64 / 8) ^ ((row + smem_base) % 8)) * 8;
+          uint32_t output_offset = buffer_offset + (row + kStorageRows * (column / 64)) * 64 + swizzled_column;
+          st_shared<4, true>(output_base + output_offset * 2, values);
+        }
+      }
+      if constexpr (kChunked) {
+        if constexpr (ArithClass::kNeedsPackedOutputTransform)
+          if (has_output) apply_umma_packed_output_arithmetic(m * 32, rows, buffer_offset / 8, kStorageRows);
+        if constexpr (Ctx::kUseTmaC) tma_fence_async_shared();
+        ctx.sync_math_threads();
+        write_chunk(m * 32, rows, buffer_offset / 8);
+        if constexpr (!Ctx::kUseTmaC) ctx.sync_math_threads();
       }
     }
-    if constexpr (ArithClass::kNeedsPackedOutputTransform) apply_umma_packed_output_arithmetic();
+    // Publish all partial sums before another slice acquires the output lock.
+    if constexpr (kChunked && Ctx::kUseTmaC && Ctx::kUseStreamK) {
+      if (slice_count > 1 && slice_id != slice_count - 1) tma_wait_store_group<0>();
+    }
+    if constexpr (kChunked) output_chunk_phase ^= CEIL_DIV(WarpShape::M, 32) % 2;
+    else if constexpr (ArithClass::kNeedsPackedOutputTransform) {
+      if (has_output) apply_umma_packed_output_arithmetic();
+    }
   }
 
 private:
+  uint32_t output_chunk_phase = 0;
+
   CUDA_INLINE uint32_t convert_umma_pair(uint32_t first, uint32_t second, uint32_t row_group, uint32_t column_group) {
     float first_value = __uint_as_float(first);
     float second_value = __uint_as_float(second);
@@ -262,23 +308,24 @@ private:
     return *reinterpret_cast<uint32_t *>(&packed);
   }
 
-  CUDA_INLINE void apply_umma_packed_output_arithmetic() {
+  CUDA_INLINE void apply_umma_packed_output_arithmetic(uint32_t first_row = 0, uint32_t rows = WarpShape::M,
+                                                       uint32_t buffer_offset = 0, uint32_t storage_rows = BlockShape::M) {
     uint32_t n_partition = ctx.math_group;
     uint32_t warp = ctx.math_thread_id() / 32;
     uint32_t lane = ctx.lane_id();
     uint32_t smem_base = offsetof(SharedStorage, reduce) / 128 % 8;
 
     __syncwarp();
-    for (uint32_t row = lane / 4; row < WarpShape::M; row += 8) {
+    for (uint32_t row = lane / 4; row < rows; row += 8) {
       PRAGMA_UNROLL
       for (uint32_t pair = 0; pair < 4; pair++) {
         // Visit stmatrix's transposed groups in the channel loader's register order.
         uint32_t column = n_partition * 128 + warp * 32 + pair * 8;
         uint32_t swizzled_chunk = (column % 64 / 8) ^ ((row + smem_base) % 8);
-        uint32_t offset = (row + BlockShape::M * (column / 64)) * 8 + swizzled_chunk;
+        uint32_t offset = buffer_offset + (row + storage_rows * (column / 64)) * 8 + swizzled_chunk;
         uint32_t *pairs = reinterpret_cast<uint32_t *>(&ctx.smem.reduce[offset]);
         uint32_t value = pairs[lane % 4];
-        arith.may_apply_on_smem_write(value, row / 8, pair);
+        arith.may_apply_on_smem_write(value, (first_row + row) / 8, pair);
         pairs[lane % 4] = value;
       }
     }

@@ -113,7 +113,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         operand_columns = block_k * layer_config.a_dtype.num_bits // 32
         if layer_config.use_block_scaled_mma:
             scale_words = math.ceil(block_k / 128)
-            operand_columns += scale_words * (4 + math.ceil(block_m / 32))
+            input_scale_stride = 1 << (math.ceil(block_m / 32) - 1).bit_length()
+            operand_columns += scale_words * (4 + input_scale_stride)
             operand_columns = round_up(operand_columns, 16)
         stage_columns = output_groups * (num_stages * operand_columns + block_m)
         tmem_columns = 1 << (stage_columns - 1).bit_length()
@@ -216,6 +217,55 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         return best if best_score < baseline_score * 0.9 else config
 
     @classmethod
+    def _select_cooperative_ctas(cls, layer_config, shape_m, config):
+        if layer_config.a_dtype.num_bits != 16:
+            return config
+        block_m, block_n, block_k = config["block_shape"]
+        has_cooperative_tile = block_m >= 128 and block_m % 32 == 0
+        has_cooperative_tile &= block_n == 128 and block_k == 64
+        has_cooperative_tile &= layer_config.shape_n % (2 * block_n) == 0
+        uses_tma = config["use_tma"] and config["use_tma_a"] and config["use_tma_c"]
+        if not has_cooperative_tile or not uses_tma or config["num_ctas_per_sm"] != 1:
+            return config
+
+        has_input_scale = layer_config.has_input_scale or layer_config.has_input_scale_2
+        if has_input_scale or layer_config.is_block_weight_scale:
+            return config
+
+        num_stages = 6
+        k_iters = layer_config.shape_k // block_k
+        if k_iters < 4 * num_stages:
+            return config
+
+        # Stream-K balances partial waves across CTA pairs. Without it, retain
+        # independent CTAs when cooperative output waves would be underfilled.
+        output_tiles = math.ceil(shape_m / block_m) * (layer_config.shape_n // block_n)
+        num_sms = current_device.sm_count // 2 * 2
+        if not num_sms:
+            return config
+        scheduled_tiles = math.ceil(output_tiles / num_sms) * num_sms
+        if not config["use_stream_k"] and output_tiles < 0.8 * scheduled_tiles:
+            return config
+
+        smem_size = estimate_smem_size_layer(
+            layer_config,
+            config["block_shape"],
+            GemmType.DENSE,
+            num_stages,
+            warp_shape=config["warp_shape"],
+            smem_reuse_mode=SmemReuseMode.NONE,
+            umma_cta_group_size=2,
+            umma_output_chunk_rows=32,
+        )
+        if smem_size > cls.max_smem_size:
+            return config
+        return config | {
+            "umma_cta_group_size": 2,
+            "umma_output_chunk_rows": 32,
+            "num_stages": num_stages,
+        }
+
+    @classmethod
     def get_config(
         cls,
         layer_config: LayerConfig,
@@ -295,7 +345,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                             "use_pdl": False,
                             "raster_group_m": 1,
                         }
-                        return cls._select_m_tile(layer_config, shape_m, config, use_batch_invariant)
+                        config = cls._select_m_tile(layer_config, shape_m, config, use_batch_invariant)
+                        return cls._select_cooperative_ctas(layer_config, shape_m, config)
 
         raise ValueError("no resource-feasible dense UMMA tile for this layer")
 
@@ -335,12 +386,15 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                 for num_ctas in (2, 1) if block_n == 256 else (2,):
                     operand_columns = block_k * layer_config.a_dtype.num_bits // 32
                     max_block_m = min(256, 512 // (output_groups * num_ctas) - 2 * operand_columns)
+                    min_stages = min(3, max(2, k_iters))
                     for block_m in range(8, max_block_m + 1, 8):
                         operand_columns = block_k * layer_config.a_dtype.num_bits // 32
                         if layer_config.use_block_scaled_mma:
-                            operand_columns += math.ceil(block_k / 128) * (4 + math.ceil(block_m / 32))
+                            scale_words = math.ceil(block_k / 128)
+                            input_scale_stride = 1 << (math.ceil(block_m / 32) - 1).bit_length()
+                            operand_columns += scale_words * (4 + input_scale_stride)
                             operand_columns = round_up(operand_columns, 16)
-                        for stages in range(min(4, max(2, k_iters)), 1, -1):
+                        for stages in range(min(4, max(2, k_iters)), min_stages - 1, -1):
                             stage_columns = output_groups * (block_m + stages * operand_columns)
                             tmem_columns = 1 << (stage_columns - 1).bit_length()
                             buffers = stages
@@ -404,27 +458,45 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         num_sms = current_device.sm_count
         best_by_residency = {}
         for config in cls._get_moe_candidates(layer_config, gemm_type):
-            block_m, block_n, _ = config["block_shape"]
+            block_m, block_n, block_k = config["block_shape"]
             num_ctas = config["num_ctas_per_sm"]
             resident_ctas = num_sms * num_ctas
             m_tiles = ((counts + block_m - 1) // block_m).sum(axis=1)
             tiles = m_tiles * (layer_config.shape_n // block_n)
             waves = (tiles + resident_ctas - 1) // resident_ctas
 
-            # Balance serial tile rounds against padded row work per SM.
-            # N normalizes the amount of weight processed by each tile.
-            # Counting full waves also penalizes insufficient parallelism.
-            tile_rounds = waves * block_n
+            k_iters = layer_config.shape_k // block_k
+            stages = config["num_stages"]
+            data_parallel_work = waves * k_iters
+            work = data_parallel_work
+            use_stream_k = False
+            if not use_batch_invariant:
+                stream_work_samples = [
+                    cls._get_stream_k_work(
+                        layer_config, int(tile_count), k_iters, block_k, stages, resident_ctas
+                    )
+                    for tile_count in tiles
+                ]
+                stream_work = np.asarray(stream_work_samples)
+                stream_work = stream_work + 2 * stages
+                # Reduction and tile transitions are expensive for short slices.
+                # Require a substantial saving, and compare M/N with Stream-K
+                # already included rather than enabling it after choosing a tile.
+                use_stream_k = bool(stream_work.mean() < data_parallel_work.mean() * 0.5)
+                if use_stream_k:
+                    work = stream_work
+
+            # Each tile pays shared activation/synchronization work in addition
+            # to N-dependent conversion. A wider N amortizes that fixed cost.
+            tile_rounds = work / k_iters * (block_n + 32)
             padded_work = tile_rounds * num_ctas * block_m
             score = float(np.sqrt(tile_rounds * padded_work).mean())
-            # Larger M can force a shallower pipeline at the same residency.
-            # Charge for the reduced load lookahead instead of comparing only
-            # tile counts and padding. This keeps the tradeoff continuous.
-            pipeline_penalty = 1 + 1 / config["num_stages"]
+            pipeline_penalty = 1 + 1 / stages
             score *= pipeline_penalty
+            config = config | {"use_stream_k": use_stream_k}
             previous = best_by_residency.get(num_ctas)
             if previous is None or score < previous[0]:
-                best_by_residency[num_ctas] = (score, config, tiles)
+                best_by_residency[num_ctas] = (score, config)
 
         best = best_by_residency.get(2, best_by_residency.get(1))
         single_cta = best_by_residency.get(1)
@@ -433,22 +505,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             best = single_cta
         if best is None:
             raise ValueError("no resource-feasible UMMA MoE tile for this layer")
-        _, config, tiles = best
-        use_stream_k = False
-        if not use_batch_invariant:
-            block_k = config["block_shape"][2]
-            stages = config["num_stages"]
-            resident_ctas = num_sms * config["num_ctas_per_sm"]
-            k_iters = layer_config.shape_k // block_k
-            data_parallel_work = ((tiles + resident_ctas - 1) // resident_ctas) * k_iters
-            stream_work_samples = [
-                cls._get_stream_k_work(layer_config, int(tile_count), k_iters, block_k, stages, resident_ctas)
-                for tile_count in tiles
-            ]
-            stream_work = np.asarray(stream_work_samples)
-            stream_work = stream_work + 2 * stages
-            use_stream_k = bool(stream_work.mean() < data_parallel_work.mean() * 0.9)
-        return config | {"use_stream_k": use_stream_k}
+        return best[1]
 
 
 class Sm100Heuristics(Sm100MmaHeuristics):
