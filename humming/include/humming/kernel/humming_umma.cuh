@@ -299,8 +299,11 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
               consumer.arrive(kNumStages);
             }
           }
-          epilogue.smem_writer.write_umma(mma, scheduler.m_block_id, scheduler.n_block_id,
-                                          scheduler.slice_id, scheduler.slice_count);
+          auto write_chunk = [&](uint32_t first_row, uint32_t rows, uint32_t buffer_offset) {
+            if constexpr (Ctx::kUmmaOutputChunkRows)
+              epilogue.gmem_writer.write_chunk(scheduler.slice_id, scheduler.slice_count, first_row, rows, buffer_offset);
+          };
+          epilogue.smem_writer.write_umma(mma, scheduler.slice_id, scheduler.slice_count, write_chunk);
         }
         if constexpr (!Ctx::kUmmaOutputChunkRows && !Ctx::kIsIndexedGemm) release_accumulator();
         if constexpr (Ctx::kUseTmaC) tma_fence_async_shared();

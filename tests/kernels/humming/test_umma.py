@@ -805,3 +805,63 @@ def test_umma_cooperative_channel_parameters(
         bs_dtype=bs_dtype,
     )
     _assert_results(dataclasses.replace(case, layer_config=layer_config), (17, 1249))
+
+
+@pytest.mark.parametrize(
+    "gemm_type,block_m,block_n,block_k,use_tma_c,reuse_mode,cta_group_size",
+    (
+        (GemmType.DENSE, 8, 64, 64, True, "none", 1),
+        (GemmType.DENSE, 48, 64, 64, True, "none", 2),
+        (GemmType.DENSE, 16, 512, 32, False, "none", 2),
+        (GemmType.DENSE, 24, 256, 64, True, "none", 1),
+        (GemmType.DENSE, 56, 512, 64, True, "none", 1),
+        (GemmType.DENSE, 40, 128, 64, False, "all_stages", 1),
+        (GemmType.DENSE, 48, 128, 64, True, "last_stage", 2),
+        (GemmType.DENSE, 64, 256, 64, False, "all_stages", 2),
+        (GemmType.INDEXED, 8, 64, 64, False, "none", 1),
+        (GemmType.INDEXED, 40, 256, 64, False, "all_stages", 1),
+        (GemmType.GROUPED_CONTIGUOUS, 24, 128, 64, True, "none", 1),
+        (GemmType.GROUPED_CONTIGUOUS, 40, 256, 64, False, "last_stage", 1),
+        (GemmType.GROUPED_MASKED, 40, 64, 64, True, "all_stages", 1),
+        (GemmType.GROUPED_CONTIGUOUS, 48, 128, 64, True, "none", 2),
+    ),
+)
+@pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
+@pytest.mark.parametrize("use_stream_k", (False, True))
+def test_umma_chunked_output_layout(
+    gemm_type,
+    block_m,
+    block_n,
+    block_k,
+    use_tma_c,
+    reuse_mode,
+    cta_group_size,
+    use_stream_k,
+    compiler,
+    monkeypatch,
+):
+    monkeypatch.setenv("HUMMING_COMPILER", compiler)
+    monkeypatch.setattr(KernelRuntime, "_instances", {})
+    monkeypatch.setattr(HummingKernel, "_str2kernel_cache", {})
+
+    def select_output(layer_config, shape_m, gemm_type, **kwargs):
+        return {
+            "mma_type": "umma",
+            "block_shape": (block_m, block_n, block_k),
+            "warp_shape": (block_m, 32, block_k),
+            "num_stages": 3,
+            "num_sms": 6,
+            "num_ctas_per_sm": 1,
+            "use_tma": True,
+            "use_tma_a": gemm_type != GemmType.INDEXED,
+            "use_tma_c": use_tma_c,
+            "use_stream_k": use_stream_k,
+            "smem_reuse_mode": reuse_mode,
+            "umma_cta_group_size": cta_group_size,
+            "umma_output_chunk_rows": 32,
+        }
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
+    case = _case("chunked-layout", gemm_type, b_dtype="uint4", weight_scale_group_size=0, has_bias=True)
+    layer_config = dataclasses.replace(case.layer_config, shape_n=1024, shape_k=1024)
+    _assert_results(dataclasses.replace(case, layer_config=layer_config), (17, 13 * block_m + 1))

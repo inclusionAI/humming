@@ -113,17 +113,28 @@ tile of B. Both CTAs retain the existing compressed weight
 layout and register-to-TMEM conversion. MMA completion releases operands in both
 CTAs through multicast barrier commits; this does not enable TMA multicast.
 
-Chunked output currently requires dense GEMM, TMA output, separate
-output storage (`smem_reuse_mode="none"`), block N=128, and block M divisible by
-32. Two-CTA execution additionally requires chunked output, N divisible by 256,
+Chunked output supports dense, indexed, and grouped GEMMs, TMA or ordinary
+stores, and all `smem_reuse_mode` values. Block N can be 64, 128, 256, or 512;
+block M is a multiple of 8 for one CTA, or 16 for two CTAs, subject to SMEM and
+TMEM capacity. The two-CTA M alignment comes from the transposed `tcgen05.mma`
+instruction's N dimension. Indexed output uses ordinary stores and preserves
+row indices until all chunks have been written. Grouped TMA output uses the
+existing per-expert descriptor and row offset.
+
+Chunks contain up to 32 rows. For block M not divisible by 32, the output TMA
+box height divides block M, so the last chunk cannot overwrite the next tile.
+Each N partition writes only its own columns; the accumulator is released only
+after the last partition has been read. Reusing stage SMEM waits for output
+completion before loading the next tile, reducing load/epilogue overlap.
+
+Two-CTA execution still requires chunked output, N divisible by twice block N,
 TMA stage loads, and `num_ctas_per_sm=1`. Activation scales are not supported in
-this pipeline. Channel weight scales, channel secondary scales, bias, and
-channel/group zero points reuse the existing loaders and output arithmetic.
-Channel parameters are released once all consuming threads have read them into
-registers, allowing the next tile's channel loads to overlap output. Chunked
-output supports Stream-K for both one- and two-CTA execution: the first slice
-stores each chunk, later slices use TMA reduce-add, and partial writes complete
-before releasing the output lock. Bias is applied only by the first slice.
+this cooperative pipeline. Channel weight scales, channel secondary scales,
+bias, and channel/group zero points reuse the existing loaders and arithmetic.
+Channel parameters are released once all consuming threads have read them.
+Both output paths support Stream-K: the first slice stores each chunk, later
+slices reduce into it, and partial writes complete before releasing the output
+lock. Bias is applied only by the first slice.
 
 SM100 dense heuristics select two CTAs with six stages when the tile is suitable,
 K is long enough to amortize the pipeline, and the estimated shared-memory
