@@ -3,17 +3,24 @@
 #include <humming/utils/base.cuh>
 
 
-template <uint32_t kColumns>
+template <uint32_t kColumns, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_alloc(uint32_t smem_address) {
   static_assert(kColumns >= 32 && kColumns <= 512 && !(kColumns & (kColumns - 1)));
-  asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::"r"(smem_address), "n"(kColumns) : "memory");
-  asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;" ::: "memory");
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;" ::"r"(smem_address), "n"(kColumns) : "memory");
+    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned;" ::: "memory");
+  } else {
+    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::"r"(smem_address), "n"(kColumns) : "memory");
+    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;" ::: "memory");
+  }
 }
 
 
-template <uint32_t kColumns>
+template <uint32_t kColumns, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_dealloc(uint32_t tmem_address) {
-  asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(tmem_address), "n"(kColumns) : "memory");
+  if constexpr (kCtaGroupSize == 2)
+    asm volatile("tcgen05.dealloc.cta_group::2.sync.aligned.b32 %0, %1;" ::"r"(tmem_address), "n"(kColumns) : "memory");
+  else asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(tmem_address), "n"(kColumns) : "memory");
 }
 
 
@@ -37,8 +44,11 @@ CUDA_INLINE void tcgen05_wait_ld() {
 }
 
 
+template <uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_commit(uint32_t mbarrier_address) {
-  asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];" ::"r"(mbarrier_address) : "memory");
+  if constexpr (kCtaGroupSize == 2)
+    asm volatile("tcgen05.commit.cta_group::2.mbarrier::arrive::one.multicast::cluster.b64 [%0], %1;" ::"r"(mbarrier_address), "h"(uint16_t(3)) : "memory");
+  else asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];" ::"r"(mbarrier_address) : "memory");
 }
 
 
@@ -51,19 +61,27 @@ CUDA_INLINE uint64_t tcgen05_smem_desc_f16(const void *ptr) {
 }
 
 
-template <uint32_t kN, bool kUseBf16>
+// Elect once for a group of MMA instructions and their completion commits.
+CUDA_INLINE bool tcgen05_elect_leader() {
+  uint32_t leader;
+  asm volatile("{ .reg .pred p; elect.sync _|p, 0xffffffff; selp.u32 %0, 1, 0, p; }" : "=r"(leader));
+  return leader;
+}
+
+
+template <uint32_t kN, bool kUseBf16, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_mma_f16(uint32_t d, uint32_t a, uint64_t b, bool accumulate) {
   constexpr uint32_t input_format = kUseBf16 ? (1u << 7) | (1u << 10) : 0u;
-  constexpr uint32_t descriptor = (1u << 4) | input_format | ((kN / 8) << 17) | (8u << 24);
-  asm volatile(
-      "{\n"
-      "  .reg .pred p, leader;\n"
-      "  elect.sync _|leader, 0xffffffff;\n"
-      "  setp.ne.b32 p, %4, 0;\n"
-      "  @leader tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, {%5, %5, %5, %5}, p;\n"
-      "}\n" ::"r"(d),
-      "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u)
-      : "memory");
+  constexpr uint32_t descriptor = (1u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::2.kind::f16 [%0], [%1], %2, %3, {%5,%5,%5,%5,%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  } else {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, {%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  }
 }
 
 
@@ -124,4 +142,13 @@ CUDA_INLINE void tcgen05_ld_16x128b_x2(uint32_t address, uint32_t *values) {
       "tcgen05.ld.sync.aligned.16x128b.x2.b32 {%0, %1, %2, %3}, [%4];"
       : "=r"(values[0]), "=r"(values[1]), "=r"(values[2]), "=r"(values[3])
       : "r"(address) : "memory");
+}
+
+
+CUDA_INLINE void tcgen05_ld_16x256b_x4(uint32_t address, uint32_t *values) {
+  asm volatile("tcgen05.ld.sync.aligned.16x256b.x4.b32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+               : "=r"(values[0]), "=r"(values[1]), "=r"(values[2]), "=r"(values[3]),
+                 "=r"(values[4]), "=r"(values[5]), "=r"(values[6]), "=r"(values[7]),
+                 "=r"(values[8]), "=r"(values[9]), "=r"(values[10]), "=r"(values[11]),
+                 "=r"(values[12]), "=r"(values[13]), "=r"(values[14]), "=r"(values[15]) : "r"(address) : "memory");
 }

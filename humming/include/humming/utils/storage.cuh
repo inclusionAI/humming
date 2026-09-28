@@ -89,8 +89,6 @@
 #endif
 
 
-
-
 template <
     class MmaOpClass,
     class BlockShape, class WarpShape,
@@ -131,7 +129,7 @@ public:
   static constexpr uint32_t M_WARPS = (BlockShape::M / WarpShape::M);
   static constexpr uint32_t kWarpReduceBuffers = kNumWarpsDimK <= 4 ? kNumWarpsDimK - 1 : kNumWarpsDimK / 2;
   static constexpr uint32_t kWarpReduceSize = M_WARPS * 16 * BlockShape::N * kMmaCTypeBits / 128 * kWarpReduceBuffers;
-  static constexpr uint32_t kBlockOutputSize = BlockShape::M * BlockShape::N / 2 / 4 / kNumWriteSplits;
+  static constexpr uint32_t kBlockOutputSize = (TuningConfig::kUmmaOutputChunkRows ? 2 * TuningConfig::kUmmaOutputChunkRows : BlockShape::M) * BlockShape::N / 2 / 4 / kNumWriteSplits;
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
 
   static constexpr uint32_t kSmemStrideA = BlockShape::K * ElementA::kBits / 32 / 4;
@@ -147,7 +145,7 @@ public:
   static constexpr uint32_t kScaleMAlignment = 4;
   static constexpr uint32_t kScaleBlockM = BlockShape::M + (kIsGroupedGemm ? kScaleMAlignment : 0);
 
-  static constexpr uint32_t kStageSizeA = BlockShape::M * kSmemStrideA;
+  static constexpr uint32_t kStageSizeA = BlockShape::M / TuningConfig::kUmmaCtaGroupSize * kSmemStrideA;
   static constexpr uint32_t kStageSizeB = BlockShape::K / kPartMmaShapeK * kSmemStrideB;
   static constexpr uint32_t kNumGroupsAStorage = CEIL_DIV(kNumGroupsA, 4) * 4;
   static constexpr uint32_t kStageSizeAS = kUseMxmma
@@ -213,9 +211,11 @@ public:
 
   IF_USE_MBARRIER(alignas(128) uint64_t load_mbar[kNumStages + 2];)
   IF_USE_WARP_SPEC(uint64_t math_mbar[kNumMathMbarriers];)
+  IF_USE_UMMA(uint64_t umma_accumulator_ready;)
+  IF_USE_UMMA(uint64_t umma_accumulator_free;)
   IF_USE_UMMA(uint32_t umma_tmem_col;)
   IF_USE_UMMA(uint64_t umma_operand_ready[kNumStages];)
-  IF_USE_UMMA(uint64_t umma_operand_free[kNumStages];)
-  IF_USE_UMMA(uint64_t umma_weight_ready[kNumStages + 1];)
+  IF_USE_UMMA(uint64_t umma_operand_free[MAX(kNumStages, 4)];)
+  IF_USE_UMMA(uint64_t umma_weight_ready[kNumStages];)
   IF_USE_UMMA(uint64_t umma_weight_free[kNumStages];)
 };
