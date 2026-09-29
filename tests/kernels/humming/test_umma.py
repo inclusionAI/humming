@@ -819,6 +819,7 @@ def test_umma_cooperative_channel_parameters(
         (GemmType.DENSE, 48, 128, 64, True, "last_stage", 2),
         (GemmType.DENSE, 64, 256, 64, False, "all_stages", 2),
         (GemmType.INDEXED, 8, 64, 64, False, "none", 1),
+        (GemmType.INDEXED, 48, 128, 64, False, "none", 2),
         (GemmType.INDEXED, 40, 256, 64, False, "all_stages", 1),
         (GemmType.GROUPED_CONTIGUOUS, 24, 128, 64, True, "none", 1),
         (GemmType.GROUPED_CONTIGUOUS, 40, 256, 64, False, "last_stage", 1),
@@ -1112,3 +1113,77 @@ def test_umma_mxf8_mxf4_public_dispatch():
         outputs = layer(inputs)
         expected = inputs_ref @ weight_ref.T
         torch.testing.assert_close(outputs, expected.to(torch.bfloat16), rtol=0.01, atol=0.05)
+
+
+@pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype,microscale,gemm_type,block_m,block_n,block_k,stream_k",
+    (
+        (dtypes.float8e4m3, dtypes.float8e4m3, False, GemmType.DENSE, 64, 128, 128, False),
+        (dtypes.float8e5m2, dtypes.float4e2m1, False, GemmType.DENSE, 96, 128, 64, True),
+        (dtypes.float8e4m3, dtypes.float6e3m2, False, GemmType.DENSE, 64, 256, 128, True),
+        (dtypes.float8e4m3, dtypes.float8e5m2, False, GemmType.GROUPED_CONTIGUOUS, 64, 128, 128, False),
+        (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.DENSE, 64, 128, 128, False),
+        (dtypes.float8e5m2, dtypes.float8e4m3, True, GemmType.DENSE, 96, 128, 64, True),
+        (dtypes.float8e4m3, dtypes.float6e2m3, True, GemmType.DENSE, 64, 256, 128, True),
+        (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.DENSE, 160, 128, 256, False),
+        (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.GROUPED_CONTIGUOUS, 64, 128, 128, True),
+        (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.DENSE, 32, 512, 128, True),
+        (dtypes.float8e4m3, dtypes.float8e4m3, False, GemmType.INDEXED, 32, 128, 64, True),
+        (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.INDEXED, 32, 128, 128, False),
+        (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.GROUPED_MASKED, 48, 128, 128, True),
+    ),
+)
+def test_umma_cooperative_fp8(
+    a_dtype, b_dtype, microscale, gemm_type, block_m, block_n, block_k, stream_k, compiler, monkeypatch
+):
+    monkeypatch.setenv("HUMMING_COMPILER", compiler)
+    monkeypatch.setattr(KernelRuntime, "_instances", {})
+    monkeypatch.setattr(HummingKernel, "_str2kernel_cache", {})
+
+    def select_config(layer_config, shape_m, gemm_type, **kwargs):
+        return {
+            "mma_type": "umma",
+            "block_shape": (block_m, block_n, block_k),
+            "warp_shape": (block_m, 32, block_k),
+            "num_stages": 3,
+            "num_ctas_per_sm": 1,
+            "num_sms": 4,
+            "use_warp_spec": True,
+            "use_tma": gemm_type != GemmType.INDEXED,
+            "use_tma_as": microscale and gemm_type != GemmType.INDEXED,
+            "use_stream_k": stream_k,
+            "smem_reuse_mode": "none",
+            "umma_cta_group_size": 2,
+            "umma_output_chunk_rows": 32,
+        }
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+    output_dtype = dtypes.float16 if a_dtype == dtypes.float8e5m2 else dtypes.bfloat16
+    layer_config = LayerConfig(
+        shape_n=2 * block_n,
+        shape_k=1024,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=output_dtype,
+        bs_dtype=dtypes.float8e8m0 if microscale else output_dtype,
+        as_dtype=dtypes.float8e8m0 if microscale else None,
+        input_scale_group_size=32 if microscale else 0,
+        weight_scale_group_size=32 if microscale else 0,
+        input_quant_mode="dynamic_group" if microscale else "dynamic_token",
+        weight_scale_type="group" if microscale else "channel",
+        has_bias=not microscale,
+        mma_type=MmaType.UMMA,
+    )
+    case = KernelTestCase(
+        name="cooperative-fp8",
+        layer_config=layer_config,
+        compute_config=ComputeConfig(
+            gemm_type=gemm_type,
+            use_m_major_input_scale=microscale and gemm_type != GemmType.INDEXED,
+        ),
+        top_k=2,
+        seed=2026,
+    )
+    _assert_results(case, (17, 13 * block_m + 1))

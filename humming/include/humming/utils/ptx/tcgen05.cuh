@@ -85,18 +85,19 @@ CUDA_INLINE void tcgen05_mma_f16(uint32_t d, uint32_t a, uint64_t b, bool accumu
 }
 
 
-template <uint32_t kN, uint32_t kAFormat, uint32_t kBFormat>
+template <uint32_t kN, uint32_t kAFormat, uint32_t kBFormat, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint32_t a, uint64_t b, bool accumulate) {
   constexpr uint32_t input_format = (kAFormat << 7) | (kBFormat << 10);
-  constexpr uint32_t descriptor = (1u << 4) | input_format | ((kN / 8) << 17) | (8u << 24);
-  asm volatile(
-      "{\n"
-      "  .reg .pred p;\n"
-      "  setp.ne.b32 p, %4, 0;\n"
-      "  tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], [%1], %2, %3, {%5, %5, %5, %5}, p;\n"
-      "}\n" ::"r"(d),
-      "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u)
-      : "memory");
+  constexpr uint32_t descriptor = (1u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], [%1], %2, %3, {%5,%5,%5,%5,%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  } else {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], [%1], %2, %3, {%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  }
 }
 
 
@@ -160,20 +161,23 @@ CUDA_INLINE void tcgen05_ld_16x128b_x2(uint32_t address, uint32_t *values) {
 }
 
 
-template <uint32_t kN, uint32_t kWeightFormat, uint32_t kInputFormat>
+template <uint32_t kN, uint32_t kWeightFormat, uint32_t kInputFormat, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_mma_mxf8f6f4(uint32_t d, uint32_t a, uint64_t b,
                                       uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate) {
   constexpr uint32_t descriptor_base = (kWeightFormat << 7) | (kInputFormat << 10) |
-                                       ((kN / 8) << 17) | (1u << 23) | (1u << 27);
+                                       ((kN / 8) << 17) | (1u << 23) | (kCtaGroupSize << 27);
   uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29);
-  asm volatile(
-      "{\n"
-      "  .reg .pred p;\n"
-      "  setp.ne.b32 p, %6, 0;\n"
-      "  tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale.block32 "
-      "[%0], [%1], %2, %3, [%4], [%5], p;\n"
-      "}\n" ::"r"(d),
-      "r"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::2.kind::mxf8f6f4.block_scale.block32 "
+                 "[%0], [%1], %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  } else {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale.block32 "
+                 "[%0], [%1], %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  }
 }
 
 

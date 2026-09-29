@@ -22,7 +22,8 @@ private:
 
   static constexpr uint32_t kSmemStride = BlockShape::K * ElementA::kBits / 32 / 4;
   static constexpr uint32_t kGmemStride = (ProblemShape::K - PadShape::K) * ElementA::kBits / 32 / 4;
-  static constexpr uint32_t kNumInt4s = kSmemStride * BlockShape::M;
+  static constexpr uint32_t kLoadRows = BlockShape::M / Ctx::kUmmaCtaGroupSize;
+  static constexpr uint32_t kNumInt4s = kSmemStride * kLoadRows;
   static constexpr uint32_t kColOffsetToElem = MAX(ElementA::kBits, 8) / ElementA::kBits;
 
   static_assert(BlockShape::K * ElementA::kBits >= 512);
@@ -126,8 +127,8 @@ public:
       uint32_t smem_swizzled_col = smem_col ^ ((smem_row + smem_base) % 8);
       uint32_t smem_swizzled_offset = smem_row * 8 + smem_swizzled_col;
 
-      uint32_t gmem_col = smem_row / BlockShape::M * 8 + smem_col;
-      uint32_t gmem_row = kIsIndexedGemm ? load_row_index[i] : (smem_row % BlockShape::M);
+      uint32_t gmem_col = smem_row / kLoadRows * 8 + smem_col;
+      uint32_t gmem_row = kIsIndexedGemm ? load_row_index[i] : (smem_row % kLoadRows);
       uint32_t gmem_offset = gmem_row * kGmemStride + gmem_col;
 
       bool pred0 = (gmem_col * (128 / ElementA::kBits) + col_offset * kColOffsetToElem) < (ProblemShape::K - PadShape::K);
@@ -157,7 +158,7 @@ public:
       uint32_t smem_swizzled_col = smem_col ^ ((smem_row + smem_base) % 4);
       uint32_t smem_swizzled_offset = smem_row * 8 + smem_swizzled_col;
 
-      uint32_t gmem_row = smem_row % (BlockShape::M / 2) * 2 + smem_col / 4;
+      uint32_t gmem_row = smem_row % (kLoadRows / 2) * 2 + smem_col / 4;
       gmem_row = kIsIndexedGemm ? load_row_index[i] : gmem_row;
       uint32_t gmem_col = smem_col % 4;
       uint32_t gmem_offset = gmem_row * kGmemStride + gmem_col;
@@ -189,7 +190,7 @@ public:
     }
     if constexpr (Ctx::kUmmaCtaGroupSize == 2) row_offset += (blockIdx.x % 2) * (BlockShape::M / 2);
     col_offset = k_block_id * (BlockShape::K * ElementA::kBits / MAX(ElementA::kBits, 8));
-    block_shape_m = row_offset < shape_m ? MIN(shape_m - row_offset, BlockShape::M) : 0;
+    block_shape_m = row_offset < shape_m ? MIN(shape_m - row_offset, kLoadRows) : 0;
 
     uint32_t gmem_offset = k_block_id * kSmemStride;
     gmem_offset += kIsIndexedGemm ? 0 : (MIN(row_offset, shape_m) * kGmemStride);
@@ -207,10 +208,11 @@ public:
         uint32_t gmem_row;
 
         if constexpr (BlockShape::K * ElementA::kBits >= 1024) {
-          gmem_row = smem_row % BlockShape::M;
+          gmem_row = smem_row % kLoadRows;
         } else {
-          gmem_row = smem_row % (BlockShape::M / 2) * 2 + smem_col / 4;
+          gmem_row = smem_row % (kLoadRows / 2) * 2 + smem_col / 4;
         }
+        gmem_row += (blockIdx.x % Ctx::kUmmaCtaGroupSize) * kLoadRows;
         load_row_index[i] = ctx.get_rd_row_index()[gmem_row];
       }
     }

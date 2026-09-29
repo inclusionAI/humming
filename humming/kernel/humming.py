@@ -487,14 +487,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.umma_cta_group_size in (1, 2)
             assert self.umma_output_chunk_rows in (0, 32)
             if self.umma_cta_group_size == 2:
-                assert self.a_dtype.num_bits == 16, "cooperative UMMA currently uses FP16/BF16 instructions"
                 assert block_m % 16 == 0, "two-CTA UMMA requires block M divisible by 16"
                 assert self.umma_output_chunk_rows == 32
                 assert self.problem_shape[1] % (2 * block_n) == 0
-                assert self.use_tma_a and self.use_tma_b
-                assert not self.has_input_scale and not self.has_input_scale_2
-                assert not self.is_group_weight_scale or self.use_tma_bs
-                assert not self.has_zero_point or self.is_channel_weight_scale or self.use_tma_bzp
                 assert self.num_ctas_per_sm == 1
 
         assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (

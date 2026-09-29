@@ -23,9 +23,10 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr uint32_t kInputScaleColumns = kUseBlockScale ? kInputScaleStride * kScaleWords : 0;
   static constexpr uint32_t kOperandBufferColumns = CEIL_DIV(kOperandColumns + kWeightScaleColumns + kInputScaleColumns, 16) * 16;
   static constexpr uint32_t kOutputGroups = CEIL_DIV(BlockShape::N, 128);
-  static constexpr uint32_t kStageTmemColumns = static_next_power_of_2(kOutputGroups * (Ctx::kNumStages * kOperandBufferColumns + WarpShape::M));
-  static constexpr bool kStageOperandsFit = kStageTmemColumns * Ctx::kNumCtasPerSm <= 512;
-  static constexpr uint32_t kNumOperandBuffers = Ctx::kUmmaCtaGroupSize == 2 ? 4 : (kStageOperandsFit ? Ctx::kNumStages : 2);
+  static constexpr uint32_t kPreferredOperandBuffers = Ctx::kUmmaCtaGroupSize == 2 ? 4 : Ctx::kNumStages;
+  static constexpr uint32_t kBufferedTmemColumns = static_next_power_of_2(kOutputGroups * (kPreferredOperandBuffers * kOperandBufferColumns + WarpShape::M));
+  static constexpr bool kBufferedOperandsFit = kBufferedTmemColumns * Ctx::kNumCtasPerSm <= 512;
+  static constexpr uint32_t kNumOperandBuffers = kBufferedOperandsFit ? kPreferredOperandBuffers : 2;
   static constexpr uint32_t kAccumulatorColumn = kNumOperandBuffers * kOperandBufferColumns;
   // Each logical 128-channel partition has its own operands and accumulator.
   static constexpr uint32_t kGroupColumns = kAccumulatorColumn + WarpShape::M;
@@ -198,13 +199,13 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       constexpr uint32_t kInputFormat = std::is_same<typename Ctx::ElementA, Float8E5M2>::value ? 1 : 0;
       if constexpr (kUseBlockScale) {
         uint32_t scale_base = base + buffer * kOperandBufferColumns + kOperandColumns;
-        tcgen05_mma_mxf8f6f4<WarpShape::M, kWeightFormat, kInputFormat>(
+        tcgen05_mma_mxf8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(
             accumulator, base + buffer * kOperandBufferColumns + k * 8, descriptor,
             scale_base + k / 4 * 4,
             scale_base + kWeightScaleColumns + k / 4 * kInputScaleStride, k % 4, !is_first || k != 0);
       } else if constexpr (kUseFp8) {
-        tcgen05_mma_f8f6f4<WarpShape::M, kWeightFormat, kInputFormat>(accumulator,
-                                                                      base + buffer * kOperandBufferColumns + k * 8, descriptor, !is_first || k != 0);
+        tcgen05_mma_f8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(accumulator,
+                                                                                              base + buffer * kOperandBufferColumns + k * 8, descriptor, !is_first || k != 0);
       } else {
         tcgen05_mma_f16<WarpShape::M, kUseBf16, Ctx::kUmmaCtaGroupSize>(accumulator,
                                                                         base + buffer * kOperandBufferColumns + k * 8, descriptor, !is_first || k != 0);

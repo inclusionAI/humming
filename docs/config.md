@@ -128,20 +128,25 @@ after the last partition has been read. Reusing stage SMEM waits for output
 completion before loading the next tile, reducing load/epilogue overlap.
 
 Two-CTA execution still requires chunked output, N divisible by twice block N,
-TMA stage loads, and `num_ctas_per_sm=1`. Activation scales are not supported in
-this cooperative pipeline. Channel weight scales, channel secondary scales,
+and `num_ctas_per_sm=1`. Both TMA and cp.async stage loads are supported.
+Cooperative instructions support FP16/BF16, ordinary FP8 with FP8/FP6/FP4
+weights, and MXFP8 with MXFP8/MXFP6/MXFP4 weights and group-32 E8M0 scales.
+Tensor/token activation scales and MX activation scales use the existing
+loaders. Channel weight scales, channel secondary scales,
 bias, and channel/group zero points reuse the existing loaders and arithmetic.
 Channel parameters are released once all consuming threads have read them.
 Both output paths support Stream-K: the first slice stores each chunk, later
 slices reduce into it, and partial writes complete before releasing the output
 lock. Bias is applied only by the first slice.
 
-SM100 dense heuristics select two CTAs with six stages when the tile is suitable,
+SM100 FP16/BF16 dense heuristics select two CTAs with six stages when the tile is suitable,
 K is long enough to amortize the pipeline, and the estimated shared-memory
 allocation fits. The existing Stream-K decision is preserved for CTA pairs.
 Without Stream-K, underfilled output waves retain single-CTA execution. Chunked
 output remains opt-in for single-CTA execution because it did not improve the
-measured large dense cases by itself.
+measured large dense cases by itself. FP8 cooperative execution is currently
+explicitly configured with `umma_cta_group_size=2` and
+`umma_output_chunk_rows=32`; automatic FP8 selection remains unchanged.
 
 ### SM100 MoE tile selection
 

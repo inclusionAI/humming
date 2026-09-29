@@ -66,12 +66,13 @@ public:
         first *= scales[0];
         second *= scales[0];
       } else {
-        // The TMEM pair spans rows lane%4 and lane%4+4 within an M8 group.
         // The channel loader places row r's scale in lanes 4*r through 4*r+3.
+        // Two-CTA TMEM loads pair adjacent rows; one-CTA loads pair rows four apart.
+        constexpr bool kAdjacentRows = Ctx::kUmmaCtaGroupSize == 2;
         float scale = scales[row_group];
-        uint32_t source_lane = (threadIdx.x % 4) * 4;
+        uint32_t source_lane = (threadIdx.x % 4) * (kAdjacentRows ? 8 : 4);
         first *= __shfl_sync(0xffffffff, scale, source_lane);
-        second *= __shfl_sync(0xffffffff, scale, source_lane + 16);
+        second *= __shfl_sync(0xffffffff, scale, source_lane + (kAdjacentRows ? 4 : 16));
       }
     }
     if constexpr (kUseNativeChannelScale) {
