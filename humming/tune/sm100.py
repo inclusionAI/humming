@@ -104,8 +104,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     sm_version = 100
     expert_probability_cv = 0.25
     b16_allowed_dtypes = [dtypes.float16, dtypes.bfloat16]
-    b8_allowed_dtypes = [dtypes.float8e4m3, dtypes.float8e5m2]
-    b4_allowed_dtypes = [dtypes.float4e2m1]
+    b8_allowed_dtypes = [dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4]
+    b4_allowed_dtypes = [dtypes.float4e2m1, dtypes.float4e0m3]
 
     @classmethod
     def _fits_resources(cls, layer_config, block_shape, num_stages, num_ctas_per_sm):
@@ -514,7 +514,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
 
 
 class Sm100Heuristics(Sm100MmaHeuristics):
-    b4_allowed_dtypes = [dtypes.float4e2m1]
+    b8_allowed_dtypes = [*Sm100MmaHeuristics.b8_allowed_dtypes, dtypes.float8e3m4]
+    b4_allowed_dtypes = [dtypes.float4e2m1, dtypes.float4e0m3]
 
     @classmethod
     def _should_use_mma(cls, layer_config: LayerConfig, shape_m: int) -> bool:
@@ -551,7 +552,8 @@ class Sm100Heuristics(Sm100MmaHeuristics):
             has_native_mixed_operands = (
                 layer_config.a_dtype.num_bits == 8 and layer_config.b_dtype != layer_config.a_dtype
             )
-            requires_umma = layer_config.use_block_scaled_mma or has_native_mixed_operands
+            has_hidden_fp8 = dtypes.float8e3m4 in (layer_config.a_dtype, layer_config.b_dtype)
+            requires_umma = layer_config.use_block_scaled_mma or has_native_mixed_operands or has_hidden_fp8
             keep_umma = requires_umma or not cls._should_use_mma(layer_config, shape_m)
             if not use_f16_accum and keep_umma:
                 return Sm100UmmaHeuristics.get_config(

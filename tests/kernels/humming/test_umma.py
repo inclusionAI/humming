@@ -958,8 +958,9 @@ def test_umma_fp8_persistent_weight_reuse(monkeypatch):
 
 
 @pytest.mark.parametrize("shape_k", (64, 256))
-@pytest.mark.parametrize("weight_dtype", ("float8e4m3", "float4e2m1", "float6e2m3"))
-def test_umma_fp8_public_dispatch(shape_k, weight_dtype):
+@pytest.mark.parametrize("activation_dtype", ("float8e4m3", "float8e3m4"))
+@pytest.mark.parametrize("weight_dtype", ("float8e4m3", "float8e3m4", "float4e2m1", "float6e2m3"))
+def test_umma_fp8_public_dispatch(shape_k, activation_dtype, weight_dtype):
     schema = HummingWeightSchema(b_dtype=weight_dtype, weight_scale_type="tensor")
     weight = generate_random_tensor((256, shape_k), torch.bfloat16, device="cuda")
     tensors = schema.quant_tensor(weight, schema, torch.bfloat16)
@@ -969,19 +970,27 @@ def test_umma_fp8_public_dispatch(shape_k, weight_dtype):
         shape_n=256,
         shape_k=shape_k,
         weight_config=schema,
-        input_config={"dtype": "float8e4m3", "quant_mode": "static_tensor"},
+        input_config={"dtype": activation_dtype, "quant_mode": "static_tensor"},
         torch_dtype=torch.bfloat16,
     ).cuda()
     layer.load_state_dict(tensors, strict=False)
     layer.transform()
     assert layer.humming_config.mma_type == MmaType.UMMA
+    runner = KernelTestRunner(
+        KernelTestCase(
+            name="fp8-public",
+            layer_config=layer.humming_config,
+            compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+        )
+    )
     for shape_m in (17, 257):
-        inputs = torch.randn((shape_m, shape_k), device="cuda").to(torch.float8_e4m3fn)
+        inputs = torch.randn((shape_m, shape_k), device="cuda", dtype=torch.bfloat16)
+        inputs_ref, _, _, _ = runner.prepare_inputs(inputs, tensors["input_scale"])
         outputs = layer(inputs)
-        expected = (inputs.float() * tensors["input_scale"]) @ weight_ref.T
+        expected = inputs_ref @ weight_ref.T
         torch.testing.assert_close(outputs, expected.to(torch.bfloat16), rtol=0.01, atol=0.05)
         backend = _selected_backend(layer, GemmType.DENSE, {"inputs": inputs})
-        expect_umma = shape_m == 257 or weight_dtype != "float8e4m3"
+        expect_umma = shape_m == 257 or weight_dtype != "float8e4m3" or activation_dtype == "float8e3m4"
         assert backend == (MmaType.UMMA if expect_umma else MmaType.MMA)
 
 
@@ -1088,6 +1097,8 @@ def test_umma_mxf8_mxf4(
 @pytest.mark.parametrize(
     "activation_dtype,group_size,scale_dtype,quant_mode",
     (
+        ("float8e3m4", 32, "float8e8m0", "dynamic_group"),
+        ("float4e0m3", 16, "float8e4m3", "dynamic_group_token"),
         ("float8e4m3", 32, "float8e8m0", "dynamic_group"),
         ("float4e2m1", 32, "float8e8m0", "dynamic_group"),
         ("float4e2m1", 16, "float8e4m3", "dynamic_group_token"),
@@ -1141,6 +1152,11 @@ def test_umma_mxf8_mxf4_public_dispatch(activation_dtype, group_size, scale_dtyp
 @pytest.mark.parametrize(
     "a_dtype,b_dtype,microscale,gemm_type,block_m,block_n,block_k,stream_k",
     (
+        (dtypes.float8e3m4, dtypes.float8e3m4, False, GemmType.DENSE, 64, 128, 128, True),
+        (dtypes.float8e3m4, dtypes.float8e3m4, True, GemmType.DENSE, 64, 128, 128, False),
+        (dtypes.float8e3m4, dtypes.float4e2m1, True, GemmType.INDEXED, 32, 128, 128, True),
+        (dtypes.float8e4m3, dtypes.float8e3m4, True, GemmType.GROUPED_CONTIGUOUS, 64, 128, 128, True),
+        (dtypes.float8e3m4, dtypes.float8e5m2, False, GemmType.DENSE, 64, 128, 64, False),
         (dtypes.float8e4m3, dtypes.float8e4m3, False, GemmType.DENSE, 64, 128, 128, False),
         (dtypes.float8e5m2, dtypes.float4e2m1, False, GemmType.DENSE, 96, 128, 64, True),
         (dtypes.float8e4m3, dtypes.float6e3m2, False, GemmType.DENSE, 64, 256, 128, True),
@@ -1213,18 +1229,114 @@ def test_umma_cooperative_fp8(
 
 @pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
 @pytest.mark.parametrize(
-    "group_size,scale_dtype,quant_mode,cta_group_size,gemm_type,use_tma",
+    "a_dtype,b_dtype,group_size,scale_dtype,quant_mode,cta_group_size,gemm_type,use_tma",
     (
-        (32, dtypes.float8e8m0, "dynamic_group", 1, GemmType.DENSE, True),
-        (32, dtypes.float8e8m0, "static_tensor_dynamic_group", 2, GemmType.DENSE, True),
-        (16, dtypes.float8e4m3, "dynamic_group_token", 1, GemmType.DENSE, True),
-        (16, dtypes.float8e4m3, "static_tensor_dynamic_group", 2, GemmType.DENSE, False),
-        (16, dtypes.float8e8m0, "dynamic_group", 1, GemmType.GROUPED_CONTIGUOUS, True),
-        (16, dtypes.float8e4m3, "dynamic_group_token", 2, GemmType.INDEXED, False),
+        (
+            dtypes.float4e2m1,
+            dtypes.float4e2m1,
+            32,
+            dtypes.float8e8m0,
+            "dynamic_group",
+            1,
+            GemmType.DENSE,
+            True,
+        ),
+        (
+            dtypes.float4e2m1,
+            dtypes.float4e2m1,
+            32,
+            dtypes.float8e8m0,
+            "static_tensor_dynamic_group",
+            2,
+            GemmType.DENSE,
+            True,
+        ),
+        (
+            dtypes.float4e2m1,
+            dtypes.float4e2m1,
+            16,
+            dtypes.float8e4m3,
+            "dynamic_group_token",
+            1,
+            GemmType.DENSE,
+            True,
+        ),
+        (
+            dtypes.float4e2m1,
+            dtypes.float4e2m1,
+            16,
+            dtypes.float8e4m3,
+            "static_tensor_dynamic_group",
+            2,
+            GemmType.DENSE,
+            False,
+        ),
+        (
+            dtypes.float4e2m1,
+            dtypes.float4e2m1,
+            16,
+            dtypes.float8e8m0,
+            "dynamic_group",
+            1,
+            GemmType.GROUPED_CONTIGUOUS,
+            True,
+        ),
+        (
+            dtypes.float4e2m1,
+            dtypes.float4e2m1,
+            16,
+            dtypes.float8e4m3,
+            "dynamic_group_token",
+            2,
+            GemmType.INDEXED,
+            False,
+        ),
+        (
+            dtypes.float4e0m3,
+            dtypes.float4e0m3,
+            16,
+            dtypes.float8e4m3,
+            "dynamic_group_token",
+            1,
+            GemmType.DENSE,
+            True,
+        ),
+        (
+            dtypes.float4e0m3,
+            dtypes.float4e0m3,
+            16,
+            dtypes.float8e8m0,
+            "static_tensor_dynamic_group",
+            2,
+            GemmType.DENSE,
+            True,
+        ),
+        (
+            dtypes.float4e0m3,
+            dtypes.float4e2m1,
+            16,
+            dtypes.float8e4m3,
+            "dynamic_group_token",
+            2,
+            GemmType.INDEXED,
+            False,
+        ),
+        (
+            dtypes.float4e2m1,
+            dtypes.float4e0m3,
+            16,
+            dtypes.float8e8m0,
+            "dynamic_group",
+            1,
+            GemmType.GROUPED_CONTIGUOUS,
+            True,
+        ),
     ),
 )
 @pytest.mark.parametrize("block_shape", ((64, 128, 128), (48, 256, 256)))
 def test_umma_fp4_activation(
+    a_dtype,
+    b_dtype,
     group_size,
     scale_dtype,
     quant_mode,
@@ -1261,8 +1373,8 @@ def test_umma_fp4_activation(
         shape_n=2 * block_shape[1],
         shape_k=1024,
         num_experts=0 if gemm_type == GemmType.DENSE else 4,
-        a_dtype=dtypes.float4e2m1,
-        b_dtype=dtypes.float4e2m1,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
         c_dtype=dtypes.bfloat16,
         as_dtype=scale_dtype,
         bs_dtype=scale_dtype,

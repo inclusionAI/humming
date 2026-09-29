@@ -136,6 +136,15 @@ MXFP4 uses group-32 E8M0, while group-16 supports E8M0 or E4M3 (NVFP4).
 Both one-CTA and two-CTA execution support these formats. The SM100 dispatcher
 also selects UMMA for supported FP4 activation configurations.
 
+SM100-family UMMA also supports the undocumented `float8e3m4` and
+`float4e0m3` formats. E3M4 supports ordinary FP8 and group-32 E8M0 scaling;
+E0M3 requires group-16 E8M0 or E4M3 scales (group-32 faults in hardware).
+Activation and weight formats may differ, including E3M4 with ordinary
+FP8/FP6/FP4 weights and E0M3 with E2M1 weights, in either FP4 operand.
+UMMA selects these formats directly in its instruction descriptor. Input
+quantization uses the existing F2FP cubin patcher, extended to SM100/103;
+SM120/121 MMA patching remains unchanged.
+
 Tensor/token activation scales and MX activation scales use the existing
 loaders. `static_tensor_dynamic_group` applies the secondary tensor scale in
 the UMMA epilogue; NVFP4 `dynamic_group_token` similarly applies the secondary

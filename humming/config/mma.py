@@ -34,7 +34,7 @@ DTYPE_MAP = {
     dtypes.float4e2m1: "e2m1",
     dtypes.int4: "s4",
     # Hardware supports these dtypes (e3m4/e0m3) but exposes no matching PTX types.
-    # We substitute other PTX types and patch the cubin afterwards.
+    # MMA/MXMMA substitute PTX types and patch the cubin; UMMA selects descriptor formats.
     dtypes.float8e3m4: "e5m2",
     dtypes.float4e0m3: "e2m1",
 }
@@ -506,7 +506,9 @@ class MmaOpClass:
                 dtypes.float16,
                 dtypes.float8e4m3,
                 dtypes.float8e5m2,
+                dtypes.float8e3m4,
                 dtypes.float4e2m1,
+                dtypes.float4e0m3,
             )
             if a_dtype.num_bits == 16:
                 assert a_dtype == b_dtype
@@ -514,7 +516,9 @@ class MmaOpClass:
                 assert b_dtype in (
                     dtypes.float8e4m3,
                     dtypes.float8e5m2,
+                    dtypes.float8e3m4,
                     dtypes.float4e2m1,
+                    dtypes.float4e0m3,
                     dtypes.float6e3m2,
                     dtypes.float6e2m3,
                 )

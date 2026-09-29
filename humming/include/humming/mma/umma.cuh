@@ -16,7 +16,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
 
   static constexpr bool kUseBlockScale = Ctx::kUseBlockScaledMma;
   static constexpr uint32_t kOperandColumns = Ctx::kWarpIters * 8;
-  static constexpr bool kUseFp4 = std::is_same<typename Ctx::ElementA, Float4E2M1>::value;
+  static constexpr bool kUseFp4 = Ctx::ElementA::kBits == 4;
   static constexpr uint32_t kScaleGroupSize = Ctx::kIsGroupInputScale ? Ctx::kInputScaleGroupSize : Ctx::kWeightScaleGroupSize;
   static constexpr uint32_t kScalesPerIter = kUseBlockScale ? Ctx::kPartMmaShapeK / kScaleGroupSize : 1;
   static constexpr uint32_t kScaleWords = CEIL_DIV(Ctx::kWarpIters * kScalesPerIter, 4);
@@ -39,7 +39,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
 
   static constexpr bool kUseBf16 = std::is_same<typename Ctx::ElementA, BFloat16>::value;
   static constexpr bool kUseFp8 = std::is_same<typename Ctx::ElementA, Float8E4M3>::value ||
-                                  std::is_same<typename Ctx::ElementA, Float8E5M2>::value;
+                                  std::is_same<typename Ctx::ElementA, Float8E5M2>::value ||
+                                  std::is_same<typename Ctx::ElementA, Float8E3M4>::value;
   static_assert(kUseFp4 || kUseFp8 || kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
   static_assert(BlockShape::N == 64 || BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512);
   static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
@@ -65,8 +66,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   }
 
   CUDA_INLINE void transform_b(uint32_t buffer_id, uint32_t iter_id) {
-    if constexpr (kUseFp8 && Ctx::ElementB::kBits == 8) {
-      // Native mixed FP8 consumes the original encoding, without conversion
+    if constexpr ((kUseFp8 || kUseFp4) && Ctx::ElementB::kBits == Ctx::ElementA::kBits) {
+      // Native mixed FP8/FP4 consumes the original encoding, without conversion
       // to the activation dtype. Equal dtypes are already loaded into regs_b.
       if constexpr (!std::is_same<typename Ctx::ElementA, typename Ctx::ElementB>::value) {
         uint32_t *values = reinterpret_cast<uint32_t *>(this->regs_b[buffer_id]);
@@ -197,11 +198,16 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       uint32_t offset = row * (kSwizzleK / kElementsPerInt4) + k_offset % kSwizzleK / kElementsPerInt4;
       uint64_t descriptor = tcgen05_smem_desc<kSwizzleK * Ctx::ElementA::kBits / 8>(&ctx.smem.stages[stage_id].a[offset]);
       using ElementB = typename Ctx::ElementB;
-      constexpr uint32_t kWeightFormat = std::is_same<ElementB, Float4E2M1>::value ? 5 : std::is_same<ElementB, Float6E3M2>::value ? 4
-                                                                                     : std::is_same<ElementB, Float6E2M3>::value   ? 3
-                                                                                     : std::is_same<ElementB, Float8E5M2>::value   ? 1
-                                                                                                                                   : 0;
-      constexpr uint32_t kInputFormat = std::is_same<typename Ctx::ElementA, Float8E5M2>::value ? 1 : 0;
+      // f8f6f4 descriptor format 2 selects the undocumented E3M4 format.
+      constexpr uint32_t kWeightFormat = std::is_same<ElementB, Float4E2M1>::value   ? 5
+                                         : std::is_same<ElementB, Float6E3M2>::value ? 4
+                                         : std::is_same<ElementB, Float6E2M3>::value ? 3
+                                         : std::is_same<ElementB, Float8E3M4>::value ? 2
+                                         : std::is_same<ElementB, Float8E5M2>::value ? 1
+                                                                                     : 0;
+      constexpr uint32_t kInputFormat = std::is_same<typename Ctx::ElementA, Float8E3M4>::value   ? 2
+                                        : std::is_same<typename Ctx::ElementA, Float8E5M2>::value ? 1
+                                                                                                  : 0;
       if constexpr (kUseBlockScale) {
         uint32_t scale_base = base + buffer * kOperandBufferColumns + kOperandColumns;
         uint32_t scale_word = k * kScalesPerIter / 4;
@@ -209,7 +215,9 @@ struct UMMA : WMMA<Ctx, ArithClass> {
         uint32_t weight_scale = scale_base + scale_word * 4;
         uint32_t input_scale = scale_base + kWeightScaleColumns + scale_word * kInputScaleStride;
         if constexpr (kUseFp4) {
-          tcgen05_mma_mxf4nvf4<WarpShape::M, kScaleGroupSize, kScaleIsE4M3, Ctx::kUmmaCtaGroupSize>(
+          tcgen05_mma_mxf4nvf4<WarpShape::M, kScaleGroupSize, kScaleIsE4M3, Ctx::kUmmaCtaGroupSize,
+                               std::is_same<ElementB, Float4E0M3>::value,
+                               std::is_same<typename Ctx::ElementA, Float4E0M3>::value>(
               accumulator, base + buffer * kOperandBufferColumns + k * 8, descriptor,
               weight_scale, input_scale, scale_id, !is_first || k != 0);
         } else {

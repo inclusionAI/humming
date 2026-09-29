@@ -212,6 +212,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         return module.get_kernel_id
 
     def postprocess_cubin(self, cubin_path: str):
+        if self.mma_type == MmaType.UMMA:
+            return  # UMMA encodes operand formats directly in its descriptor.
         mode = ""
         if dtypes.float8e3m4 in (self.mma_a_dtype, self.mma_b_dtype):
             if self.mma_a_dtype != dtypes.float8e3m4:
@@ -312,7 +314,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)
             and self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
         )
-        umma_native_mixed = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits == 8
+        umma_native_mixed = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits <= 8
         self.mma_b_dtype = self.b_dtype if mma_native_mixed or umma_native_mixed else self.a_dtype
 
         return MmaOpClass.from_config(
@@ -395,9 +397,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         dtype_map = {
             dtypes.int4: 80,
             dtypes.int8: 75,
-            dtypes.float4e0m3: 120,
+            dtypes.float4e0m3: 100 if self.mma_type == MmaType.UMMA else 120,
             dtypes.float4e2m1: 100 if self.mma_type == MmaType.UMMA else 120,
-            dtypes.float8e3m4: 120,
+            dtypes.float8e3m4: 100 if self.mma_type == MmaType.UMMA else 120,
             dtypes.float8e4m3: 89,
             dtypes.float8e5m2: 89,
             dtypes.bfloat16: 80,
@@ -424,11 +426,12 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert self.b_dtype.num_bits <= self.a_dtype.mantissa_bits + 2
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_floating_point_type:
             assert self.b_dtype.is_signed
-            uses_native_umma = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits == 8
+            uses_native_umma = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits <= 8
             if not self.use_block_scaled_mma and not uses_native_umma:
                 assert self.b_dtype.exponent_bits <= self.a_dtype.exponent_bits
                 assert self.b_dtype.mantissa_bits <= self.a_dtype.mantissa_bits
-            assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
+            if not uses_native_umma:
+                assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_integer_type:
             assert self.use_fused_e8m0_scale
 
@@ -458,12 +461,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 dtypes.float16,
                 dtypes.float8e4m3,
                 dtypes.float8e5m2,
+                dtypes.float8e3m4,
                 dtypes.float4e2m1,
+                dtypes.float4e0m3,
             )
             if self.a_dtype.num_bits == 8:
                 assert self.b_dtype in (
                     dtypes.float8e4m3,
                     dtypes.float8e5m2,
+                    dtypes.float8e3m4,
                     dtypes.float4e2m1,
                     dtypes.float6e3m2,
                     dtypes.float6e2m3,
@@ -480,7 +486,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                             )
             if self.a_dtype.num_bits == 4:
                 assert not self.is_block_weight_scale and not self.has_zero_point
-                assert self.b_dtype == dtypes.float4e2m1
+                assert self.b_dtype in (dtypes.float4e2m1, dtypes.float4e0m3)
                 assert self.use_block_scaled_mma
                 group_size = self.input_scale_group_size or self.weight_scale_group_size
                 scale_dtype = self.as_dtype if self.is_group_input_scale else self.bs_dtype

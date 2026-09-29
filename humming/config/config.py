@@ -246,9 +246,11 @@ class LayerConfig(BaseHummingConfig):
                 and not self.is_block_weight_scale
             )
             has_fp8_output = self.c_dtype in (dtypes.float16, dtypes.bfloat16)
-            has_fp8_operands = self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2) and self.b_dtype in (
+            has_fp8_activation = self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)
+            has_fp8_operands = has_fp8_activation and self.b_dtype in (
                 dtypes.float8e4m3,
                 dtypes.float8e5m2,
+                dtypes.float8e3m4,
                 dtypes.float4e2m1,
                 dtypes.float6e3m2,
                 dtypes.float6e2m3,
@@ -262,7 +264,8 @@ class LayerConfig(BaseHummingConfig):
             )
             has_supported_fp8_scales = has_fp8_epilogue_scales or has_mx_scales
             use_fp8_umma = has_fp8_output and has_fp8_operands and has_supported_fp8_scales
-            has_fp4_operands = self.a_dtype == self.b_dtype == dtypes.float4e2m1
+            fp4_dtypes = (dtypes.float4e2m1, dtypes.float4e0m3)
+            has_fp4_operands = self.a_dtype in fp4_dtypes and self.b_dtype in fp4_dtypes
             has_fp4_scale_format = (self.input_scale_group_size, self.bs_dtype) in (
                 (32, dtypes.float8e8m0),
                 (16, dtypes.float8e8m0),
@@ -288,6 +291,10 @@ class LayerConfig(BaseHummingConfig):
                 self.mma_type = MmaType.UMMA if version >= (12, 9) else MmaType.MMA
             else:
                 self.mma_type = MmaType.MMA
+        has_e0m3_operand = dtypes.float4e0m3 in (self.a_dtype, self.b_dtype)
+        if self.mma_type == MmaType.UMMA and self.a_dtype.num_bits == 4 and has_e0m3_operand:
+            scale_group_size = self.input_scale_group_size or self.weight_scale_group_size
+            assert scale_group_size == 16, "E0M3 UMMA requires scale group size 16"
         if self.has_input_scale_2:
             assert self.use_block_scaled_mma, f"{self.input_quant_mode.value} requires block-scaled MMA"
         if self.use_block_scaled_mma and self.is_group_weight_scale and self.input_scale_group_size > 0:

@@ -16,14 +16,14 @@ from humming.testing.process_input import (
     "capability,supported_dtypes",
     [
         ((8, 9), ()),
-        ((10, 0), ("float4e2m1",)),
-        ((10, 3), ("float4e2m1",)),
+        ((10, 0), ("float8e3m4", "float4e0m3", "float4e2m1")),
+        ((10, 3), ("float8e3m4", "float4e0m3", "float4e2m1")),
         ((12, 0), ("float8e3m4", "float4e0m3", "float4e2m1")),
         ((12, 1), ("float8e3m4", "float4e0m3", "float4e2m1")),
     ],
 )
 def test_quantization_support_matches_cubin_patcher(monkeypatch, quant_dtype, capability, supported_dtypes):
-    """Patched formats require SM120/121; ordinary FP4 remains available on SM100+."""
+    """Patched conversion formats are available on SM100/103 and SM120/121."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
 

@@ -360,8 +360,8 @@ def skip_if_process_input_unsupported(quant_dtype=None, group_scale_dtype=None):
         if dtype in (dtypes.float8e4m3, dtypes.float8e5m2) and capability < 89:
             pytest.skip(f"{dtype} requires SM89+")
 
-        if dtype in (dtypes.float8e3m4, dtypes.float4e0m3) and capability not in (120, 121):
-            pytest.skip(f"{dtype} requires SM120 or SM121 cubin patching")
+        if dtype in (dtypes.float8e3m4, dtypes.float4e0m3) and capability not in (100, 103, 120, 121):
+            pytest.skip(f"{dtype} requires SM100/103/120/121 cubin patching")
 
         if dtype == dtypes.float4e2m1 and capability < 100:
             pytest.skip(f"{dtype} requires SM100+")

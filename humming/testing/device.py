@@ -51,6 +51,8 @@ def skip_if_unsupported(
 
     if a_dtype is not None and a_dtype in _A_DTYPE_MIN_SM:
         min_sm = _A_DTYPE_MIN_SM[a_dtype]
+        if mma_type == "umma" and a_dtype in (dtypes.float4e2m1, dtypes.float4e0m3, dtypes.float8e3m4):
+            min_sm = 100
         if sm < min_sm:
             pytest.skip(f"a_dtype {a_dtype} requires SM>={min_sm}, current SM is {sm}")
 

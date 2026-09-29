@@ -1,4 +1,4 @@
-// patch_cubin.cpp - in-place patch an sm_12xa cubin to enable hardware
+// patch_cubin.cpp - in-place patch a Blackwell cubin to enable hardware
 // narrow-float formats that PTX does not expose (only reachable by editing SASS
 // encoding bits).
 //
@@ -22,7 +22,7 @@
 //
 // Only instructions whose riginal bits are the expected base format (E5M2 for
 // e3m4 modes, E2M1 for e0m3 modes) are modified; anything else is skipped.
-// A cubin that is not sm_120a or sm_121a is rejected outright.
+// MMA patches require SM120/121. F2FP conversion patches also support SM100/103.
 //
 // Usage:
 //   patch_cubin <mode> <cubin> [--dry-run] [--backup]
@@ -102,11 +102,11 @@ static T rd(const std::vector<uint8_t> &d, size_t o) {
   return v;
 }
 
-// Accept only EM_CUDA (0xBE) with SM field == 120 or 121. The cubin e_flags are
+// Accept EM_CUDA (0xBE), SM120/121 and SM100/103 for conversion patches. The cubin e_flags are
 // identical for sm_120 / sm_120a / sm_120f (0x06007802), so the a/f suffix
 // cannot be told apart at the ELF level; block-scaled MMA only builds for
 // architecture-specific or family-specific targets anyway.
-static int check_sm12xa(const std::vector<uint8_t> &d, std::string &why) {
+static int check_arch(const std::vector<uint8_t> &d, const Mode &mode, std::string &why) {
   if (d.size() < 64 || d[0] != 0x7f || d[1] != 'E' || d[2] != 'L' || d[3] != 'F') {
     why = "not an ELF/cubin";
     return 1;
@@ -124,9 +124,11 @@ static int check_sm12xa(const std::vector<uint8_t> &d, std::string &why) {
     return 1;
   }
   uint32_t sm = (eflags >> 8) & 0xff;
-  if (sm != 120 && sm != 121) {
-    char b[80];
-    snprintf(b, 80, "target arch SM=%u (e_flags=0x%08x) is not sm_120 or sm_121", sm, eflags);
+  bool is_cvt = mode.kind == K_CVT_E3M4 || mode.kind == K_CVT_E0M3;
+  bool is_sm10x_cvt = (sm == 100 || sm == 103) && is_cvt;
+  if (sm != 120 && sm != 121 && !is_sm10x_cvt) {
+    char b[128];
+    snprintf(b, sizeof(b), "target arch SM=%u (e_flags=0x%08x) does not support patch mode %s", sm, eflags, mode.name);
     why = b;
     return 1;
   }
@@ -279,7 +281,7 @@ static PatchStats run_patch(const std::string &path, const std::string &mode_nam
   }
 
   std::string why;
-  if (check_sm12xa(d, why)) {
+  if (check_arch(d, *mode, why)) {
     st.rc = 3;
     st.message = "refused: " + why;
     return st;
@@ -395,7 +397,7 @@ extern "C" int cubin_patch_buffer(uint8_t *data, size_t n, const char *mode, int
 
   std::vector<uint8_t> d(data, data + n);
   std::string why;
-  if (check_sm12xa(d, why)) return -3;
+  if (check_arch(d, *mode_p, why)) return -3;
 
   std::vector<Sec> secs;
   collect_exec_sections(d, secs);

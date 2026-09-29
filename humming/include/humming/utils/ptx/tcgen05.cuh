@@ -213,10 +213,13 @@ CUDA_INLINE void tcgen05_ld_16x256b_x4(uint32_t address, uint32_t *values) {
 }
 
 
-template <uint32_t kN, uint32_t kGroupSize, bool kScaleIsE4M3, uint32_t kCtaGroupSize = 1>
+template <uint32_t kN, uint32_t kGroupSize, bool kScaleIsE4M3, uint32_t kCtaGroupSize = 1,
+          bool kWeightIsE0M3 = false, bool kInputIsE0M3 = false>
 CUDA_INLINE void tcgen05_mma_mxf4nvf4(uint32_t d, uint32_t a, uint64_t b,
                                       uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate) {
-  constexpr uint32_t descriptor_base = (1u << 7) | (1u << 10) | ((kN / 8) << 17) |
+  static_assert(!(kWeightIsE0M3 || kInputIsE0M3) || kGroupSize == 16, "E0M3 requires block16");
+  // Undocumented E0M3 is format 0; the public E2M1 format is 1.
+  constexpr uint32_t descriptor_base = (uint32_t(!kWeightIsE0M3) << 7) | (uint32_t(!kInputIsE0M3) << 10) | ((kN / 8) << 17) |
                                        (uint32_t(!kScaleIsE4M3) << 23) | (kCtaGroupSize << 27);
   uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29);
   if constexpr (kCtaGroupSize == 2 && kGroupSize == 16) {
