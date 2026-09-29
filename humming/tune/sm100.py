@@ -108,7 +108,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     @classmethod
     def _fits_resources(cls, layer_config, block_shape, num_stages, num_ctas_per_sm):
         block_m, block_n, block_k = block_shape
-        output_groups = math.ceil(block_n / 128)
+        output_groups = block_n // 128
         operand_columns = block_k // 2
         stage_columns = output_groups * (num_stages * operand_columns + block_m)
         tmem_columns = 1 << (stage_columns - 1).bit_length()
@@ -286,7 +286,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             if shape_k % block_k:
                 continue
             k_iters = shape_k // block_k
-            for block_n in (256, 128, 64):
+            for block_n in (256, 128):
                 if shape_n % block_n:
                     continue
                 block_shape = (block_m, block_n, block_k)
@@ -294,14 +294,14 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                 # Narrow short-K grids need more N tiles because splitting K
                 # cannot provide enough work for all SMs.
                 can_fill_grid = output_tiles * k_iters >= num_sms * 4
-                if block_n > 64 and output_tiles < num_sms and not can_fill_grid:
+                if block_n > 128 and output_tiles < num_sms and not can_fill_grid:
                     continue
 
                 for num_ctas_per_sm in (2, 1):
                     resident_ctas = num_sms * num_ctas_per_sm
                     # Two resident CTAs hide latency with a short pipeline.
                     # With one CTA, wider N provides more work per stage.
-                    output_groups = math.ceil(block_n / 128)
+                    output_groups = block_n // 128
                     target_stages = 5 - output_groups - (num_ctas_per_sm - 1)
                     target_stages = min(target_stages, max(2, k_iters))
                     for num_stages in range(target_stages, 1, -1):
@@ -366,10 +366,10 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     def _get_moe_candidates(cls, layer_config: LayerConfig, gemm_type: GemmType) -> tuple:
         candidates = []
         indexed = gemm_type == GemmType.INDEXED
-        for block_n in (256, 128) if layer_config.shape_n % 128 == 0 else (64,):
+        for block_n in (256, 128):
             if layer_config.shape_n % block_n:
                 continue
-            output_groups = math.ceil(block_n / 128)
+            output_groups = block_n // 128
             for block_k in (64,) if layer_config.shape_k % 64 == 0 else (32,):
                 if layer_config.shape_k % block_k:
                     continue
