@@ -241,10 +241,17 @@ class DeviceHeuristics:
 
         # The compute-bound threshold is per expert, so compare tokens per expert.
         # Wider expert blocks (48+ rows) sit near that threshold and keep their config.
+        # FP16 accumulation is left out: dropping K-split warps lengthens each warp's
+        # FP16 accumulation, and keeping them leaves too few stages at low token counts.
+        # Grouped-masked shape_m counts expert capacity, not routed rows, so the tile
+        # count below would include idle experts.
         num_experts = layer_config.num_experts or 0
         is_memory_bound_moe = num_experts > 0 and shape_m / num_experts < compute_bound_min_shape_m
         has_sparse_expert_blocks = block_shape_m <= 32
-        is_supported_moe_case = layer_config.a_dtype.num_bits == 16 and not use_batch_invariant
+        uses_default_compute_mode = not (use_batch_invariant or use_f16_accum)
+        has_routed_row_count = gemm_type != GemmType.GROUPED_MASKED
+        is_supported_moe_case = layer_config.a_dtype.num_bits == 16 and uses_default_compute_mode
+        is_supported_moe_case = is_supported_moe_case and has_routed_row_count
         use_moe_occupancy = cls.moe_occupancy_warps_per_sm > 0 and is_supported_moe_case
         use_moe_occupancy = use_moe_occupancy and is_memory_bound_moe and has_sparse_expert_blocks
         if use_moe_occupancy:
@@ -257,8 +264,16 @@ class DeviceHeuristics:
                 num_sms=num_sms,
                 max_num_stages=max_num_stages,
             )
-            if moe_occupancy_config is not None and moe_occupancy_config[1] > num_ctas_per_sm:
-                block_shape_k, num_ctas_per_sm, num_stages = moe_occupancy_config
+            num_mn_warps = (block_shape_m // warp_shape_m) * (block_shape_n // warp_shape_n)
+            current_warps_per_sm = num_mn_warps * (block_shape_k // warp_shape_k) * num_ctas_per_sm
+            if moe_occupancy_config is not None:
+                fitted_block_shape_k, fitted_ctas_per_sm, _ = moe_occupancy_config
+                fitted_warps_per_sm = (
+                    num_mn_warps * (fitted_block_shape_k // warp_shape_k) * fitted_ctas_per_sm
+                )
+                # Only resident warps hide the latency; the same warps in smaller CTAs do not.
+                if fitted_warps_per_sm > current_warps_per_sm:
+                    block_shape_k, num_ctas_per_sm, num_stages = moe_occupancy_config
 
         use_stream_k = True
         if use_batch_invariant:
@@ -318,8 +333,10 @@ class DeviceHeuristics:
 
         With few tokens per expert, weight loads are latency-bound and hidden by
         resident warps rather than by a deeper pipeline, so prefer several small
-        CTAs per SM over one deep-pipelined CTA. Returns
-        (block_shape_k, num_ctas_per_sm, num_stages) or None if nothing fits.
+        CTAs per SM over one deep-pipelined CTA. K-split warps are dropped until a
+        CTA has at most 4 warps; M/N warps are kept, so a CTA can still have fewer
+        or more than 4 warps. Returns (block_shape_k, num_ctas_per_sm, num_stages)
+        or None if nothing fits.
         """
         max_warps_per_cta = 4
         block_shape_m, block_shape_n, block_shape_k = block_shape
