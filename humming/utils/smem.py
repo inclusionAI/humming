@@ -211,6 +211,8 @@ def estimate_smem_size_layer(
 
     if layer_config.mma_type == MmaType.UMMA:
         add(16, 8)  # Accumulator ready/free
+        if layer_config.use_umma_ss and gemm_type == GemmType.INDEXED:
+            add(16, 8)  # Output row-index buffers released by the epilogue
         add(4, 4)  # TMEM allocation
         operand_barrier_bytes = 8 * (num_stages + max(num_stages, 4))
         add(operand_barrier_bytes, 8)  # Operand ready/free barriers

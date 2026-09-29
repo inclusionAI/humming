@@ -107,8 +107,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     b8_allowed_dtypes = [dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4]
     b4_allowed_dtypes = [dtypes.float4e2m1, dtypes.float4e0m3]
 
-    @classmethod
-    def _fits_resources(cls, layer_config, block_shape, num_stages, num_ctas_per_sm):
+    @staticmethod
+    def _get_tmem_columns(layer_config, block_shape, num_stages, num_ctas_per_sm, cta_group_size=1):
         block_m, block_n, block_k = block_shape
         output_groups = math.ceil(block_n / 128)
         operand_columns = 0 if layer_config.use_umma_ss else block_k * layer_config.a_dtype.num_bits // 32
@@ -118,23 +118,47 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             input_scale_stride = max(4, 1 << (math.ceil(block_m / 32) - 1).bit_length())
             operand_columns += scale_words * (4 + input_scale_stride)
             operand_columns = round_up(operand_columns, 16)
-        stage_columns = output_groups * (num_stages * operand_columns + block_m)
-        tmem_columns = 1 << (stage_columns - 1).bit_length()
-        if tmem_columns * num_ctas_per_sm > 512:
-            # UMMA falls back to two operand buffers when stage-local operands
-            # do not fit. Account for that allocation before checking residency.
-            buffered_columns = output_groups * (2 * operand_columns + block_m)
-            tmem_columns = 1 << (buffered_columns - 1).bit_length()
+        accumulator_columns = (
+            round_up(block_m, 32) if layer_config.use_umma_ss and cta_group_size == 2 else block_m
+        )
+        buffers = 1 if layer_config.use_umma_ss else num_stages
+        columns = output_groups * (buffers * operand_columns + accumulator_columns)
+        tmem_columns = 1 << (columns - 1).bit_length()
+        if not layer_config.use_umma_ss and tmem_columns * num_ctas_per_sm > 512:
+            # TS falls back to two operand buffers; SS copies scales on the
+            # issuer stream and needs only one, independently of stage count.
+            columns = output_groups * (2 * operand_columns + accumulator_columns)
+            tmem_columns = 1 << (columns - 1).bit_length()
+        return tmem_columns
+
+    @classmethod
+    def _fits_resources(
+        cls,
+        layer_config,
+        block_shape,
+        num_stages,
+        num_ctas_per_sm,
+        gemm_type=GemmType.DENSE,
+        cta_group_size=1,
+        output_chunk_rows=0,
+    ):
+        tmem_columns = cls._get_tmem_columns(
+            layer_config, block_shape, num_stages, num_ctas_per_sm, cta_group_size
+        )
         if tmem_columns * num_ctas_per_sm > 512:
             return False
-
+        block_m, _, block_k = block_shape
         smem_size = estimate_smem_size_layer(
             layer_config,
             block_shape,
-            GemmType.DENSE,
+            gemm_type,
             num_stages,
             warp_shape=(block_m, 32, block_k),
             smem_reuse_mode=SmemReuseMode.NONE,
+            use_mbarrier=True,
+            use_warp_spec=True,
+            umma_cta_group_size=cta_group_size,
+            umma_output_chunk_rows=output_chunk_rows,
         )
         return smem_size * num_ctas_per_sm <= cls.max_smem_size
 
@@ -385,62 +409,55 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                 if layer_config.shape_k % block_k:
                     continue
                 k_iters = layer_config.shape_k // block_k
-                for num_ctas in (2, 1) if block_n == 256 else (2,):
-                    weight_columns = block_k * layer_config.a_dtype.num_bits // 32
-                    operand_columns = 0 if layer_config.use_umma_ss else weight_columns
+                residency_choices = (2, 1) if block_n == 256 or layer_config.use_umma_ss else (2,)
+                for num_ctas in residency_choices:
+                    operand_columns = (
+                        0 if layer_config.use_umma_ss else block_k * layer_config.a_dtype.num_bits // 32
+                    )
                     max_block_m = min(256, 512 // (output_groups * num_ctas) - 2 * operand_columns)
                     min_stages = min(3, max(2, k_iters))
-                    for block_m in range(8, max_block_m + 1, 8):
-                        operand_columns = 0 if layer_config.use_umma_ss else weight_columns
-                        if layer_config.use_block_scaled_mma:
-                            scale_group_size = (
-                                layer_config.input_scale_group_size or layer_config.weight_scale_group_size
-                            )
-                            scale_words = math.ceil(block_k / (4 * scale_group_size))
-                            input_scale_stride = max(4, 1 << (math.ceil(block_m / 32) - 1).bit_length())
-                            operand_columns += scale_words * (4 + input_scale_stride)
-                            operand_columns = round_up(operand_columns, 16)
-                        for stages in range(min(4, max(2, k_iters)), min_stages - 1, -1):
-                            stage_columns = output_groups * (block_m + stages * operand_columns)
-                            tmem_columns = 1 << (stage_columns - 1).bit_length()
-                            buffers = stages
-                            if tmem_columns * num_ctas > 512:
-                                buffers = 2
-                                columns = output_groups * (block_m + buffers * operand_columns)
-                                tmem_columns = 1 << (columns - 1).bit_length()
-                            if tmem_columns * num_ctas > 512:
-                                continue
+                    max_stages = min(5 if layer_config.use_umma_ss else 4, max(2, k_iters))
+                    can_cooperate = layer_config.use_umma_ss and num_ctas == 1
+                    can_cooperate &= layer_config.shape_n % (2 * block_n) == 0
+                    for cta_group_size in (1, 2) if can_cooperate else (1,):
+                        for block_m in range(8 * cta_group_size, max_block_m + 1, 8 * cta_group_size):
+                            use_chunks = layer_config.use_umma_ss and (block_m > 32 or cta_group_size == 2)
+                            output_chunk_rows = 32 if use_chunks else 0
                             shape = (block_m, block_n, block_k)
-                            smem_size = estimate_smem_size_layer(
-                                layer_config,
-                                shape,
-                                gemm_type,
-                                stages,
-                                warp_shape=(block_m, 32, block_k),
-                                smem_reuse_mode=SmemReuseMode.NONE,
-                                use_mbarrier=True,
-                                use_warp_spec=True,
-                            )
-                            if smem_size * num_ctas > cls.max_smem_size:
-                                continue
-                            config = {
-                                "mma_type": MmaType.UMMA.value,
-                                "block_shape": shape,
-                                "warp_shape": (block_m, 32, block_k),
-                                "num_stages": stages,
-                                "num_ctas_per_sm": num_ctas,
-                                "smem_reuse_mode": SmemReuseMode.NONE.value,
-                                "use_warp_spec": True,
-                                "use_tma": True,
-                                "use_tma_a": not indexed,
-                                "use_tma_c": not indexed,
-                                "use_stream_k": False,
-                                "use_pdl": False,
-                                "raster_group_m": 1,
-                            }
-                            candidates.append(config)
-                            # Use the deepest legal pipeline for each tile.
-                            break
+                            for stages in range(max_stages, min_stages - 1, -1):
+                                if not cls._fits_resources(
+                                    layer_config,
+                                    shape,
+                                    stages,
+                                    num_ctas,
+                                    gemm_type,
+                                    cta_group_size,
+                                    output_chunk_rows,
+                                ):
+                                    continue
+                                config = {
+                                    "mma_type": MmaType.UMMA.value,
+                                    "block_shape": shape,
+                                    "warp_shape": (block_m, 32, block_k),
+                                    "num_stages": stages,
+                                    "num_ctas_per_sm": num_ctas,
+                                    "smem_reuse_mode": SmemReuseMode.NONE.value,
+                                    "use_warp_spec": True,
+                                    "use_tma": True,
+                                    "use_tma_a": not indexed,
+                                    "use_tma_c": not indexed,
+                                    "use_stream_k": False,
+                                    "use_pdl": False,
+                                    "raster_group_m": 1,
+                                }
+                                if layer_config.use_umma_ss:
+                                    config.update(
+                                        umma_cta_group_size=cta_group_size,
+                                        umma_output_chunk_rows=output_chunk_rows,
+                                    )
+                                candidates.append(config)
+                                # Use the deepest legal pipeline for each tile.
+                                break
         return tuple(candidates)
 
     @classmethod
@@ -462,18 +479,26 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         # The launcher selects grouped kernels using valid_shape_m when supplied.
         counts = cls._sample_expert_rows(shape_m, layer_config.num_experts, cls.expert_probability_cv)
         num_sms = current_device.sm_count
+        typical_expert_rows = float(np.median(counts))
         best_by_residency = {}
         for config in cls._get_moe_candidates(layer_config, gemm_type):
             block_m, block_n, block_k = config["block_shape"]
             num_ctas = config["num_ctas_per_sm"]
-            resident_ctas = num_sms * num_ctas
+            if layer_config.use_umma_ss and num_ctas == 1 and typical_expert_rows < block_m:
+                # Give up the second resident CTA only when a typical expert
+                # fills the wider M tile, rather than mostly padding it.
+                continue
+            cta_group_size = config.get("umma_cta_group_size", 1)
+            resident_ctas = (num_sms // cta_group_size) * num_ctas
             m_tiles = ((counts + block_m - 1) // block_m).sum(axis=1)
-            tiles = m_tiles * (layer_config.shape_n // block_n)
+            tiles = m_tiles * (layer_config.shape_n // (block_n * cta_group_size))
             waves = (tiles + resident_ctas - 1) // resident_ctas
 
             k_iters = layer_config.shape_k // block_k
             stages = config["num_stages"]
             data_parallel_work = waves * k_iters
+            if cta_group_size == 2 and data_parallel_work.mean() < 4 * stages:
+                continue
             work = data_parallel_work
             use_stream_k = False
             if not use_batch_invariant:

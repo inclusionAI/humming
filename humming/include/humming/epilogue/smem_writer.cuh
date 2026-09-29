@@ -238,7 +238,7 @@ public:
       uint32_t upper[16];
       uint32_t rows = MIN(32, WarpShape::M - m * 32);
       if (has_output) mma.load_output_chunk(m, rows, lower, upper);
-      if constexpr (kChunked && !Ctx::kIsIndexedGemm) {
+      if constexpr (kChunked && (!Ctx::kIsIndexedGemm || MMA::kCanOverlapAccumulators)) {
         if (step + 1 == MMA::kAccumulatorReleaseChunks && ctx.math_group + 1 == MMA::kOutputGroups) {
           tcgen05_fence_before_thread_sync();
           ctx.sync_math_threads();

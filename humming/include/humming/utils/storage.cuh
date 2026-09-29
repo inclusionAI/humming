@@ -177,8 +177,12 @@ public:
                                                     BlockShape::N >= 128 && BlockShape::K % (4 * MAX(1u, kGroupSizeB)) == 0;
   static constexpr uint32_t kUmmaWeightScaleScratchRows = kUseUmmaDirectWeightScale ? 0 : kUmmaWeightScaleRows;
   static constexpr uint32_t kUmmaInputScaleRows = CEIL_DIV(BlockShape::M, 128) * 128;
+  // Keep contiguous scale vectors intact during indexed cp.async gathers.
+  // Only the stage layout changes; the input tensor keeps its original layout.
+  static constexpr bool kUseUmmaRowMajorSmemInputScale = LayerConfig::kUseUmmaSs && kIsIndexedGemm && kIsGroupInputScale &&
+                                                         BlockShape::K % (16 * MAX(1u, kGroupSizeA)) == 0;
   static constexpr bool kUseUmmaInplaceInputScale = LayerConfig::kUseUmmaSs && kIsGroupInputScale &&
-                                                     BlockShape::M % 128 == 0;
+                                                    BlockShape::M % 128 == 0;
   static constexpr uint32_t kUmmaInputScaleScratchRows = kUseUmmaInplaceInputScale ? 0 : kUmmaInputScaleRows;
   static constexpr uint32_t kStageSizeUmmaScales = LayerConfig::kUseUmmaSs && kUseBlockScaledMma
                                                        ? kUmmaScaleWords * (kUmmaWeightScaleScratchRows + kUmmaInputScaleScratchRows) / 4
@@ -256,6 +260,9 @@ public:
   IF_USE_WARP_SPEC(uint64_t math_mbar[kNumMathMbarriers];)
   IF_USE_UMMA(uint64_t umma_accumulator_ready;)
   IF_USE_UMMA(uint64_t umma_accumulator_free;)
+#if HUMMING_USE_UMMA_SS
+  IF_IS_INDEXED_GEMM(uint64_t umma_row_index_free[2];)
+#endif
   IF_USE_UMMA(uint32_t umma_tmem_col;)
   IF_USE_UMMA(uint64_t umma_operand_ready[kNumStages];)
   IF_USE_UMMA(uint64_t umma_operand_free[MAX(kNumStages, 4)];)

@@ -45,13 +45,20 @@ and uses scratch storage otherwise. Scale copies and MMA instructions share
 one issuer and one TMEM scale buffer. With separate TMA loading warps, AS has
 its own completion barrier. When scales can be prepared without reading B/BS,
 two-CTA SS loads publish A/B completion to the issuer through cooperative TMA;
-the scale warp can prepare AS before those operands finish loading.
+the scale warp can prepare AS before those operands finish loading. Indexed SS
+keeps all activation-loading threads on cp.async and tracks TMA weight completion
+separately, so scale preparation can overlap B/BS loading.
 
 With chunked output, separate output storage and non-indexed scheduling, SS
 uses the available TMEM capacity for an overlapping accumulator pair. The
 epilogue reads overlapping rows first so the next tile can begin computing.
 Native FP4 SS stages whose K size is a multiple of 256 use K64+96+96 issues
 per 256 elements. Other stage sizes retain the standard instruction shape.
+Indexed SS also overlaps chunked output with the next accumulator tile; row-index
+buffers are released separately after output scatter finishes. MoE selection
+accounts for SS's single scale buffer, chunked output, and cooperative CTA pairs.
+It retains whole-tile output for small M tiles and uses sampled expert sizes and
+available work to avoid underfilled tiles and short cooperative pipelines.
 These optimizations are selected internally; TS keeps its existing schedule.
 SS remains opt-in; a smaller thread count does not guarantee a faster kernel.
 

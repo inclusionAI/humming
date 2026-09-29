@@ -68,6 +68,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   constexpr bool kCooperative = Ctx::kUmmaCtaGroupSize == 2;
   constexpr bool kHasChannelZeroPoint = Ctx::kHasZeroPoint && Ctx::kIsChannelWeightScale;
   constexpr uint32_t kChannelConsumers = kHasChannelZeroPoint ? 128 + kNumDequantThreads : 128;
+  constexpr bool kEarlyAsyncScales = Ctx::kUseUmmaAsyncActivationLoads && Ctx::kCanPrepareScalesBeforeWeights &&
+                                     (Ctx::kUmmaCtaGroupSize == 1 || Ctx::kUseUmmaCooperativeTma);
+  constexpr bool kOverlapIndexedEpilogue = Ctx::kIsIndexedGemm && MMA::kCanOverlapAccumulators;
   constexpr bool kSeparateOutputStorage = Ctx::kSmemReuseMode == SmemReuseMode::NONE;
   constexpr bool kNeedsEpilogueGate = !kSeparateOutputStorage || Consumer::kHasChannelData;
 
@@ -91,7 +94,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     __mbarrier_init(&smem.umma_operand_ready[threadIdx.x], (kNumDequantThreads + kNumReadinessThreads) * Ctx::kUmmaCtaGroupSize);
     if constexpr (Ctx::kUseUmmaSeparateInputScale && Ctx::kIsGroupInputScale)
       __mbarrier_init(&smem.umma_input_scale_ready[threadIdx.x], 1);
-    if constexpr (Ctx::kUseUmmaSplitLoads) {
+    if constexpr (Ctx::kUseUmmaSplitLoads || Ctx::kUseUmmaAsyncActivationLoads) {
       __mbarrier_init(&smem.umma_weight_ready[threadIdx.x], 1);
       if constexpr (!Ctx::kUseUmmaSs)
         __mbarrier_init(&smem.umma_weight_free[threadIdx.x], kNumDequantThreads);
@@ -99,6 +102,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   }
   if constexpr (!Ctx::kUseUmmaSs)
     if (threadIdx.x < kNumOperandBuffers) __mbarrier_init(&smem.umma_operand_free[threadIdx.x], 1);
+  if constexpr (kOverlapIndexedEpilogue)
+    if (threadIdx.x < 2) __mbarrier_init(&smem.umma_row_index_free[threadIdx.x], 1);
   if (threadIdx.x == 0) {
     __mbarrier_init(&smem.umma_accumulator_ready, 1);
     __mbarrier_init(&smem.umma_accumulator_free, Ctx::kUmmaCtaGroupSize);
@@ -143,6 +148,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     auto run_load_warp = [&](auto is_weight_warp) {
       while (true) {
         if constexpr (!kSeparateOutputStorage) producer.wait_math_epilogue();
+        if constexpr (kOverlapIndexedEpilogue) {
+          if (tile_index >= 2)
+            mbarrier_wait(&smem.umma_row_index_free[tile_index % 2], ((tile_index / 2) - 1) % 2);
+        }
         if (!next_tile()) break;
         producer.seek(scheduler.expert_id, scheduler.m_block_id, scheduler.n_block_id,
                       scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
@@ -160,7 +169,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           else producer.load_activation_stage(pipeline_stage);
           advance_stage();
         }
-        if constexpr (Ctx::kIsIndexedGemm) {
+        if constexpr (Ctx::kIsIndexedGemm && !kOverlapIndexedEpilogue) {
           // Issuing this tile implies the preceding output has finished reading
           // its row indices. The producer may now reuse that index buffer.
           uint32_t last_stage = (pipeline_stage + kNumStages - 1) % kNumStages;
@@ -185,7 +194,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 #pragma unroll 4
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           mbarrier_wait(&smem.umma_operand_ready[pipeline_stage], pipeline_phase);
-          if constexpr (Ctx::kUseUmmaCooperativeTma)
+          if constexpr (kEarlyAsyncScales)
+            mbarrier_wait(&smem.umma_weight_ready[pipeline_stage], pipeline_phase);
+          else if constexpr (Ctx::kUseUmmaCooperativeTma)
             mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
           uint32_t buffer = operand_step % kNumOperandBuffers;
           tcgen05_fence_after_thread_sync();
@@ -224,7 +235,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         } else mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
         if constexpr (!Ctx::kUseTmaA) tma_fence_async_shared();
         if constexpr (Ctx::kUseUmmaSs) {
-          if constexpr (Ctx::kUseUmmaSplitLoads && !Ctx::kUseUmmaCooperativeTma)
+          constexpr bool kWaitSplitWeights = Ctx::kUseUmmaSplitLoads && !Ctx::kUseUmmaCooperativeTma;
+          constexpr bool kWaitAsyncWeights = Ctx::kUseUmmaAsyncActivationLoads && !kEarlyAsyncScales;
+          if constexpr (kWaitSplitWeights || kWaitAsyncWeights)
             mbarrier_wait(&smem.umma_weight_ready[pipeline_stage], pipeline_phase);
           uint32_t buffer = operand_step % kNumOperandBuffers;
           mma.set_operand_buffer(buffer);
@@ -368,7 +381,12 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         ctx.sync_math_threads();
         if constexpr (!Ctx::kUmmaOutputChunkRows)
           epilogue.gmem_writer.write(scheduler.slice_id, scheduler.slice_count, 0);
-        if constexpr (Ctx::kIsIndexedGemm) release_accumulator();
+        if constexpr (kOverlapIndexedEpilogue) {
+          // Accumulators may be reused before output scatter finishes. Return
+          // the row-index slot only after all epilogue threads stop reading it.
+          ctx.sync_math_threads();
+          if (ctx.math_thread_id() == 0) mbarrier_arrive(&smem.umma_row_index_free[tile_index % 2]);
+        } else if constexpr (Ctx::kIsIndexedGemm) release_accumulator();
         if (scheduler.slice_count > 1) epilogue.release_gmem_barrier();
         if constexpr (!kSeparateOutputStorage) {
           if constexpr (Ctx::kUseTmaC) tma_wait_store_group<0, true>();

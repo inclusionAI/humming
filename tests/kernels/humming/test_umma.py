@@ -13,7 +13,7 @@ from humming.schema import HummingWeightSchema
 from humming.testing import KernelTestCase, KernelTestRunner
 from humming.testing.data import generate_moe_tensors, generate_random_tensor
 from humming.tune import get_heuristics_config
-from humming.tune.sm100 import Sm100Heuristics
+from humming.tune.sm100 import Sm100Heuristics, Sm100UmmaHeuristics
 
 WEIGHT_CONFIGS = {
     "uint4": dict(b_dtype="uint4", weight_scale_group_size=128),
@@ -1489,12 +1489,18 @@ def test_umma_secondary_input_scale(gemm_type, cta_group_size, quant_mode, has_c
         (dtypes.float4e2m1, dtypes.float4e2m1, 16, GemmType.DENSE, 512),
         (dtypes.float8e4m3, dtypes.float4e2m1, 32, GemmType.DENSE, 64),
         (dtypes.float8e4m3, dtypes.float6e3m2, 32, GemmType.DENSE, 192),
+        (dtypes.float4e2m1, dtypes.float4e2m1, None, GemmType.INDEXED, 1024),
+        (dtypes.float4e2m1, dtypes.float4e2m1, None, GemmType.GROUPED_CONTIGUOUS, 1024),
+        (dtypes.float4e0m3, dtypes.float4e0m3, None, GemmType.GROUPED_MASKED, 1024),
+        (dtypes.float8e4m3, dtypes.float4e2m1, None, GemmType.INDEXED, 512),
     ),
 )
 def test_umma_ss_small_tile(dtype, weight_dtype, block_m, gemm_type, shape_k, monkeypatch):
     block_k = 128 if dtype.num_bits == 4 else 64
 
     def select_config(layer_config, shape_m, gemm_type, **kwargs):
+        if block_m is None:
+            return Sm100UmmaHeuristics.get_config(layer_config, shape_m, gemm_type=gemm_type)
         return dict(
             mma_type="umma",
             block_shape=(block_m, 64, block_k),
@@ -1529,11 +1535,14 @@ def test_umma_ss_small_tile(dtype, weight_dtype, block_m, gemm_type, shape_k, mo
     case = KernelTestCase(
         name="ss-small-tile",
         layer_config=config,
-        compute_config=ComputeConfig(gemm_type=gemm_type),
+        compute_config=ComputeConfig(
+            gemm_type=gemm_type,
+            use_m_major_input_scale=block_m is None and gemm_type != GemmType.INDEXED,
+        ),
         top_k=2,
         seed=2026,
     )
-    _assert_results(case, (1, 137))
+    _assert_results(case, (1, 137, 833) if block_m is None else (1, 137))
 
 
 @pytest.mark.parametrize("input_group,weight_group", ((0, 32), (32, 0)))

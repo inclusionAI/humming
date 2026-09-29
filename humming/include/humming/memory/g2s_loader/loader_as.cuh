@@ -6,6 +6,7 @@
 template <class Ctx, bool kSecondary = false>
 class G2SMemoryLoaderAS {
 private:
+  using SharedStorage = typename Ctx::SharedStorage;
   using ProblemShape = typename Ctx::ProblemShape;
   using BlockShape = typename Ctx::BlockShape;
   using PadShape = typename Ctx::PadShape;
@@ -83,10 +84,30 @@ public:
     if constexpr (kUseMxScale) {
       if constexpr (kUseTma) load_mx_tma(smem_ptr, mbar_ptr);
       else if constexpr (kMMajorInputScale) load_mx_legacy_m_major(smem_ptr);
+      else if constexpr (SharedStorage::kUseUmmaRowMajorSmemInputScale) load_mx_legacy_row_major(smem_ptr);
       else load_mx_legacy(smem_ptr);
     } else if constexpr (kUseTma) load_tma(smem_ptr, mbar_ptr);
     else load_legacy(smem_ptr);
     if constexpr (kShouldAdvance) advance();
+  }
+
+  CUDA_INLINE void load_mx_legacy_row_major(void *smem_ptr) {
+    constexpr uint32_t kNumVectors = BlockShape::K / (sizeof(int4) * kGroupSize);
+    constexpr uint32_t kGmemStride = ProblemShape::K / (sizeof(int4) * kGroupSize);
+    auto *destination = reinterpret_cast<int4 *>(smem_ptr);
+    const auto *source = reinterpret_cast<const int4 *>(gmem_ptr);
+    PRAGMA_UNROLL
+    for (uint32_t i = 0; i < kRowLoadIters; i++) {
+      uint32_t row = i * kNumLoadThreads + ctx.load_thread_id();
+      uint32_t source_row = load_row_index[i];
+      PRAGMA_UNROLL
+      for (uint32_t vector = 0; vector < kNumVectors; vector++) {
+        legacy_load_pred<kUseCpAsync>(
+            source + source_row * kGmemStride + vector,
+            destination + row * kNumVectors + vector,
+            row < BlockShape::M && source_row < shape_m);
+      }
+    }
   }
 
   CUDA_INLINE void load_mx_legacy(void *smem_ptr) {

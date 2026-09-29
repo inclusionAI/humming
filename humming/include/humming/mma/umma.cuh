@@ -45,7 +45,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
           ? kAvailableGroupColumns - kAccumulatorColumn - kAccumulatorStorageColumns
           : 0;
   static constexpr bool kCanOverlapAccumulators = Ctx::kUseUmmaSs && Ctx::kUmmaOutputChunkRows != 0 &&
-                                                  Ctx::kSmemReuseMode == SmemReuseMode::NONE && !Ctx::kIsIndexedGemm;
+                                                  Ctx::kSmemReuseMode == SmemReuseMode::NONE;
   static constexpr uint32_t kAccumulatorStride = kCanOverlapAccumulators
                                                      ? MIN(WarpShape::M, kSpareAccumulatorColumns) / 32 * 32
                                                      : 0;
@@ -178,7 +178,10 @@ struct UMMA : WMMA<Ctx, ArithClass> {
             if (m < BlockShape::M) {
               uint32_t row = m;
               if constexpr (Ctx::kIsGroupedGemm && Ctx::kUseMMajorInputScale) row += m_offset % 4;
-              packed = scales[word * SharedStorage::kScaleBlockM + row] >> (phase * 8);
+              uint32_t index;
+              if constexpr (SharedStorage::kUseUmmaRowMajorSmemInputScale) index = row * kScaleWords + word;
+              else index = word * SharedStorage::kScaleBlockM + row;
+              packed = scales[index] >> (phase * 8);
             }
           }
           values[column] = packed;

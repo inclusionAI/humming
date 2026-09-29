@@ -61,6 +61,7 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kUseBlockScaledMma = LayerConfig::kUseBlockScaledMma;
   static constexpr bool kUseUmmaSplitLoads = false;
   static constexpr bool kUseUmmaSeparateInputScale = false;
+  static constexpr bool kUseUmmaAsyncActivationLoads = false;
   static constexpr bool kUseUmmaCooperativeTma = false;
 
   static constexpr bool kUsePackedKLayout = LayerConfig::kUsePackedKLayout;
@@ -145,11 +146,12 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
   static constexpr bool kHasTmaActivationLoads = Base::kUseTmaA && kCanSplitInputScaleLoad;
   static constexpr bool kUseUmmaSplitLoads = kHasTmaActivationLoads && kHasTmaWeightLoads;
   static constexpr bool kUseUmmaSeparateInputScale = Base::kUseUmmaSs && kUseUmmaSplitLoads;
+  static constexpr bool kUseUmmaAsyncActivationLoads = Base::kUseUmmaSs && !Base::kUseTmaA && kHasTmaWeightLoads;
   // A cooperative completion is consumed by the issuer. Scale preparation must
   // not need generic reads of B/BS in the other CTA before that completion.
   static constexpr bool kCanPrepareScalesBeforeWeights =
       !Base::kUseBlockScaledMma || !Base::kIsGroupWeightScale || Base::SharedStorage::kUseUmmaDirectWeightScale;
-  static constexpr bool kUseUmmaCooperativeTma = kUseUmmaSeparateInputScale &&
+  static constexpr bool kUseUmmaCooperativeTma = (kUseUmmaSeparateInputScale || kUseUmmaAsyncActivationLoads) &&
                                                  Base::kUmmaCtaGroupSize == 2 && kCanPrepareScalesBeforeWeights && !Base::kHasZeroPoint &&
                                                  Base::kMultiCastSizeA == 1 && Base::kMultiCastSizeB == 1;
   static constexpr uint32_t kLoadThreadOffset = 0;

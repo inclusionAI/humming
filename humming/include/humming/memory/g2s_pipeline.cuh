@@ -192,7 +192,9 @@ public:
       if (thread_id < kNumStages) {
         constexpr uint32_t cp_async_thread_count = kHasStageCpAsyncMBarrier ? kNumLoadThreads : 0;
         constexpr uint32_t tma_thread_count = kHasStageTmaMBarrier ? 1 : 0;
-        count = Ctx::kUseUmmaCooperativeTma ? 2 : cp_async_thread_count + tma_thread_count;
+        if constexpr (Ctx::kUseUmmaAsyncActivationLoads)
+          count = kNumLoadThreads + (kIsGroupInputScale && kUseTmaAS ? 1 : 0);
+        else count = Ctx::kUseUmmaCooperativeTma ? 2 : cp_async_thread_count + tma_thread_count;
       } else if (thread_id == kNumStages) {
         constexpr uint32_t cp_async_thread_count = kHasFirstStageCpAsyncMBarrier ? kNumLoadThreads : 0;
         constexpr uint32_t tma_thread_count = kHasFirstStageTmaMBarrier ? 1 : 0;
@@ -222,6 +224,20 @@ public:
   CUDA_INLINE void load_stage(uint32_t stage_id, bool pred = true) {
     stage_id = stage_id % kNumStages;
     auto &smem = ctx.smem;
+    if constexpr (Ctx::kUseUmmaAsyncActivationLoads) {
+      // All loading threads gather A/AS; only the elected TMA loading thread
+      // submits B/BS. Keep their completions separate without halving A bandwidth.
+      if (pred) {
+        load_weight_stage<kShouldAdvance>(stage_id);
+        loader_a.template load<kShouldAdvance>(smem.stages[stage_id].a, &smem.load_mbar[stage_id], stage_id);
+        if constexpr (kIsGroupInputScale)
+          loader_as.template load<kShouldAdvance>(smem.stages[stage_id].as, &smem.load_mbar[stage_id]);
+      }
+      commit_cp_async_load<true>(stage_id, pred);
+      if constexpr (kIsGroupInputScale && kUseTmaAS)
+        if (pred) expect_tma_load<true>(&smem.load_mbar[stage_id], SharedStorage::kStageBytesAS);
+      return;
+    }
 
     uint32_t mbar_index = kIsFirst ? kNumStages : stage_id;
     constexpr uint2 load_bytes = get_stage_load_bytes<kIsFirst>();
@@ -257,7 +273,8 @@ public:
   template <bool kShouldAdvance = true>
   CUDA_INLINE void load_weight_stage(uint32_t stage_id) {
     auto &stage = ctx.smem.stages[stage_id];
-    auto *weight_mbar = Ctx::kUseUmmaCooperativeTma ? &ctx.smem.load_mbar[stage_id] : &ctx.smem.umma_weight_ready[stage_id];
+    constexpr bool kJoinActivation = Ctx::kUseUmmaCooperativeTma && !Ctx::kUseUmmaAsyncActivationLoads;
+    auto *weight_mbar = kJoinActivation ? &ctx.smem.load_mbar[stage_id] : &ctx.smem.umma_weight_ready[stage_id];
     loader_b.template load<kShouldAdvance>(stage.b, weight_mbar);
     uint32_t bytes = SharedStorage::kStageLoadBytesB;
     if constexpr (kIsGroupWeightScale || kIsBlockWeightScale) {
