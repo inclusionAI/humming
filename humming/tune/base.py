@@ -344,7 +344,8 @@ class DeviceHeuristics:
         the N tile is halved to get more of them. K-split warps are dropped until a
         CTA has at most 4 warps by halving the K tile, down to one 128-byte row of
         activations and then widening the warp K step, unless halving the K tile
-        further (less shared memory per stage) fits more CTAs. Warps along M
+        further, or narrowing the warp K step as well, fits more CTAs (less shared
+        memory per stage). Warps along M
         dequantize the same weight tile, so they are merged whenever the merged CTA
         still fits twice per SM; otherwise M/N warps are kept and the config must add
         resident warps. Merged CTAs keep 3 stages and the others at most a third of
@@ -382,6 +383,10 @@ class DeviceHeuristics:
         while halved_block_shape_k > warp_shape_k and not has_few_warps(halved_block_shape_k, warp_shape_k):
             halved_block_shape_k = halved_block_shape_k // 2
         k_shapes = [(fitted_block_shape_k, fitted_warp_shape_k), (halved_block_shape_k, warp_shape_k)]
+        # The narrowest K step, one warp deep, for when shared memory rather than warps limits the CTAs.
+        narrow_shape_k = 512 // layer_config.a_dtype.num_bits
+        if narrow_shape_k < warp_shape_k and has_few_warps(narrow_shape_k, narrow_shape_k):
+            k_shapes.append((narrow_shape_k, narrow_shape_k))
 
         def fit_best(merge_m_warps):
             best = None

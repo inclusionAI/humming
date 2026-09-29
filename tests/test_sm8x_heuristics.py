@@ -97,7 +97,7 @@ def _make_moe_layer_config(shape_n, shape_k, num_experts, weight_format="nvfp4",
 
 def _get_config_without_rule(monkeypatch, heuristics_cls, layer_config, shape_m, **kwargs):
     with monkeypatch.context() as patch:
-        patch.setattr(Sm80Heuristics, "moe_occupancy_warps_per_sm", 0)
+        patch.setattr(heuristics_cls, "moe_occupancy_warps_per_sm", 0)
         return heuristics_cls.get_config(layer_config, shape_m=shape_m, **kwargs)
 
 
@@ -106,7 +106,7 @@ def _get_warps_per_cta(config):
     return math.prod(block // warp for block, warp in zip(block_shape, warp_shape, strict=True))
 
 
-@pytest.mark.parametrize("weight_format", ["nvfp4", "mxfp4", "uint4-g128"])
+@pytest.mark.parametrize("weight_format", ["nvfp4", "mxfp4", "uint4-g128", "uint8-channel"])
 @pytest.mark.parametrize("gemm_type", [GemmType.INDEXED, GemmType.GROUPED_CONTIGUOUS])
 @pytest.mark.parametrize(
     "shape_n, shape_k, num_experts, shape_m",
@@ -134,8 +134,10 @@ def test_sm80_memory_bound_moe_uses_more_ctas(
     warps_per_cta = _get_warps_per_cta(config)
     baseline_warps_per_sm = _get_warps_per_cta(baseline_config) * baseline_config["num_ctas_per_sm"]
     smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, config["num_stages"])
+    # Merged M warps dequantize each weight tile once, which pays off without more warps.
+    merges_m_warps = block_shape[0] == warp_shape[0] > 16
     assert config["num_ctas_per_sm"] > 1
-    assert warps_per_cta * config["num_ctas_per_sm"] > baseline_warps_per_sm
+    assert merges_m_warps or warps_per_cta * config["num_ctas_per_sm"] > baseline_warps_per_sm
     assert config["num_stages"] >= 3
     assert not config["use_stream_k"]
     assert warps_per_cta * config["num_ctas_per_sm"] <= Sm80Heuristics.moe_occupancy_warps_per_sm
@@ -170,8 +172,6 @@ def test_sm80_memory_bound_moe_uses_more_ctas(
         # Sm100Heuristics inherits from Sm80Heuristics and falls back to its MMA configs.
         pytest.param(dict(heuristics_cls=Sm100Heuristics), dict(), id="sm100"),
         pytest.param(dict(gemm_type=GemmType.GROUPED_MASKED), dict(), id="grouped-masked"),
-        # 8-bit weight tiles only fit two 4-warp CTAs, i.e. the same 8 resident warps.
-        pytest.param(dict(weight_format="uint8-channel"), dict(), id="no-resident-warp-gain"),
     ],
 )
 def test_sm80_moe_occupancy_exclusions(sm80_device, monkeypatch, excluded, control):
@@ -271,16 +271,17 @@ def test_sm80_moe_occupancy_stages_follow_k_iterations(sm80_device):
 
 def test_sm80_moe_occupancy_shared_memory_fallback(sm80_device, monkeypatch):
     layer_config = _make_moe_layer_config(1280, 2560, 512)
-    small_cta_smem_size = estimate_smem_size_layer(layer_config, (16, 256, 64), GemmType.INDEXED, 3)
+    narrow_cta_smem_size = estimate_smem_size_layer(layer_config, (16, 256, 32), GemmType.INDEXED, 3)
 
-    # Room for three 3-stage 4-warp CTAs: 12 resident warps instead of 8.
-    monkeypatch.setattr(Sm80Heuristics, "max_smem_size", 3 * small_cta_smem_size)
+    # Room for three 3-stage 4-warp CTAs of the narrowest K tile: 12 resident warps instead of 8.
+    monkeypatch.setattr(Sm80Heuristics, "max_smem_size", 3 * narrow_cta_smem_size)
     three_cta_config = Sm80Heuristics.get_config(layer_config, shape_m=160, gemm_type=GemmType.INDEXED)
+    assert three_cta_config["block_shape"][2] == three_cta_config["warp_shape"][2] == 32
     assert three_cta_config["num_ctas_per_sm"] == 3
     assert three_cta_config["num_stages"] == 3
 
-    # Two CTAs would hold the same 8 warps as the previous config, so it is kept.
-    monkeypatch.setattr(Sm80Heuristics, "max_smem_size", 3 * small_cta_smem_size - 1)
+    # Without room for two CTAs even of the narrowest K tile, the previous config is kept.
+    monkeypatch.setattr(Sm80Heuristics, "max_smem_size", 2 * narrow_cta_smem_size - 1)
     config = Sm80Heuristics.get_config(layer_config, shape_m=160, gemm_type=GemmType.INDEXED)
     baseline_config = _get_config_without_rule(
         monkeypatch, Sm80Heuristics, layer_config, 160, gemm_type=GemmType.INDEXED
