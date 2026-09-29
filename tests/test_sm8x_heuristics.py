@@ -7,6 +7,7 @@ from humming.config import GemmType, LayerConfig
 from humming.device import DeviceInfo
 from humming.tune.sm8x import Sm80Heuristics, Sm86Heuristics, Sm87Heuristics, Sm89Heuristics
 from humming.tune.sm100 import Sm100Heuristics
+from humming.tune.sm120 import Sm120Heuristics
 from humming.utils.smem import estimate_smem_size_layer
 
 
@@ -171,6 +172,8 @@ def test_sm80_memory_bound_moe_uses_more_ctas(
         pytest.param(dict(heuristics_cls=Sm87Heuristics), dict(), id="sm87"),
         # Sm100Heuristics inherits from Sm80Heuristics and falls back to its MMA configs.
         pytest.param(dict(heuristics_cls=Sm100Heuristics), dict(), id="sm100"),
+        # Sm120Heuristics inherits from Sm89Heuristics, which has the rule.
+        pytest.param(dict(heuristics_cls=Sm120Heuristics), dict(), id="sm120"),
         pytest.param(dict(gemm_type=GemmType.GROUPED_MASKED), dict(), id="grouped-masked"),
     ],
 )
@@ -287,3 +290,40 @@ def test_sm80_moe_occupancy_shared_memory_fallback(sm80_device, monkeypatch):
         monkeypatch, Sm80Heuristics, layer_config, 160, gemm_type=GemmType.INDEXED
     )
     assert config == baseline_config
+
+
+SM86_MOE_CASES = [
+    *[
+        (fmt, n, k, 160)
+        for fmt in ("nvfp4", "mxfp4", "uint4-g128", "uint8-channel")
+        for n, k in ((1280, 2560), (2560, 640))
+    ],
+    # 32-row expert blocks; 8-bit weights leave room for only one merged CTA in 99 KB.
+    *[(fmt, 1280, 2560, 10240) for fmt in ("nvfp4", "mxfp4", "uint4-g128")],
+]
+
+
+@pytest.mark.usefixtures("_mock_rtx3080_device")
+@pytest.mark.parametrize("heuristics_cls", [Sm86Heuristics, Sm89Heuristics])
+@pytest.mark.parametrize("weight_format, shape_n, shape_k, shape_m", SM86_MOE_CASES)
+def test_sm86_memory_bound_moe_uses_more_ctas(
+    monkeypatch, heuristics_cls, weight_format, shape_n, shape_k, shape_m
+):
+    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
+    layer_config = _make_moe_layer_config(shape_n, shape_k, 512, weight_format)
+
+    config = heuristics_cls.get_config(layer_config, shape_m=shape_m, gemm_type=GemmType.INDEXED)
+    baseline_config = _get_config_without_rule(
+        monkeypatch, heuristics_cls, layer_config, shape_m, gemm_type=GemmType.INDEXED
+    )
+
+    warps_per_cta = _get_warps_per_cta(config)
+    baseline_warps_per_sm = _get_warps_per_cta(baseline_config) * baseline_config["num_ctas_per_sm"]
+    smem_size = estimate_smem_size_layer(
+        layer_config, config["block_shape"], GemmType.INDEXED, config["num_stages"]
+    )
+    assert config["num_ctas_per_sm"] > 1
+    assert warps_per_cta * config["num_ctas_per_sm"] >= baseline_warps_per_sm
+    assert config["num_stages"] == 3
+    assert not config["use_stream_k"]
+    assert smem_size * config["num_ctas_per_sm"] <= heuristics_cls.max_smem_size

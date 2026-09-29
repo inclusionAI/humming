@@ -49,6 +49,7 @@ class Sm80Heuristics(DeviceHeuristics):
 class Sm86Heuristics(DeviceHeuristics):
     max_smem_size: int = 99 * 1024
     sm_version: int = 86
+    moe_occupancy_warps_per_sm: int = 16
     b16_allowed_dtypes: list[dtypes.DataType] = [dtypes.float16, dtypes.bfloat16]
     b8_allowed_dtypes: list[dtypes.DataType] = [dtypes.int8]
     b4_allowed_dtypes: list[dtypes.DataType] = [dtypes.int4]
