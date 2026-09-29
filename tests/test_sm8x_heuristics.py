@@ -70,6 +70,7 @@ def sm80_device(request, monkeypatch):
     monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: 80))
     monkeypatch.setattr(DeviceInfo, "memory_bandwidth_gbps", property(lambda self: memory_bandwidth))
     monkeypatch.setattr(DeviceInfo, "tensorcore_tops", property(lambda self: tensorcore_tops))
+    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
     return sm_count
 
 
@@ -135,6 +136,7 @@ def test_sm80_memory_bound_moe_uses_more_ctas(
     assert config["num_ctas_per_sm"] > 1
     assert warps_per_cta * config["num_ctas_per_sm"] > baseline_warps_per_sm
     assert config["num_stages"] >= 3
+    assert not config["use_stream_k"]
     assert warps_per_cta * config["num_ctas_per_sm"] <= Sm80Heuristics.moe_occupancy_warps_per_sm
     assert warps_per_cta <= 4 or num_k_warps == 1
     assert shape_k % block_shape[2] == 0
@@ -209,6 +211,59 @@ def test_sm80_moe_occupancy_expert_block_boundary(sm80_device):
     assert config_32_rows["num_ctas_per_sm"] > 1
     assert config_48_rows["block_shape"][0] == 48
     assert config_48_rows["num_ctas_per_sm"] == 1
+
+
+def test_sm80_moe_occupancy_merges_m_warps_within_register_file(sm80_device, monkeypatch):
+    layer_config = _make_moe_layer_config(1280, 2560, 512)
+
+    # 32-row expert blocks: 8 warps of 16x64 become 4 warps of 32x64, whose
+    # accumulators leave room for three CTAs in the register file.
+    config = Sm80Heuristics.get_config(layer_config, shape_m=10240, gemm_type=GemmType.INDEXED)
+    assert config["block_shape"][0] == config["warp_shape"][0] == 32
+    assert _get_warps_per_cta(config) == 4
+    assert config["num_ctas_per_sm"] == 3
+
+    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 2 * 65536))
+    config = Sm80Heuristics.get_config(layer_config, shape_m=10240, gemm_type=GemmType.INDEXED)
+    assert config["num_ctas_per_sm"] == 4
+
+
+def test_sm80_moe_occupancy_splits_n_when_tile_starved(sm80_device):
+    # 32 expert blocks x 5 N tiles is fewer than three tiles per SM.
+    layer_config = _make_moe_layer_config(1280, 2560, 512)
+    starved_config = Sm80Heuristics.get_config(layer_config, shape_m=32, gemm_type=GemmType.INDEXED)
+    config = Sm80Heuristics.get_config(layer_config, shape_m=160, gemm_type=GemmType.INDEXED)
+
+    assert starved_config["block_shape"][1] == config["block_shape"][1] // 2
+    assert starved_config["warp_shape"][1] == config["warp_shape"][1] // 2
+    assert _get_warps_per_cta(starved_config) == _get_warps_per_cta(config) == 4
+    assert starved_config["num_ctas_per_sm"] > 2
+    assert not starved_config["use_stream_k"]
+
+
+def test_sm80_moe_occupancy_halves_k_tile_for_8bit_weights(sm80_device):
+    # 4-warp CTAs with a 64-wide K tile of 8-bit weights fit only twice per SM;
+    # a 32-wide K tile halves the shared memory per stage and fits four.
+    layer_config = _make_moe_layer_config(2560, 640, 512, "uint8-channel")
+    config = Sm80Heuristics.get_config(layer_config, shape_m=40, gemm_type=GemmType.INDEXED)
+
+    assert config["block_shape"][2] == config["warp_shape"][2] == 32
+    assert _get_warps_per_cta(config) == 4
+    assert config["num_ctas_per_sm"] == 4
+
+
+def test_sm80_moe_occupancy_stages_follow_k_iterations(sm80_device):
+    # Both GEMMs are tile-starved and split N; only the long K loop takes more stages.
+    short_k_config = Sm80Heuristics.get_config(
+        _make_moe_layer_config(2560, 640, 512), shape_m=16, gemm_type=GemmType.INDEXED
+    )
+    long_k_config = Sm80Heuristics.get_config(
+        _make_moe_layer_config(1280, 2560, 512), shape_m=32, gemm_type=GemmType.INDEXED
+    )
+
+    assert short_k_config["block_shape"][1] == long_k_config["block_shape"][1] == 128
+    assert short_k_config["num_stages"] == 3
+    assert long_k_config["num_stages"] > 3
 
 
 def test_sm80_moe_occupancy_shared_memory_fallback(sm80_device, monkeypatch):

@@ -29,6 +29,10 @@ def _estimate_compute_bound_threshold(layer_config: LayerConfig, use_f16_accum: 
     return left_bias / (right_factor - left_factor) * 1e3
 
 
+def _count_warps(block_shape: tuple[int, int, int], warp_shape: tuple[int, int, int]) -> int:
+    return math.prod(block // warp for block, warp in zip(block_shape, warp_shape, strict=True))
+
+
 class DeviceHeuristics:
     max_smem_size: int = 0
     b16_allowed_dtypes: list[dtypes.DataType] = []
@@ -254,26 +258,26 @@ class DeviceHeuristics:
         is_supported_moe_case = is_supported_moe_case and has_routed_row_count
         use_moe_occupancy = cls.moe_occupancy_warps_per_sm > 0 and is_supported_moe_case
         use_moe_occupancy = use_moe_occupancy and is_memory_bound_moe and has_sparse_expert_blocks
+        uses_moe_occupancy_config = False
         if use_moe_occupancy:
+            block_shape = (block_shape_m, block_shape_n, block_shape_k)
+            warp_shape = (warp_shape_m, warp_shape_n, warp_shape_k)
             moe_occupancy_config = cls._fit_moe_ctas_per_sm(
                 layer_config,
-                (block_shape_m, block_shape_n, block_shape_k),
-                (warp_shape_m, warp_shape_n, warp_shape_k),
+                block_shape,
+                warp_shape,
                 gemm_type,
                 num_tiles=num_blocks_n * num_blocks_m,
                 num_sms=num_sms,
                 max_num_stages=max_num_stages,
+                current_warps_per_sm=_count_warps(block_shape, warp_shape) * num_ctas_per_sm,
             )
-            num_mn_warps = (block_shape_m // warp_shape_m) * (block_shape_n // warp_shape_n)
-            current_warps_per_sm = num_mn_warps * (block_shape_k // warp_shape_k) * num_ctas_per_sm
             if moe_occupancy_config is not None:
-                fitted_block_shape_k, fitted_ctas_per_sm, _ = moe_occupancy_config
-                fitted_warps_per_sm = (
-                    num_mn_warps * (fitted_block_shape_k // warp_shape_k) * fitted_ctas_per_sm
-                )
-                # Only resident warps hide the latency; the same warps in smaller CTAs do not.
-                if fitted_warps_per_sm > current_warps_per_sm:
-                    block_shape_k, num_ctas_per_sm, num_stages = moe_occupancy_config
+                fitted_block_shape, fitted_warp_shape, num_ctas_per_sm, num_stages = moe_occupancy_config
+                block_shape_m, block_shape_n, block_shape_k = fitted_block_shape
+                warp_shape_m, warp_shape_n, warp_shape_k = fitted_warp_shape
+                num_blocks_n = layer_config.shape_n // block_shape_n
+                uses_moe_occupancy_config = True
 
         use_stream_k = True
         if use_batch_invariant:
@@ -295,6 +299,8 @@ class DeviceHeuristics:
                 assert block_shape_k >= warp_shape_k
 
         use_stream_k = layer_config.shape_k > 1024 and use_stream_k and not use_dense_output_grid
+        # With several CTAs per SM there is enough parallel work; the stream-K fixup only adds cost.
+        use_stream_k = use_stream_k and not uses_moe_occupancy_config
         if use_batch_invariant:
             assert not use_stream_k
             assert block_shape_k == warp_shape_k
@@ -328,34 +334,116 @@ class DeviceHeuristics:
         num_tiles: int,
         num_sms: int,
         max_num_stages: int,
-    ) -> tuple[int, int, int] | None:
+        current_warps_per_sm: int,
+    ) -> tuple[tuple[int, int, int], tuple[int, int, int], int, int] | None:
         """Trade pipeline depth for resident CTAs in a memory-bound MoE GEMM.
 
         With few tokens per expert, weight loads are latency-bound and hidden by
         resident warps rather than by a deeper pipeline, so prefer several small
-        CTAs per SM over one deep-pipelined CTA. K-split warps are dropped until a
-        CTA has at most 4 warps; M/N warps are kept, so a CTA can still have fewer
-        or more than 4 warps. Returns (block_shape_k, num_ctas_per_sm, num_stages)
-        or None if nothing fits.
+        CTAs per SM over one deep-pipelined CTA. With fewer than three tiles per SM
+        the N tile is halved to get more of them. K-split warps are dropped until a
+        CTA has at most 4 warps by halving the K tile, down to one 128-byte row of
+        activations and then widening the warp K step, unless halving the K tile
+        further (less shared memory per stage) fits more CTAs. Warps along M
+        dequantize the same weight tile, so they are merged whenever the merged CTA
+        still fits twice per SM; otherwise M/N warps are kept and the config must add
+        resident warps. Merged CTAs keep 3 stages and the others at most a third of
+        their K iterations, as deeper pipelines measured slower. Returns
+        (block_shape, warp_shape, num_ctas_per_sm, num_stages) or None.
         """
         max_warps_per_cta = 4
         block_shape_m, block_shape_n, block_shape_k = block_shape
         warp_shape_m, warp_shape_n, warp_shape_k = warp_shape
-        num_mn_warps = (block_shape_m // warp_shape_m) * (block_shape_n // warp_shape_n)
-        num_k_warps = block_shape_k // warp_shape_k
-        while block_shape_k > warp_shape_k and num_mn_warps * num_k_warps > max_warps_per_cta:
-            block_shape_k = block_shape_k // 2
-            num_k_warps = block_shape_k // warp_shape_k
 
-        num_warps = num_mn_warps * num_k_warps
+        is_tile_starved = num_tiles < 3 * num_sms
+        can_split_n = block_shape_n >= 256 and layer_config.shape_n % (block_shape_n // 2) == 0
+        if is_tile_starved and can_split_n:
+            block_shape_n, warp_shape_n = block_shape_n // 2, warp_shape_n // 2
+            num_tiles = num_tiles * 2
+        # Below two tiles per SM some SMs would hold a single small CTA.
+        if num_tiles < 2 * num_sms:
+            return None
+
+        num_mn_warps = (block_shape_m // warp_shape_m) * (block_shape_n // warp_shape_n)
+
+        def has_few_warps(block_k, warp_k):
+            return num_mn_warps * block_k // warp_k <= max_warps_per_cta
+
+        min_block_shape_k = 1024 // layer_config.a_dtype.num_bits
+        fitted_block_shape_k, fitted_warp_shape_k = block_shape_k, warp_shape_k
+        while fitted_block_shape_k > fitted_warp_shape_k and not has_few_warps(
+            fitted_block_shape_k, fitted_warp_shape_k
+        ):
+            if fitted_block_shape_k > min_block_shape_k:
+                fitted_block_shape_k = fitted_block_shape_k // 2
+            else:
+                fitted_warp_shape_k = fitted_warp_shape_k * 2
+        halved_block_shape_k = block_shape_k
+        while halved_block_shape_k > warp_shape_k and not has_few_warps(halved_block_shape_k, warp_shape_k):
+            halved_block_shape_k = halved_block_shape_k // 2
+        k_shapes = [(fitted_block_shape_k, fitted_warp_shape_k), (halved_block_shape_k, warp_shape_k)]
+
+        def fit_best(merge_m_warps):
+            best = None
+            for fitted_block_shape_k, fitted_warp_shape_k in k_shapes:
+                num_k_iters = layer_config.shape_k // fitted_block_shape_k
+                fitted_max_num_stages = 3 if merge_m_warps else min(max_num_stages, max(3, num_k_iters // 3))
+                fitted_block_shape = (block_shape_m, block_shape_n, fitted_block_shape_k)
+                fitted_warp_shape_m = block_shape_m if merge_m_warps else warp_shape_m
+                fitted_warp_shape = (fitted_warp_shape_m, warp_shape_n, fitted_warp_shape_k)
+                fitted = cls._fit_moe_cta_count(
+                    layer_config,
+                    fitted_block_shape,
+                    fitted_warp_shape,
+                    gemm_type,
+                    num_tiles,
+                    num_sms,
+                    fitted_max_num_stages,
+                )
+                if fitted is not None and (best is None or fitted[0] > best[2]):
+                    best = (fitted_block_shape, fitted_warp_shape, *fitted)
+            return best
+
+        if block_shape_m > warp_shape_m:
+            merged_config = fit_best(merge_m_warps=True)
+            if merged_config is not None:
+                return merged_config
+
+        config = fit_best(merge_m_warps=False)
+        # Only resident warps hide the latency; the same warps in smaller CTAs do not.
+        if config is None or _count_warps(config[0], config[1]) * config[2] <= current_warps_per_sm:
+            return None
+        return config
+
+    @classmethod
+    def _fit_moe_cta_count(
+        cls,
+        layer_config: LayerConfig,
+        block_shape: tuple[int, int, int],
+        warp_shape: tuple[int, int, int],
+        gemm_type: GemmType,
+        num_tiles: int,
+        num_sms: int,
+        max_num_stages: int,
+    ) -> tuple[int, int] | None:
+        """Most CTAs per SM (at least 2), then most stages, that fit the warp target,
+        the tiles, the register file and shared memory. `__launch_bounds__` makes the
+        compiler spill rather than exceed its per-thread register share. Returns
+        (num_ctas_per_sm, num_stages) or None.
+        """
+        num_warps = _count_warps(block_shape, warp_shape)
+        # Roughly 96 registers per thread besides the FP32 accumulators of its warp tile.
+        registers_per_thread = round_up(96 + warp_shape[0] * warp_shape[1] // 32, 8)
+        max_ctas_by_registers = current_device.max_registers_per_sm // (num_warps * 32 * registers_per_thread)
         max_ctas_by_warps = cls.moe_occupancy_warps_per_sm // num_warps
-        max_ctas_by_tiles = num_tiles // num_sms
-        fitted_block_shape = (block_shape_m, block_shape_n, block_shape_k)
-        for num_ctas_per_sm in range(min(max_ctas_by_warps, max_ctas_by_tiles), 1, -1):
+        # Enough CTAs to take every tile at once avoids a tail of lone CTAs.
+        max_ctas_by_tiles = math.ceil(num_tiles / num_sms)
+        max_ctas_per_sm = min(max_ctas_by_warps, max_ctas_by_tiles, max_ctas_by_registers)
+        for num_ctas_per_sm in range(max_ctas_per_sm, 1, -1):
             for num_stages in range(max_num_stages, 2, -1):
-                smem_size = estimate_smem_size_layer(layer_config, fitted_block_shape, gemm_type, num_stages)
+                smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, num_stages)
                 if smem_size * num_ctas_per_sm <= cls.max_smem_size:
-                    return block_shape_k, num_ctas_per_sm, num_stages
+                    return num_ctas_per_sm, num_stages
         return None
 
     @classmethod
