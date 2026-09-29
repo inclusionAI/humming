@@ -6,6 +6,7 @@ from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import DeviceInfo
 from humming.tune.sm8x import Sm80Heuristics, Sm86Heuristics, Sm87Heuristics, Sm89Heuristics
+from humming.tune.sm100 import Sm100Heuristics
 from humming.utils.smem import estimate_smem_size_layer
 
 
@@ -166,6 +167,8 @@ def test_sm80_memory_bound_moe_uses_more_ctas(
         pytest.param(dict(shape_m=15360), dict(shape_m=10240), id="48-row-expert-blocks"),
         pytest.param(dict(shape_m=10), dict(shape_m=160), id="too-few-tiles"),
         pytest.param(dict(heuristics_cls=Sm87Heuristics), dict(), id="sm87"),
+        # Sm100Heuristics inherits from Sm80Heuristics and falls back to its MMA configs.
+        pytest.param(dict(heuristics_cls=Sm100Heuristics), dict(), id="sm100"),
         pytest.param(dict(gemm_type=GemmType.GROUPED_MASKED), dict(), id="grouped-masked"),
         # 8-bit weight tiles only fit two 4-warp CTAs, i.e. the same 8 resident warps.
         pytest.param(dict(weight_format="uint8-channel"), dict(), id="no-resident-warp-gain"),

@@ -11,6 +11,8 @@ from humming.utils.smem import estimate_smem_size_layer
 class Sm100Heuristics(Sm80Heuristics):
     max_smem_size: int = 227 * 1024
     sm_version: int = 100
+    # The MMA fallback below reaches the SM80 MoE occupancy rule, which is tuned for SM80.
+    moe_occupancy_warps_per_sm: int = 0
     b8_allowed_dtypes: list[dtypes.DataType] = [dtypes.int8, dtypes.float8e4m3, dtypes.float8e5m2]
 
     @classmethod
