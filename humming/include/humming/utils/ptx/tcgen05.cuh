@@ -61,6 +61,13 @@ CUDA_INLINE uint64_t tcgen05_smem_desc(const void *ptr) {
 }
 
 
+// K96 addresses wrap within the current 256-element FP4 swizzle tile.
+CUDA_INLINE uint64_t tcgen05_smem_desc_k96(uint64_t descriptor, uint64_t swizzle_base) {
+  constexpr uint64_t kAddressMask = 0x3fff;
+  return (descriptor & ~(kAddressMask << 16)) | ((swizzle_base & kAddressMask) << 16) | (uint64_t(1) << 52);
+}
+
+
 // Elect once for a group of MMA instructions and their completion commits.
 CUDA_INLINE bool tcgen05_elect_leader() {
   uint32_t leader;
@@ -97,6 +104,22 @@ CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint32_t a, uint64_t b, bool acc
     asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
                  "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], [%1], %2, %3, {%5,%5,%5,%5}, p; }" ::"r"(d),
                  "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  }
+}
+
+
+template <uint32_t kN, uint32_t kAFormat, uint32_t kBFormat, uint32_t kCtaGroupSize = 1>
+CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint64_t a, uint64_t b, bool accumulate) {
+  constexpr uint32_t input_format = (kAFormat << 7) | (kBFormat << 10);
+  constexpr uint32_t descriptor = (1u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], %1, %2, %3, {%5,%5,%5,%5,%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  } else {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, {%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
   }
 }
 
@@ -181,6 +204,26 @@ CUDA_INLINE void tcgen05_mma_mxf8f6f4(uint32_t d, uint32_t a, uint64_t b,
 }
 
 
+template <uint32_t kN, uint32_t kWeightFormat, uint32_t kInputFormat, uint32_t kCtaGroupSize = 1>
+CUDA_INLINE void tcgen05_mma_mxf8f6f4(uint32_t d, uint64_t a, uint64_t b,
+                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate) {
+  constexpr uint32_t descriptor_base = (kWeightFormat << 7) | (kInputFormat << 10) |
+                                       ((kN / 8) << 17) | (1u << 23) | (kCtaGroupSize << 27);
+  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29);
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::2.kind::mxf8f6f4.block_scale.block32 "
+                 "[%0], %1, %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  } else {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale.block32 "
+                 "[%0], %1, %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  }
+}
+
+
 CUDA_INLINE void tcgen05_st_32x32b(uint32_t address, uint32_t value) {
   asm volatile("tcgen05.st.sync.aligned.32x32b.x1.b32 [%0], {%1};" ::"r"(address), "r"(value) : "memory");
 }
@@ -243,4 +286,47 @@ CUDA_INLINE void tcgen05_mma_mxf4nvf4(uint32_t d, uint32_t a, uint64_t b,
                  "[%0], [%1], %2, %3, [%4], [%5], p; }" ::"r"(d),
                  "r"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
   }
+}
+
+
+template <uint32_t kN, uint32_t kGroupSize, bool kScaleIsE4M3, uint32_t kCtaGroupSize = 1,
+          bool kWeightIsE0M3 = false, bool kInputIsE0M3 = false>
+CUDA_INLINE void tcgen05_mma_mxf4nvf4(uint32_t d, uint64_t a, uint64_t b,
+                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate, bool use_k96 = false) {
+  static_assert(!(kWeightIsE0M3 || kInputIsE0M3) || kGroupSize == 16, "E0M3 requires block16");
+  // Undocumented E0M3 is format 0; the public E2M1 format is 1.
+  constexpr uint32_t descriptor_base = (uint32_t(!kWeightIsE0M3) << 7) | (uint32_t(!kInputIsE0M3) << 10) | ((kN / 8) << 17) |
+                                       (uint32_t(!kScaleIsE4M3) << 23) | (kCtaGroupSize << 27);
+  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29) | (uint32_t(use_k96) << 31);
+  if constexpr (kCtaGroupSize == 2 && kGroupSize == 16) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.block16 "
+                 "[%0], %1, %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  } else if constexpr (kCtaGroupSize == 2 && kGroupSize == 32) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.block32 "
+                 "[%0], %1, %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  } else if constexpr (kCtaGroupSize == 1 && kGroupSize == 16) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block16 "
+                 "[%0], %1, %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  } else if constexpr (kCtaGroupSize == 1 && kGroupSize == 32) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
+                 "tcgen05.mma.cta_group::1.kind::mxf4nvf4.block_scale.block32 "
+                 "[%0], %1, %2, %3, [%4], [%5], p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(sfa), "r"(sfb), "r"(uint32_t(accumulate)) : "memory");
+  }
+}
+
+
+template <uint32_t kCtaGroupSize>
+CUDA_INLINE void tcgen05_cp_scale(uint32_t destination, const void *source) {
+  uint64_t descriptor = (uint64_t(cast_smem_ptr_to_uint(source)) >> 4) | (uint64_t(8) << 32) | (uint64_t(1) << 46);
+  if constexpr (kCtaGroupSize == 2)
+    asm volatile("tcgen05.cp.cta_group::2.32x128b.warpx4 [%0], %1;" ::"r"(destination), "l"(descriptor) : "memory");
+  else
+    asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;" ::"r"(destination), "l"(descriptor) : "memory");
 }

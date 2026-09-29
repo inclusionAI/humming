@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from humming.config import (
@@ -31,6 +33,7 @@ def _stage_storage_bytes(
     block_shape,
     is_mxmma: bool,
     scale_block_m: int,
+    logical_block_m: int,
 ) -> int:
     block_m, block_n, block_k = block_shape
     a_bits = layer_config.a_dtype.num_bits
@@ -46,7 +49,13 @@ def _stage_storage_bytes(
     fields: list[tuple[int, int]] = []
     # a[]: alignas(1024); b[]: alignas(128)
     fields.append((block_m * block_k * a_bits // 8, 1024))
-    fields.append((block_n * block_k * b_bits // 8, 128))
+    weight_smem_bits = max(8, b_bits) if layer_config.use_umma_ss and a_bits == 8 else b_bits
+    expand_low_bit_weight = layer_config.use_umma_ss and a_bits == 8 and b_bits < 8
+    weight_k_alignment = math.gcd(block_k, 128)
+    weight_stage_k = round_up(block_k + 128 - weight_k_alignment, 128) if expand_low_bit_weight else block_k
+    weight_alignment = 1024 if layer_config.use_umma_ss else 128
+    weight_stage_n = max(block_n, 128) if layer_config.use_umma_ss else block_n
+    fields.append((weight_stage_n * weight_stage_k * weight_smem_bits // 8, weight_alignment))
 
     if is_group_input_scale:
         num_groups_a = ceil_div(block_k, layer_config.input_scale_group_size)
@@ -69,6 +78,21 @@ def _stage_storage_bytes(
         fields.append((storage_groups_b * scale_n * bs_bits // 8, 128))
         if has_stage_zp:
             fields.append((num_groups_b * block_n * zp_bits // 8, 128))
+
+    if layer_config.use_umma_ss and is_mxmma:
+        scale_group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
+        scale_words = ceil_div(block_k, 4 * scale_group_size)
+        use_direct_weight_scale = (
+            layer_config.is_group_weight_scale
+            and block_n >= 128
+            and block_k % (4 * layer_config.weight_scale_group_size) == 0
+        )
+        weight_scale_rows = 0 if use_direct_weight_scale else max(block_n, 128)
+        use_inplace_input_scale = layer_config.is_group_input_scale and logical_block_m % 128 == 0
+        input_scale_rows = 0 if use_inplace_input_scale else round_up(logical_block_m, 128)
+        scale_rows = weight_scale_rows + input_scale_rows
+        if scale_rows:
+            fields.append((scale_words * scale_rows * 4, 128))
 
     return _struct_size(fields, 1024)
 
@@ -112,7 +136,7 @@ def estimate_smem_size_layer(
     zp_bits = 16 if layer_config.is_fp_zero_point else max(4, _next_pow2(layer_config.b_dtype.num_bits))
 
     stage_shape = (block_m // umma_cta_group_size, block_n, block_k)
-    stage_bytes = _stage_storage_bytes(layer_config, stage_shape, is_mxmma, scale_block_m)
+    stage_bytes = _stage_storage_bytes(layer_config, stage_shape, is_mxmma, scale_block_m, block_m)
 
     channel_zp = layer_config.has_zero_point and layer_config.is_channel_weight_scale
     channel_zp_bytes = (block_n * zp_bits // 8) if channel_zp else 0

@@ -250,6 +250,7 @@ def transform_humming_weight(
     interleave_mode: int = 3,
     use_packed_k_layout: bool = False,
     use_native_dequant: bool = False,
+    use_umma_ss: bool = False,
 ) -> torch.Tensor:
     is_moe = weight.ndim == 3
     weight = weight.unsqueeze(0) if not is_moe else weight
@@ -268,6 +269,17 @@ def transform_humming_weight(
 
     assert padded_shape_n % 64 == 0
     assert padded_shape_k % (2 * packed_block_size_k) == 0
+
+    if use_umma_ss:
+        if a_dtype.num_bits == 8 and b_dtype.num_bits < 8:
+            padded_shape_k = round_up(padded_shape_k, 128)
+        # K-contiguous rows are consumed directly by the shared-memory MMA operand.
+        if not packed:
+            weight = ops.pack_weight(weight, b_dtype.num_bits)
+        weight = torch.nn.functional.pad(
+            weight, (0, (padded_shape_k - shape_k) * b_dtype.num_bits // 32, 0, padded_shape_n - shape_n)
+        )
+        return weight if is_moe else weight.squeeze(0)
 
     should_preprocess_for_int2fp = False
     has_zero_point = zero_point is not None and zero_point.nelement() > 0
@@ -485,6 +497,7 @@ def transform_humming_tensors(
         interleave_mode=interleave_mode,
         use_packed_k_layout=config.use_packed_k_layout,
         use_native_dequant=config.use_native_dequant,
+        use_umma_ss=config.use_umma_ss,
     )
 
     if weight_scale is not None:

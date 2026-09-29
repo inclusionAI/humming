@@ -7,6 +7,7 @@ template <class Ctx>
 class G2SMemoryLoaderB {
 private:
   using ProblemShape = typename Ctx::ProblemShape;
+  using SharedStorage = typename Ctx::SharedStorage;
   using BlockShape = typename Ctx::BlockShape;
   using ElementA = typename Ctx::ElementA;
   using ElementB = typename Ctx::ElementB;
@@ -22,6 +23,9 @@ private:
   // retaining streamed weights at the expense of A's reuse across N tiles.
   static constexpr bool kEvictWeightsFirst = Ctx::kUseUmmaSplitLoads && Ctx::kRasterGroupM > 1;
 
+  static constexpr uint32_t kWeightSmemBits = SharedStorage::kWeightSmemBits;
+  static constexpr uint32_t kSwizzleBytes = MIN(128u, SharedStorage::kWeightStageK *kWeightSmemBits / 8);
+  static constexpr uint32_t kSwizzleK = kSwizzleBytes * 8 / kWeightSmemBits;
   static constexpr uint32_t kPackSizeK = Ctx::kUsePackedKLayout ? 64 : (256 / ElementA::kBits);
   static constexpr uint32_t kSmemStride = BlockShape::N * kPackSizeK * ElementB::kBits / 32 / 4;
   static constexpr uint32_t kGmemStride = ProblemShape::N * kPackSizeK * ElementB::kBits / 32 / 4;
@@ -71,8 +75,20 @@ public:
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     if (ctx.load_thread_id() == 0) {
-      if constexpr (kMultiCastSizeB == 1) {
-        tma_load_3d<1, kEvictWeightsFirst>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+      if constexpr (Ctx::kUseUmmaSs) {
+        constexpr uint32_t kCoordinateBits = SharedStorage::kExpandUmmaWeight ? 1 : 32 / ElementB::kBits;
+        uint32_t start_k = kCoordinateBits == 1 ? row_offset / 128 * 128 : row_offset;
+        PRAGMA_UNROLL
+        for (uint32_t k = 0; k < SharedStorage::kWeightStageK; k += kSwizzleK) {
+          PRAGMA_UNROLL
+          for (uint32_t n = 0; n < SharedStorage::kWeightStageN; n += 256) {
+            uint32_t offset = (k / kSwizzleK * SharedStorage::kWeightStageN + n) * kSwizzleBytes / sizeof(int4);
+            tma_load_2d<1, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(tensor_map_ptr, smem_ptr + offset, mbar_ptr,
+                                                                                    (start_k + k) / kCoordinateBits, col_offset + n);
+          }
+        }
+      } else if constexpr (kMultiCastSizeB == 1) {
+        tma_load_3d<1, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       } else if (cluster_rank == 0) {
         tma_load_3d<kMultiCastSizeB>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       }
@@ -83,7 +99,7 @@ public:
   void prefetch_tma() {
     if constexpr (kUseTma && kMultiCastSizeB == 1) {
       if (ctx.load_thread_id() == 0) {
-        tma_prefetch_3d(tensor_map_ptr, 0, col_offset, row_offset);
+        if constexpr (!Ctx::kUseUmmaSs) tma_prefetch_3d(tensor_map_ptr, 0, col_offset, row_offset);
       }
     }
   }
@@ -97,12 +113,17 @@ public:
 
   CUDA_INLINE
   void advance() {
-    row_offset += BlockShape::K / kPackSizeK;
+    row_offset += Ctx::kUseUmmaSs ? BlockShape::K : BlockShape::K / kPackSizeK;
     if constexpr (!kUseAiu) gmem_ptr += kGmemStride * BlockShape::K / kPackSizeK;
   }
 
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t n_block_id, uint32_t k_block_id) {
+    if constexpr (Ctx::kUseUmmaSs) {
+      row_offset = k_block_id * BlockShape::K;
+      col_offset = expert_id * ProblemShape::N + n_block_id * BlockShape::N;
+      return;
+    }
     row_offset = k_block_id * (BlockShape::K / kPackSizeK);
     if constexpr (kUseTma) row_offset += expert_id * (ProblemShape::K / kPackSizeK);
     col_offset = n_block_id * (kUseAiu ? BlockShape::N / 32 : BlockShape::N * ElementB::kBits / 32);

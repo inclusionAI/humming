@@ -31,6 +31,9 @@ CODE_TEMPLATE = jinja2.Template("""
 {{tuning_config_macro}}
 
 #define HUMMING_USE_UMMA_PIPELINE {{use_umma_pipeline | int}}
+#define HUMMING_BLOCK_SHAPE_M {{block_shape[0]}}
+#define HUMMING_BLOCK_SHAPE_N {{block_shape[1]}}
+#define HUMMING_BLOCK_SHAPE_K {{block_shape[2]}}
 
 #if HUMMING_USE_UMMA_PIPELINE
 #include <humming/kernel/humming_umma.cuh>
@@ -120,12 +123,13 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.use_mbarrier = True
         TuningConfig.__post_init__(self)
         if self.use_umma_pipeline:
-            self.num_threads = 256 + 128 * self.umma_num_dequant_warpgroups
+            self.num_threads = 256 if self.use_umma_ss else 256 + 128 * self.umma_num_dequant_warpgroups
             self.num_math_threads = 128
             activation_bytes = self.block_shape[0] * self.block_shape[2] * self.a_dtype.num_bits // 8
             # Wider cp.async tiles benefit from a third loading warp. Keep the
             # readiness warp for small tiles and independently loaded TMA operands.
             use_wide_async_load = not self.use_tma_a and activation_bytes >= 12 * 1024
+            use_wide_async_load &= not self.use_umma_ss
             self.num_load_threads = 96 if use_wide_async_load else 64
         KernelRuntime.__post_init__(self)
 
@@ -454,6 +458,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.umma_cta_group_size == 1 and self.umma_output_chunk_rows == 0, (
                 "UMMA cooperative execution and chunked output require mma_type=umma"
             )
+        if self.use_umma_ss:
+            assert self.use_tma_b, "SS weight operands require TMA loading"
         if self.mma_type == MmaType.UMMA:
             assert self.umma_num_dequant_warpgroups in (1, 2)
             assert self.a_dtype in (

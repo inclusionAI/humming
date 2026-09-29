@@ -90,8 +90,15 @@ inline void check_tensor_b(Tensor &tensor, KernelData &kernel_data, int64_t dev)
 
   std::vector<int64_t> expected_shape = {};
   if (kernel_data.gemm_type_id != 0) expected_shape.push_back(kernel_data.num_experts);
-  expected_shape.push_back(problem_shape_k / pack_size_k);
-  expected_shape.push_back(problem_shape_n * pack_size_k * num_bits / 32);
+  if (kernel_data.use_umma_ss) {
+    if (get_dtype_num_bits(kernel_data.a_dtype_id) == 8 && num_bits < 8)
+      problem_shape_k = CEIL_DIV(problem_shape_k, 128) * 128;
+    expected_shape.push_back(problem_shape_n);
+    expected_shape.push_back(problem_shape_k * num_bits / 32);
+  } else {
+    expected_shape.push_back(problem_shape_k / pack_size_k);
+    expected_shape.push_back(problem_shape_n * pack_size_k * num_bits / 32);
+  }
   check_tensor_common(tensor, "b", dev, ScalarType::Int, expected_shape);
 };
 
@@ -349,6 +356,28 @@ inline CUtensorMap make_tma_desc_b(Tensor &tensor, KernelData &kernel_data) {
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id);
   uint32_t block_shape_n = kernel_data.block_shape_n;
   uint32_t block_shape_k = kernel_data.block_shape_k;
+
+  if (kernel_data.use_umma_ss) {
+    // FP4/FP6 in an f8f6f4 instruction uses padded 16-element blocks in SMEM.
+    bool expand_low_bit = num_bits < 8 && get_dtype_num_bits(kernel_data.a_dtype_id) == 8;
+    uint32_t smem_bits = expand_low_bit ? 8 : num_bits;
+    uint32_t swizzle_bytes = expand_low_bit ? 128 : std::min(128u, block_shape_k * smem_bits / 8);
+    if (expand_low_bit) {
+      CUtensorMap descriptor{};
+      uint64_t dimensions[] = {uint64_t(tensor.size(-1)) * 32 / num_bits, uint64_t(kernel_data.problem_shape_n) * std::max(1u, kernel_data.num_experts)};
+      uint64_t strides[] = {uint64_t(tensor.size(-1)) * 4};
+      uint32_t box[] = {swizzle_bytes, std::min(256u, std::max(128u, block_shape_n))};
+      uint32_t element_strides[] = {1, 1};
+      CUresult status = cuTensorMapEncodeTiled(
+          &descriptor, num_bits == 4 ? CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B : CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B, 2, tensor.data_ptr(),
+          dimensions, strides, box, element_strides, CU_TENSOR_MAP_INTERLEAVE_NONE,
+          get_swizzle_enum(swizzle_bytes), CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+      ASSERT_CHECK(status == CUDA_SUCCESS, "TMA Encode Failed for expanded low-bit weights");
+      return descriptor;
+    }
+    auto rows = torch_view_shape(tensor, {-1, tensor.size(-1)});
+    return make_tma_desc(rows, {swizzle_bytes / 4, std::min(256u, std::max(128u, block_shape_n))}, swizzle_bytes, "b");
+  }
 
   uint32_t pack_size_k = 256 / get_dtype_num_bits(kernel_data.a_dtype_id);
   if (kernel_data.use_packed_k_layout) pack_size_k = 64;

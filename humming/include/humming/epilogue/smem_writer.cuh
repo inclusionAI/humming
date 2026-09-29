@@ -232,13 +232,14 @@ public:
     uint32_t output_base = cast_smem_ptr_to_uint(ctx.smem.reduce);
 
     PRAGMA_UNROLL
-    for (uint32_t m = 0; m < CEIL_DIV(WarpShape::M, 32); m++) {
+    for (uint32_t step = 0; step < CEIL_DIV(WarpShape::M, 32); step++) {
+      uint32_t m = mma.output_chunk_index(step);
       uint32_t lower[16];
       uint32_t upper[16];
       uint32_t rows = MIN(32, WarpShape::M - m * 32);
       if (has_output) mma.load_output_chunk(m, rows, lower, upper);
       if constexpr (kChunked && !Ctx::kIsIndexedGemm) {
-        if (m + 1 == CEIL_DIV(WarpShape::M, 32) && ctx.math_group + 1 == MMA::kOutputGroups) {
+        if (step + 1 == MMA::kAccumulatorReleaseChunks && ctx.math_group + 1 == MMA::kOutputGroups) {
           tcgen05_fence_before_thread_sync();
           ctx.sync_math_threads();
           if (ctx.math_thread_id() == 0) {
@@ -250,7 +251,7 @@ public:
       }
       uint32_t buffer_offset = 0;
       if constexpr (kChunked) {
-        buffer_offset = ((m + output_chunk_phase) % 2) * kStorageRows * BlockShape::N;
+        buffer_offset = ((step + output_chunk_phase) % 2) * kStorageRows * BlockShape::N;
         if constexpr (Ctx::kUseTmaC) tma_wait_store_group<1, true>();
         ctx.sync_math_threads();
       }

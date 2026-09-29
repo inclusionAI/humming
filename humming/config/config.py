@@ -65,6 +65,8 @@ class LayerConfig(BaseHummingConfig):
 
     # packed-K layout (wgmma + 8-bit activation + even-bit weight only)
     use_packed_k_layout: bool | None = None
+    # Native UMMA weights in K-contiguous rows for shared-memory operands.
+    use_umma_ss: bool = False
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
         "mma_type_id",
@@ -355,6 +357,12 @@ class LayerConfig(BaseHummingConfig):
             if not is_channel_scale_2:
                 self.weight_scale_2_type = WeightScale2Type.TENSOR
             self._update_weight_scale_flags()
+
+        if self.use_umma_ss:
+            assert self.mma_type == MmaType.UMMA, "SS operands require UMMA"
+            assert self.b_dtype.is_floating_point_type and self.b_dtype.num_bits in (4, 6, 8)
+            assert not self.has_zero_point and not self.is_block_weight_scale
+            assert self.a_dtype.num_bits in (4, 8), "SS operands require native FP8/FP6/FP4 MMA"
 
         if self.use_packed_k_layout is None:
             self.use_packed_k_layout = (

@@ -64,8 +64,8 @@ private:
     if constexpr (kUseTmaA) tma_load_bytes += SharedStorage::kStageBytesA;
     else legacy_load_bytes += SharedStorage::kStageBytesA;
 
-    if constexpr (kUseTmaB) tma_load_bytes += SharedStorage::kStageBytesB;
-    else legacy_load_bytes += SharedStorage::kStageBytesB;
+    if constexpr (kUseTmaB) tma_load_bytes += SharedStorage::kStageLoadBytesB;
+    else legacy_load_bytes += SharedStorage::kStageLoadBytesB;
 
     if constexpr (kIsGroupInputScale) {
       if constexpr (kUseTmaAS) tma_load_bytes += SharedStorage::kStageBytesAS;
@@ -192,7 +192,7 @@ public:
       if (thread_id < kNumStages) {
         constexpr uint32_t cp_async_thread_count = kHasStageCpAsyncMBarrier ? kNumLoadThreads : 0;
         constexpr uint32_t tma_thread_count = kHasStageTmaMBarrier ? 1 : 0;
-        count = cp_async_thread_count + tma_thread_count;
+        count = Ctx::kUseUmmaCooperativeTma ? 2 : cp_async_thread_count + tma_thread_count;
       } else if (thread_id == kNumStages) {
         constexpr uint32_t cp_async_thread_count = kHasFirstStageCpAsyncMBarrier ? kNumLoadThreads : 0;
         constexpr uint32_t tma_thread_count = kHasFirstStageTmaMBarrier ? 1 : 0;
@@ -257,18 +257,20 @@ public:
   template <bool kShouldAdvance = true>
   CUDA_INLINE void load_weight_stage(uint32_t stage_id) {
     auto &stage = ctx.smem.stages[stage_id];
-    auto *weight_mbar = &ctx.smem.umma_weight_ready[stage_id];
+    auto *weight_mbar = Ctx::kUseUmmaCooperativeTma ? &ctx.smem.load_mbar[stage_id] : &ctx.smem.umma_weight_ready[stage_id];
     loader_b.template load<kShouldAdvance>(stage.b, weight_mbar);
-    uint32_t bytes = SharedStorage::kStageBytesB;
+    uint32_t bytes = SharedStorage::kStageLoadBytesB;
     if constexpr (kIsGroupWeightScale || kIsBlockWeightScale) {
-      loader_bs.template load<kShouldAdvance>(stage.bs, weight_mbar);
+      loader_bs.template load<kShouldAdvance, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(stage.bs, weight_mbar);
       bytes += SharedStorage::kStageBytesBS;
     }
     if constexpr (kHasZeroPoint && !kIsChannelWeightScale) {
       loader_bzp.template load<kShouldAdvance>(stage.bzp, weight_mbar);
       bytes += SharedStorage::kStageBytesBZP;
     }
-    if (ctx.load_thread_id() == 0) tma_expect_tx(weight_mbar, bytes);
+    if constexpr (Ctx::kUseUmmaCooperativeTma) {
+      if (ctx.load_thread_id() == 0 && blockIdx.x % Ctx::kUmmaCtaGroupSize == 0) tma_expect_tx(weight_mbar, bytes * 2);
+    } else if (ctx.load_thread_id() == 0) tma_expect_tx(weight_mbar, bytes);
   }
 
   template <bool kShouldAdvance = true>
@@ -278,10 +280,18 @@ public:
     loader_a.template load<kShouldAdvance>(stage.a, activation_mbar, stage_id);
     uint32_t bytes = SharedStorage::kStageBytesA;
     if constexpr (kIsGroupInputScale) {
-      loader_as.template load<kShouldAdvance>(stage.as, activation_mbar);
-      bytes += SharedStorage::kStageBytesAS;
+      if constexpr (Ctx::kUseUmmaSeparateInputScale) {
+        auto *scale_mbar = &ctx.smem.umma_input_scale_ready[stage_id];
+        loader_as.template load<kShouldAdvance>(stage.as, scale_mbar);
+        if (ctx.load_thread_id() == 32) tma_expect_tx(scale_mbar, SharedStorage::kStageBytesAS);
+      } else {
+        loader_as.template load<kShouldAdvance>(stage.as, activation_mbar);
+        bytes += SharedStorage::kStageBytesAS;
+      }
     }
-    if (ctx.load_thread_id() == 32) tma_expect_tx(activation_mbar, bytes);
+    if constexpr (Ctx::kUseUmmaCooperativeTma) {
+      if (ctx.load_thread_id() == 32 && blockIdx.x % Ctx::kUmmaCtaGroupSize == 0) tma_expect_tx(activation_mbar, bytes * 2);
+    } else if (ctx.load_thread_id() == 32) tma_expect_tx(activation_mbar, bytes);
   }
 
   CUDA_INLINE void load_channel() {

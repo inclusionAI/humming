@@ -66,20 +66,20 @@ public:
     }
   }
 
-  template <bool kShouldAdvance = true>
+  template <bool kShouldAdvance = true, uint32_t kCtaGroupSize = 1>
   CUDA_INLINE void load(int4 *smem_ptr, void *mbar_ptr) {
     counter = kLoadsPerGroup != 1 ? (counter + 1) % kLoadsPerGroup : 0;
-    if constexpr (kUseTma) load_tma(smem_ptr, mbar_ptr);
+    if constexpr (kUseTma) load_tma<kCtaGroupSize>(smem_ptr, mbar_ptr);
     else load_legacy(smem_ptr);
     if constexpr (kShouldAdvance) advance();
   };
 
-  CUDA_INLINE
-  void load_tma(int4 *smem_ptr, void *mbar_ptr) {
+  template <uint32_t kCtaGroupSize = 1>
+  CUDA_INLINE void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     if (ctx.load_thread_id() == 0) {
-      if constexpr (!kUseMxScale) tma_load_3d<1, kEvictWeightsFirst>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
-      else if constexpr (kMxTmaWidth > 256) tma_load_3d(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset / 256, row_offset);
-      else tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
+      if constexpr (!kUseMxScale) tma_load_3d<1, kEvictWeightsFirst, kCtaGroupSize>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+      else if constexpr (kMxTmaWidth > 256) tma_load_3d<1, false, kCtaGroupSize>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset / 256, row_offset);
+      else tma_load_2d<1, false, kCtaGroupSize>(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
     }
   }
 

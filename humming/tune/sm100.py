@@ -111,7 +111,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     def _fits_resources(cls, layer_config, block_shape, num_stages, num_ctas_per_sm):
         block_m, block_n, block_k = block_shape
         output_groups = math.ceil(block_n / 128)
-        operand_columns = block_k * layer_config.a_dtype.num_bits // 32
+        operand_columns = 0 if layer_config.use_umma_ss else block_k * layer_config.a_dtype.num_bits // 32
         if layer_config.use_block_scaled_mma:
             scale_group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
             scale_words = math.ceil(block_k / (4 * scale_group_size))
@@ -331,7 +331,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                         # For a single short wave, cp.async avoids TMA setup
                         # without sacrificing overlap across persistent tiles.
                         is_short_wave = output_tiles <= resident_ctas and k_iters <= num_stages
-                        use_tma = not is_short_wave
+                        use_tma = layer_config.use_umma_ss or not is_short_wave
                         config = {
                             "mma_type": MmaType.UMMA.value,
                             "block_shape": block_shape,
@@ -386,11 +386,12 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                     continue
                 k_iters = layer_config.shape_k // block_k
                 for num_ctas in (2, 1) if block_n == 256 else (2,):
-                    operand_columns = block_k * layer_config.a_dtype.num_bits // 32
+                    weight_columns = block_k * layer_config.a_dtype.num_bits // 32
+                    operand_columns = 0 if layer_config.use_umma_ss else weight_columns
                     max_block_m = min(256, 512 // (output_groups * num_ctas) - 2 * operand_columns)
                     min_stages = min(3, max(2, k_iters))
                     for block_m in range(8, max_block_m + 1, 8):
-                        operand_columns = block_k * layer_config.a_dtype.num_bits // 32
+                        operand_columns = 0 if layer_config.use_umma_ss else weight_columns
                         if layer_config.use_block_scaled_mma:
                             scale_group_size = (
                                 layer_config.input_scale_group_size or layer_config.weight_scale_group_size
@@ -554,6 +555,7 @@ class Sm100Heuristics(Sm100MmaHeuristics):
             )
             has_hidden_fp8 = dtypes.float8e3m4 in (layer_config.a_dtype, layer_config.b_dtype)
             requires_umma = layer_config.use_block_scaled_mma or has_native_mixed_operands or has_hidden_fp8
+            requires_umma |= layer_config.use_umma_ss
             keep_umma = requires_umma or not cls._should_use_mma(layer_config, shape_m)
             if not use_f16_accum and keep_umma:
                 return Sm100UmmaHeuristics.get_config(

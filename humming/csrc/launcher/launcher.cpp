@@ -329,7 +329,8 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getBool("USE_TMA_BZP"),
       reader.getBool("USE_TMA_BIAS"),
       reader.getBool("USE_PDL"),
-      reader.getBool("USE_PACKED_K_LAYOUT")};
+      reader.getBool("USE_PACKED_K_LAYOUT"),
+      reader.getBool("USE_UMMA_SS")};
 
   std::unique_lock lock(g_kernel_mutex);
   auto path_it = g_path_ids.find(cubin_path);

@@ -106,8 +106,8 @@ public:
   uint32_t as[kSizeAS];
   uint32_t bs[MAX(kSizeBS, 2)];
   uint32_t dq_bs[MAX(kSizeDequantBS, 4)];
-  uint32_t bias[kSizeBias];
-  uint32_t bs2[kSizeBias];
+  alignas(16) uint32_t bias[kSizeBias];
+  alignas(16) uint32_t bs2[kSizeBias];
   uint32_t gs = 0;
   uint32_t _dummy;
 

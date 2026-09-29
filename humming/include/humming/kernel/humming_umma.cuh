@@ -62,7 +62,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   constexpr uint32_t kNumOperandBuffers = MMA::kNumOperandBuffers;
   constexpr uint32_t kOutputGroups = MMA::kOutputGroups;
   constexpr uint32_t kDequantGroups = TuningConfig::kUmmaNumDequantWarpgroups;
-  constexpr uint32_t kNumDequantThreads = 128 * kDequantGroups;
+  constexpr uint32_t kNumDequantThreads = Ctx::kUseUmmaSs ? 0 : 128 * kDequantGroups;
   static_assert(kDequantGroups == 1 || kDequantGroups == 2);
   static_assert(TuningConfig::kNumThreads == 256 + kNumDequantThreads);
   constexpr bool kCooperative = Ctx::kUmmaCtaGroupSize == 2;
@@ -85,16 +85,20 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   // An operand-ring wrap must retire the old stage before dequantization can
   // contribute to that stage's next ready phase.
   constexpr uint32_t kNumReadinessThreads = 128 - Ctx::kNumLoadThreads - 32;
-  constexpr bool kEarlyWeightReuse = Ctx::kUseUmmaSplitLoads && kNumOperandBuffers <= kNumStages;
+  constexpr bool kEarlyWeightReuse = !Ctx::kUseUmmaSs && Ctx::kUseUmmaSplitLoads && kNumOperandBuffers <= kNumStages;
   if (ctx.is_load_thread()) Producer::template init_mbarrier<1, kChannelConsumers>(ctx);
   if (threadIdx.x < kNumStages) {
     __mbarrier_init(&smem.umma_operand_ready[threadIdx.x], (kNumDequantThreads + kNumReadinessThreads) * Ctx::kUmmaCtaGroupSize);
+    if constexpr (Ctx::kUseUmmaSeparateInputScale && Ctx::kIsGroupInputScale)
+      __mbarrier_init(&smem.umma_input_scale_ready[threadIdx.x], 1);
     if constexpr (Ctx::kUseUmmaSplitLoads) {
       __mbarrier_init(&smem.umma_weight_ready[threadIdx.x], 1);
-      __mbarrier_init(&smem.umma_weight_free[threadIdx.x], kNumDequantThreads);
+      if constexpr (!Ctx::kUseUmmaSs)
+        __mbarrier_init(&smem.umma_weight_free[threadIdx.x], kNumDequantThreads);
     }
   }
-  if (threadIdx.x < kNumOperandBuffers) __mbarrier_init(&smem.umma_operand_free[threadIdx.x], 1);
+  if constexpr (!Ctx::kUseUmmaSs)
+    if (threadIdx.x < kNumOperandBuffers) __mbarrier_init(&smem.umma_operand_free[threadIdx.x], 1);
   if (threadIdx.x == 0) {
     __mbarrier_init(&smem.umma_accumulator_ready, 1);
     __mbarrier_init(&smem.umma_accumulator_free, Ctx::kUmmaCtaGroupSize);
@@ -175,20 +179,26 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       MainloopArith arith;
       MMA mma(ctx, arith);
       while (next_tile()) {
+        mma.set_accumulator_tile(tile_index);
         mbarrier_wait(&smem.umma_accumulator_free, tile_index % 2);
         tcgen05_fence_after_thread_sync();
 #pragma unroll 4
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           mbarrier_wait(&smem.umma_operand_ready[pipeline_stage], pipeline_phase);
-          tcgen05_fence_after_thread_sync();
+          if constexpr (Ctx::kUseUmmaCooperativeTma)
+            mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
           uint32_t buffer = operand_step % kNumOperandBuffers;
+          tcgen05_fence_after_thread_sync();
           if (tcgen05_elect_leader()) {
             PRAGMA_UNROLL
             for (uint32_t group = 0; group < kOutputGroups; group++) {
               ctx.math_group = group;
-              mma.issue(pipeline_stage, buffer, iter == 0);
+              mma.issue(pipeline_stage, buffer, iter == 0, scheduler.k_block_id + iter);
             }
-            tcgen05_commit<Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.umma_operand_free[buffer]));
+            // SS copies and consumes scales on the same tcgen05 issue stream.
+            // Only TS needs to return TMEM buffers to a separate producer.
+            if constexpr (!Ctx::kUseUmmaSs)
+              tcgen05_commit<Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.umma_operand_free[buffer]));
             tcgen05_commit<Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.math_mbar[pipeline_stage]));
             if (iter + 1 == scheduler.slice_iters)
               tcgen05_commit<Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.umma_accumulator_ready));
@@ -200,12 +210,36 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       }
     }
   } else if (threadIdx.x < 128) {
-    // This warp joins A readiness with the dequantization WG's B readiness.
+    // SS operands need only the scale stores; TS joins A with the dequantization WG.
+    MainloopArith arith;
+    MMA mma(ctx, arith);
     while (next_tile()) {
 #pragma unroll 4
       for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
-        mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
+        if constexpr (Ctx::kUseUmmaSeparateInputScale) {
+          if constexpr (Ctx::kIsGroupInputScale)
+            mbarrier_wait(&smem.umma_input_scale_ready[pipeline_stage], pipeline_phase);
+          else
+            mbarrier_wait(&smem.math_mbar[pipeline_stage], pipeline_phase ^ 1);
+        } else mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
         if constexpr (!Ctx::kUseTmaA) tma_fence_async_shared();
+        if constexpr (Ctx::kUseUmmaSs) {
+          if constexpr (Ctx::kUseUmmaSplitLoads && !Ctx::kUseUmmaCooperativeTma)
+            mbarrier_wait(&smem.umma_weight_ready[pipeline_stage], pipeline_phase);
+          uint32_t buffer = operand_step % kNumOperandBuffers;
+          mma.set_operand_buffer(buffer);
+          PRAGMA_UNROLL
+          for (uint32_t group = 0; group < kOutputGroups; group++) {
+            ctx.math_group = group;
+            mma.store_weight_scales(pipeline_stage, scheduler.k_block_id + iter, scheduler.n_block_id);
+          }
+          mma.store_input_scales(pipeline_stage, buffer, scheduler.k_block_id + iter, scheduler.m_offset);
+          __syncwarp();
+          tma_fence_async_shared();
+          operand_step++;
+        }
+        if constexpr (Ctx::kUseUmmaSeparateInputScale && !Ctx::kUseUmmaCooperativeTma)
+          mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
         arrive_operand_ready(pipeline_stage);
         advance_stage();
       }
@@ -302,6 +336,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         }
         if constexpr (kHasChannelZeroPoint) consumer.arrive(kNumStages);
       } else {
+        mma.set_accumulator_tile(tile_index);
         epilogue.load_secondary_input_scale(scheduler.m_block_id, scheduler.current_shape_m, scheduler.m_offset);
         mbarrier_wait(&smem.umma_accumulator_ready, tile_index % 2);
         tcgen05_fence_after_thread_sync();

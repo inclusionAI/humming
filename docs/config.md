@@ -24,10 +24,36 @@ HummingKernel configurations are divided into three categories:
 | `has_zero_point` | Whether to enable zero point. When enabled, the dequantization changes from `x * scale` to `(x - zp) * scale`. Humming supports two zero point types (see below). |
 | `is_fp_zero_point` | Whether to use FP-type zero point. See `has_zero_point` for details. |
 | `has_bias` | Whether to use fused bias addition. |
+| `use_umma_ss` | Use shared-memory operands for native UMMA FP8/FP6/FP4 instead of the default TS path. Set before transforming weights; SS uses K-contiguous packed weight rows and requires `use_tma_b=True`. |
 | `mma_type` | Can be `mma`, `wgmma`, `umma`, or `mxmma`. This selects the weight layout and preferred tensor-core backend. |
 
-`umma` requires SM100-family GPUs, CUDA 12.9+, and FP16/BF16 inputs/outputs with FP32
-accumulation. It shares the `mma` weight layout; tuning selects the backend per shape.
+`umma` requires SM100-family GPUs and CUDA 12.9+, with FP16/BF16 outputs and FP32
+accumulation. It supports FP16/BF16, FP8 and FP4 inputs. The default TS path shares
+the `mma` weight layout where operand formats are compatible; tuning selects the
+backend per shape.
+
+`use_umma_ss=True` selects a distinct weight layout for native low-bit operands,
+so transformed SS weights cannot be passed to TS or MMA kernels. It supports
+unscaled FP8/FP6/FP4 weights and the existing microscaled combinations, including
+MXFP8, MXFP4 and NVFP4. FP4/FP6 weights paired with FP8 inputs are expanded by TMA
+in shared memory. SS uses 256 threads: loading/issuing/scales in the first warpgroup,
+and the existing epilogue in the second. Dense and MoE scheduling, secondary scales,
+Stream-K, and cooperative two-CTA execution use the same interfaces as TS.
+SS keeps the input-scale global-memory layout unchanged. It rearranges scales
+in the existing AS shared-memory storage when the M tile is 128-row aligned,
+and uses scratch storage otherwise. Scale copies and MMA instructions share
+one issuer and one TMEM scale buffer. With separate TMA loading warps, AS has
+its own completion barrier. When scales can be prepared without reading B/BS,
+two-CTA SS loads publish A/B completion to the issuer through cooperative TMA;
+the scale warp can prepare AS before those operands finish loading.
+
+With chunked output, separate output storage and non-indexed scheduling, SS
+uses the available TMEM capacity for an overlapping accumulator pair. The
+epilogue reads overlapping rows first so the next tile can begin computing.
+Native FP4 SS stages whose K size is a multiple of 256 use K64+96+96 issues
+per 256 elements. Other stage sizes retain the standard instruction shape.
+These optimizations are selected internally; TS keeps its existing schedule.
+SS remains opt-in; a smaller thread count does not guarantee a faster kernel.
 
 **`use_int_weight_scale` preprocessing:**
 

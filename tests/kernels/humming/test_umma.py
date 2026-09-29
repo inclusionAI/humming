@@ -78,7 +78,9 @@ def _assert_results(case, shape_ms):
         for kernel in variants:
             compiled = HummingKernel._id2kernel[int(kernel[0][2])]
             assert compiled.mma_type == MmaType.UMMA
-            assert compiled.num_threads == 256 + 128 * compiled.umma_num_dequant_warpgroups
+            dequant_threads = 0 if compiled.use_umma_ss else 128 * compiled.umma_num_dequant_warpgroups
+            expected_threads = 256 + dequant_threads
+            assert compiled.num_threads == expected_threads
             assert compiled.num_math_threads == 128
             assert compiled.num_load_threads in (64, 96)
             compiled.assert_smem_size_matches_estimate()
@@ -1172,8 +1174,19 @@ def test_umma_mxf8_mxf4_public_dispatch(activation_dtype, group_size, scale_dtyp
         (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.GROUPED_MASKED, 48, 128, 128, True),
     ),
 )
+@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
 def test_umma_cooperative_fp8(
-    a_dtype, b_dtype, microscale, gemm_type, block_m, block_n, block_k, stream_k, compiler, monkeypatch
+    a_dtype,
+    b_dtype,
+    microscale,
+    gemm_type,
+    block_m,
+    block_n,
+    block_k,
+    stream_k,
+    compiler,
+    monkeypatch,
+    use_umma_ss,
 ):
     monkeypatch.setenv("HUMMING_COMPILER", compiler)
     monkeypatch.setattr(KernelRuntime, "_instances", {})
@@ -1184,11 +1197,14 @@ def test_umma_cooperative_fp8(
             "mma_type": "umma",
             "block_shape": (block_m, block_n, block_k),
             "warp_shape": (block_m, 32, block_k),
-            "num_stages": 3,
+            "num_stages": 2 if use_umma_ss and block_n == 512 else 3,
             "num_ctas_per_sm": 1,
             "num_sms": 4,
             "use_warp_spec": True,
-            "use_tma": gemm_type != GemmType.INDEXED,
+            "use_tma": use_umma_ss or gemm_type != GemmType.INDEXED,
+            "use_tma_a": gemm_type != GemmType.INDEXED,
+            "use_tma_c": gemm_type != GemmType.INDEXED,
+            "use_tma_b": use_umma_ss or gemm_type != GemmType.INDEXED,
             "use_tma_as": microscale and gemm_type != GemmType.INDEXED,
             "use_stream_k": stream_k,
             "smem_reuse_mode": "none",
@@ -1213,6 +1229,7 @@ def test_umma_cooperative_fp8(
         weight_scale_type="group" if microscale else "channel",
         has_bias=not microscale,
         mma_type=MmaType.UMMA,
+        use_umma_ss=use_umma_ss,
     )
     case = KernelTestCase(
         name="cooperative-fp8",
@@ -1333,7 +1350,10 @@ def test_umma_cooperative_fp8(
         ),
     ),
 )
-@pytest.mark.parametrize("block_shape", ((64, 128, 128), (48, 256, 256)))
+@pytest.mark.parametrize(
+    "block_shape", ((64, 128, 128), (48, 256, 256), (256, 128, 256), (64, 128, 512), (240, 128, 256))
+)
+@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
 def test_umma_fp4_activation(
     a_dtype,
     b_dtype,
@@ -1346,6 +1366,7 @@ def test_umma_fp4_activation(
     compiler,
     block_shape,
     monkeypatch,
+    use_umma_ss,
 ):
     monkeypatch.setenv("HUMMING_COMPILER", compiler)
     monkeypatch.setattr(KernelRuntime, "_instances", {})
@@ -1360,7 +1381,10 @@ def test_umma_fp4_activation(
             num_ctas_per_sm=1,
             num_sms=4,
             use_warp_spec=True,
-            use_tma=use_tma,
+            use_tma=use_umma_ss or use_tma,
+            use_tma_a=use_tma,
+            use_tma_c=use_tma,
+            use_tma_b=use_umma_ss or use_tma,
             use_tma_as=use_tma,
             use_stream_k=True,
             smem_reuse_mode="none",
@@ -1385,6 +1409,7 @@ def test_umma_fp4_activation(
         weight_scale_2_type="tensor",
         has_bias=True,
         mma_type=MmaType.UMMA,
+        use_umma_ss=use_umma_ss,
     )
     case = KernelTestCase(
         name="fp4-activation",
@@ -1453,3 +1478,108 @@ def test_umma_secondary_input_scale(gemm_type, cta_group_size, quant_mode, has_c
         seed=2026,
     )
     _assert_results(case, (17, 625))
+
+
+@pytest.mark.parametrize(
+    "dtype,weight_dtype,block_m,gemm_type,shape_k",
+    (
+        (dtypes.float8e3m4, dtypes.float8e3m4, 64, GemmType.DENSE, 512),
+        (dtypes.float4e0m3, dtypes.float4e0m3, 48, GemmType.GROUPED_CONTIGUOUS, 512),
+        (dtypes.float8e4m3, dtypes.float8e4m3, 8, GemmType.INDEXED, 512),
+        (dtypes.float4e2m1, dtypes.float4e2m1, 16, GemmType.DENSE, 512),
+        (dtypes.float8e4m3, dtypes.float4e2m1, 32, GemmType.DENSE, 64),
+        (dtypes.float8e4m3, dtypes.float6e3m2, 32, GemmType.DENSE, 192),
+    ),
+)
+def test_umma_ss_small_tile(dtype, weight_dtype, block_m, gemm_type, shape_k, monkeypatch):
+    block_k = 128 if dtype.num_bits == 4 else 64
+
+    def select_config(layer_config, shape_m, gemm_type, **kwargs):
+        return dict(
+            mma_type="umma",
+            block_shape=(block_m, 64, block_k),
+            warp_shape=(block_m, 32, block_k),
+            num_stages=3,
+            num_sms=4,
+            use_tma=True,
+            use_tma_a=gemm_type != GemmType.INDEXED,
+            use_tma_c=gemm_type != GemmType.INDEXED,
+            use_stream_k=True,
+            smem_reuse_mode="none",
+        )
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+    is_fp4 = dtype.num_bits == 4
+    config = LayerConfig(
+        shape_n=256,
+        shape_k=shape_k,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+        a_dtype=dtype,
+        b_dtype=weight_dtype,
+        c_dtype=dtypes.bfloat16,
+        as_dtype=dtypes.float8e4m3 if is_fp4 else None,
+        bs_dtype=dtypes.float8e4m3 if is_fp4 else dtypes.bfloat16,
+        input_quant_mode="dynamic_group_token" if is_fp4 else None,
+        input_scale_group_size=16 if is_fp4 else 0,
+        weight_scale_group_size=16 if is_fp4 else 0,
+        weight_scale_type="group" if is_fp4 else "channel",
+        mma_type=MmaType.UMMA,
+        use_umma_ss=True,
+    )
+    case = KernelTestCase(
+        name="ss-small-tile",
+        layer_config=config,
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        top_k=2,
+        seed=2026,
+    )
+    _assert_results(case, (1, 137))
+
+
+@pytest.mark.parametrize("input_group,weight_group", ((0, 32), (32, 0)))
+@pytest.mark.parametrize("cooperative", (False, True))
+def test_umma_ss_optional_group_scales(input_group, weight_group, cooperative, monkeypatch):
+    # Exercise automatic configuration and cooperative readiness without AS or BS.
+    if cooperative:
+
+        def select_config(layer_config, shape_m, gemm_type, **kwargs):
+            return dict(
+                mma_type="umma",
+                block_shape=(64, 128, 128),
+                warp_shape=(64, 32, 128),
+                num_stages=3,
+                num_ctas_per_sm=1,
+                num_sms=4,
+                use_warp_spec=True,
+                use_tma=True,
+                use_tma_as=bool(input_group),
+                use_stream_k=True,
+                smem_reuse_mode="none",
+                umma_cta_group_size=2,
+                umma_output_chunk_rows=32,
+            )
+
+        monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+
+    config = LayerConfig(
+        shape_n=256,
+        shape_k=512,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        c_dtype=dtypes.bfloat16,
+        as_dtype=dtypes.float8e8m0 if input_group else None,
+        bs_dtype=dtypes.float8e8m0 if weight_group else dtypes.bfloat16,
+        input_quant_mode="dynamic_group" if input_group else "dynamic_token",
+        input_scale_group_size=input_group,
+        weight_scale_group_size=weight_group,
+        weight_scale_type="group" if weight_group else "channel",
+        mma_type=MmaType.UMMA,
+        use_umma_ss=True,
+    )
+    case = KernelTestCase(
+        name="ss-optional-group-scales",
+        layer_config=config,
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE, use_m_major_input_scale=cooperative),
+        seed=2026,
+    )
+    _assert_results(case, (1, 137, 833) if cooperative else (1, 137))
