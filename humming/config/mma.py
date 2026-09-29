@@ -177,6 +177,17 @@ class MmaOpClassImpl:
 class UmmaOpClassImpl(MmaOpClassImpl):
     mma_type = MmaType.UMMA
 
+    def __init__(self, m, n, k, a_dtype, b_dtype, cd_dtype, sf_dtype):
+        super().__init__(m, n, k, a_dtype, b_dtype, cd_dtype)
+        self.sf_is_e4m3 = sf_dtype == dtypes.float8e4m3
+
+    def to_cpp_str(self, include_class_name=False):
+        code = super().to_cpp_str()
+        code += f"\n  static constexpr bool kSFIsE4M3 = {str(self.sf_is_e4m3).lower()};"
+        if include_class_name:
+            code = f"class MmaOpClass {{\n{code}\n}};"
+        return code
+
     def generate_ptx(self, indent=0):
         return ""
 
@@ -495,6 +506,7 @@ class MmaOpClass:
                 dtypes.float16,
                 dtypes.float8e4m3,
                 dtypes.float8e5m2,
+                dtypes.float4e2m1,
             )
             if a_dtype.num_bits == 16:
                 assert a_dtype == b_dtype
@@ -507,7 +519,7 @@ class MmaOpClass:
                     dtypes.float6e2m3,
                 )
             assert cd_dtype == dtypes.float32
-            return UmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
+            return UmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype, sf_dtype)
         elif mma_type == MmaType.WGMMA:
             return WgmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)
         elif mma_type == MmaType.MXMMA:

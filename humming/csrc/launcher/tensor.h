@@ -6,8 +6,8 @@
 #include <cuda.h>
 
 inline bool uses_block_scaled_mma(const KernelData &kernel_data) {
-  bool is_fp8_umma = kernel_data.mma_type_id == 2 && get_dtype_num_bits(kernel_data.a_dtype_id) == 8;
-  return kernel_data.mma_type_id == 3 || is_fp8_umma;
+  bool is_low_bit_umma = kernel_data.mma_type_id == 2 && get_dtype_num_bits(kernel_data.a_dtype_id) <= 8;
+  return kernel_data.mma_type_id == 3 || is_low_bit_umma;
 }
 
 inline Tensor may_make_tensor_c(std::optional<Tensor> &c, const Tensor &a, KernelData &kernel_data, int64_t top_k) {

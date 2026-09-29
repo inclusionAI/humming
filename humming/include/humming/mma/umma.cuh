@@ -16,10 +16,15 @@ struct UMMA : WMMA<Ctx, ArithClass> {
 
   static constexpr bool kUseBlockScale = Ctx::kUseBlockScaledMma;
   static constexpr uint32_t kOperandColumns = Ctx::kWarpIters * 8;
-  static constexpr uint32_t kScaleWords = CEIL_DIV(Ctx::kWarpIters, 4);
+  static constexpr bool kUseFp4 = std::is_same<typename Ctx::ElementA, Float4E2M1>::value;
+  static constexpr uint32_t kScaleGroupSize = Ctx::kIsGroupInputScale ? Ctx::kInputScaleGroupSize : Ctx::kWeightScaleGroupSize;
+  static constexpr uint32_t kScalesPerIter = kUseBlockScale ? Ctx::kPartMmaShapeK / kScaleGroupSize : 1;
+  static constexpr uint32_t kScaleWords = CEIL_DIV(Ctx::kWarpIters * kScalesPerIter, 4);
+  static constexpr bool kScaleIsE4M3 = Ctx::MmaOpClass::kSFIsE4M3;
+  static constexpr uint32_t kScaleOne = kScaleIsE4M3 ? 0x38383838 : 0x7f7f7f7f;
   static constexpr uint32_t kWeightScaleColumns = kUseBlockScale ? 4 * kScaleWords : 0;
-  // Keep every K scale group's TMEM address aligned, including partial M tiles.
-  static constexpr uint32_t kInputScaleStride = static_next_power_of_2(CEIL_DIV(BlockShape::M, 32));
+  // Scale operand addresses are 4-column aligned, including partial M tiles.
+  static constexpr uint32_t kInputScaleStride = MAX(4u, static_next_power_of_2(CEIL_DIV(BlockShape::M, 32)));
   static constexpr uint32_t kInputScaleColumns = kUseBlockScale ? kInputScaleStride * kScaleWords : 0;
   static constexpr uint32_t kOperandBufferColumns = CEIL_DIV(kOperandColumns + kWeightScaleColumns + kInputScaleColumns, 16) * 16;
   static constexpr uint32_t kOutputGroups = CEIL_DIV(BlockShape::N, 128);
@@ -35,7 +40,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr bool kUseBf16 = std::is_same<typename Ctx::ElementA, BFloat16>::value;
   static constexpr bool kUseFp8 = std::is_same<typename Ctx::ElementA, Float8E4M3>::value ||
                                   std::is_same<typename Ctx::ElementA, Float8E5M2>::value;
-  static_assert(kUseFp8 || kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
+  static_assert(kUseFp4 || kUseFp8 || kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
   static_assert(BlockShape::N == 64 || BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512);
   static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
                 "UMMA requires warp M in [8, 256], divisible by 8 (one CTA) or 16 (two CTAs)");
@@ -100,14 +105,14 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       const uint32_t *scales = reinterpret_cast<const uint32_t *>(ctx.smem.stages[stage].bs);
       uint32_t base = tmem_column + ctx.math_group * kGroupColumns +
                       operand_buffer * kOperandBufferColumns + kOperandColumns;
-      uint32_t phase = (k_block * Ctx::kWarpIters) % 4;
+      uint32_t phase = (k_block * Ctx::kWarpIters * kScalesPerIter) % 4;
       PRAGMA_UNROLL
       for (uint32_t word = 0; word < kScaleWords; word++) {
         uint32_t values[4];
         PRAGMA_UNROLL
         for (uint32_t column = 0; column < 4; column++) {
           uint32_t n = ctx.math_group * 128 + column * 32 + threadIdx.x % 32;
-          uint32_t packed = 0x7f7f7f7f;
+          uint32_t packed = kScaleOne;
           if constexpr (Ctx::kIsGroupWeightScale) {
             if (n < BlockShape::N) {
               uint32_t row = n + (n_block * BlockShape::N) % 128;
@@ -130,14 +135,14 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       const uint32_t *scales = reinterpret_cast<const uint32_t *>(ctx.smem.stages[stage].as);
       uint32_t base = tmem_column + ctx.math_group * kGroupColumns +
                       buffer * kOperandBufferColumns + kOperandColumns + kWeightScaleColumns;
-      uint32_t phase = (k_block * Ctx::kWarpIters) % 4;
+      uint32_t phase = (k_block * Ctx::kWarpIters * kScalesPerIter) % 4;
       PRAGMA_UNROLL
       for (uint32_t word = 0; word < kScaleWords; word++) {
         uint32_t values[kInputScaleStride];
         PRAGMA_UNROLL
         for (uint32_t column = 0; column < kInputScaleStride; column++) {
           uint32_t m = column * 32 + threadIdx.x % 32;
-          uint32_t packed = 0x7f7f7f7f;
+          uint32_t packed = kScaleOne;
           if constexpr (Ctx::kIsGroupInputScale) {
             if (m < BlockShape::M) {
               uint32_t row = m;
@@ -199,10 +204,19 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       constexpr uint32_t kInputFormat = std::is_same<typename Ctx::ElementA, Float8E5M2>::value ? 1 : 0;
       if constexpr (kUseBlockScale) {
         uint32_t scale_base = base + buffer * kOperandBufferColumns + kOperandColumns;
-        tcgen05_mma_mxf8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(
-            accumulator, base + buffer * kOperandBufferColumns + k * 8, descriptor,
-            scale_base + k / 4 * 4,
-            scale_base + kWeightScaleColumns + k / 4 * kInputScaleStride, k % 4, !is_first || k != 0);
+        uint32_t scale_word = k * kScalesPerIter / 4;
+        uint32_t scale_id = k * kScalesPerIter % 4;
+        uint32_t weight_scale = scale_base + scale_word * 4;
+        uint32_t input_scale = scale_base + kWeightScaleColumns + scale_word * kInputScaleStride;
+        if constexpr (kUseFp4) {
+          tcgen05_mma_mxf4nvf4<WarpShape::M, kScaleGroupSize, kScaleIsE4M3, Ctx::kUmmaCtaGroupSize>(
+              accumulator, base + buffer * kOperandBufferColumns + k * 8, descriptor,
+              weight_scale, input_scale, scale_id, !is_first || k != 0);
+        } else {
+          tcgen05_mma_mxf8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(
+              accumulator, base + buffer * kOperandBufferColumns + k * 8, descriptor,
+              weight_scale, input_scale, scale_id, !is_first || k != 0);
+        }
       } else if constexpr (kUseFp8) {
         tcgen05_mma_f8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(accumulator,
                                                                                               base + buffer * kOperandBufferColumns + k * 8, descriptor, !is_first || k != 0);

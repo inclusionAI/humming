@@ -93,7 +93,7 @@ class LayerConfig(BaseHummingConfig):
             return True
         return (
             self.mma_type == MmaType.UMMA
-            and self.a_dtype.num_bits == 8
+            and self.a_dtype.num_bits <= 8
             and (self.input_scale_group_size > 0 or self.weight_scale_group_size > 0)
         )
 
@@ -262,12 +262,26 @@ class LayerConfig(BaseHummingConfig):
             )
             has_supported_fp8_scales = has_fp8_epilogue_scales or has_mx_scales
             use_fp8_umma = has_fp8_output and has_fp8_operands and has_supported_fp8_scales
+            has_fp4_operands = self.a_dtype == self.b_dtype == dtypes.float4e2m1
+            has_fp4_scale_format = (self.input_scale_group_size, self.bs_dtype) in (
+                (32, dtypes.float8e8m0),
+                (16, dtypes.float8e8m0),
+                (16, dtypes.float8e4m3),
+            )
+            has_fp4_scales = (
+                has_fp4_scale_format
+                and self.input_scale_group_size == self.weight_scale_group_size
+                and self.as_dtype in (None, self.bs_dtype)
+                and not self.has_zero_point
+                and not self.is_block_weight_scale
+            )
+            use_fp4_umma = has_fp8_output and has_fp4_operands and has_fp4_scales
             use_bf16_umma = self.a_dtype == self.c_dtype == dtypes.bfloat16
             if self.sm_version // 10 == 9:
                 self.mma_type = MmaType.WGMMA
             elif self.mxmma_supported:
                 self.mma_type = MmaType.MXMMA
-            elif self.sm_version // 10 == 10 and (use_bf16_umma or use_fp8_umma):
+            elif self.sm_version // 10 == 10 and (use_bf16_umma or use_fp8_umma or use_fp4_umma):
                 from humming.jit.runtime import KernelRuntime
 
                 version = _cuda_compiler_version(KernelRuntime._get_compiler())
@@ -275,7 +289,7 @@ class LayerConfig(BaseHummingConfig):
             else:
                 self.mma_type = MmaType.MMA
         if self.has_input_scale_2:
-            assert self.mma_type == MmaType.MXMMA, f"{self.input_quant_mode.value} requires mma_type='mxmma'"
+            assert self.use_block_scaled_mma, f"{self.input_quant_mode.value} requires block-scaled MMA"
         if self.use_block_scaled_mma and self.is_group_weight_scale and self.input_scale_group_size > 0:
             assert self.input_scale_group_size == self.weight_scale_group_size
         if self.input_quant_mode == InputQuantizationMode.DynamicGroupToken:

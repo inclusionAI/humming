@@ -131,8 +131,18 @@ Two-CTA execution still requires chunked output, N divisible by twice block N,
 and `num_ctas_per_sm=1`. Both TMA and cp.async stage loads are supported.
 Cooperative instructions support FP16/BF16, ordinary FP8 with FP8/FP6/FP4
 weights, and MXFP8 with MXFP8/MXFP6/MXFP4 weights and group-32 E8M0 scales.
+FP4 activations use native `mxf4nvf4` instructions with packed FP4 weights:
+MXFP4 uses group-32 E8M0, while group-16 supports E8M0 or E4M3 (NVFP4).
+Both one-CTA and two-CTA execution support these formats. The SM100 dispatcher
+also selects UMMA for supported FP4 activation configurations.
+
 Tensor/token activation scales and MX activation scales use the existing
-loaders. Channel weight scales, channel secondary scales,
+loaders. `static_tensor_dynamic_group` applies the secondary tensor scale in
+the UMMA epilogue; NVFP4 `dynamic_group_token` similarly applies the secondary
+per-token scale before output conversion. Input-scale GMEM layout is unchanged.
+The TMEM scale allocation pads small M tiles to keep successive K scale words
+aligned. The resource estimator accounts for the scale group size and padding.
+Channel weight scales, channel secondary scales,
 bias, and channel/group zero points reuse the existing loaders and arithmetic.
 Channel parameters are released once all consuming threads have read them.
 Both output paths support Stream-K: the first slice stores each chunk, later
@@ -144,9 +154,9 @@ K is long enough to amortize the pipeline, and the estimated shared-memory
 allocation fits. The existing Stream-K decision is preserved for CTA pairs.
 Without Stream-K, underfilled output waves retain single-CTA execution. Chunked
 output remains opt-in for single-CTA execution because it did not improve the
-measured large dense cases by itself. FP8 cooperative execution is currently
+measured large dense cases by itself. FP8/FP4 cooperative execution is currently
 explicitly configured with `umma_cta_group_size=2` and
-`umma_output_chunk_rows=32`; automatic FP8 selection remains unchanged.
+`umma_output_chunk_rows=32`; automatic cooperative selection remains limited to FP16/BF16.
 
 ### SM100 MoE tile selection
 

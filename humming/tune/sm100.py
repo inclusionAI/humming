@@ -105,6 +105,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     expert_probability_cv = 0.25
     b16_allowed_dtypes = [dtypes.float16, dtypes.bfloat16]
     b8_allowed_dtypes = [dtypes.float8e4m3, dtypes.float8e5m2]
+    b4_allowed_dtypes = [dtypes.float4e2m1]
 
     @classmethod
     def _fits_resources(cls, layer_config, block_shape, num_stages, num_ctas_per_sm):
@@ -112,8 +113,9 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         output_groups = math.ceil(block_n / 128)
         operand_columns = block_k * layer_config.a_dtype.num_bits // 32
         if layer_config.use_block_scaled_mma:
-            scale_words = math.ceil(block_k / 128)
-            input_scale_stride = 1 << (math.ceil(block_m / 32) - 1).bit_length()
+            scale_group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
+            scale_words = math.ceil(block_k / (4 * scale_group_size))
+            input_scale_stride = max(4, 1 << (math.ceil(block_m / 32) - 1).bit_length())
             operand_columns += scale_words * (4 + input_scale_stride)
             operand_columns = round_up(operand_columns, 16)
         stage_columns = output_groups * (num_stages * operand_columns + block_m)
@@ -390,8 +392,11 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                     for block_m in range(8, max_block_m + 1, 8):
                         operand_columns = block_k * layer_config.a_dtype.num_bits // 32
                         if layer_config.use_block_scaled_mma:
-                            scale_words = math.ceil(block_k / 128)
-                            input_scale_stride = 1 << (math.ceil(block_m / 32) - 1).bit_length()
+                            scale_group_size = (
+                                layer_config.input_scale_group_size or layer_config.weight_scale_group_size
+                            )
+                            scale_words = math.ceil(block_k / (4 * scale_group_size))
+                            input_scale_stride = max(4, 1 << (math.ceil(block_m / 32) - 1).bit_length())
                             operand_columns += scale_words * (4 + input_scale_stride)
                             operand_columns = round_up(operand_columns, 16)
                         for stages in range(min(4, max(2, k_iters)), min_stages - 1, -1):
@@ -509,6 +514,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
 
 
 class Sm100Heuristics(Sm100MmaHeuristics):
+    b4_allowed_dtypes = [dtypes.float4e2m1]
+
     @classmethod
     def _should_use_mma(cls, layer_config: LayerConfig, shape_m: int) -> bool:
         effective_m = float(shape_m)

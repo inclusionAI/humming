@@ -35,7 +35,7 @@ private:
   static constexpr bool kIsGroupOrBlockWeightScale = kIsGroupWeightScale || kIsBlockWeightScale;
   static constexpr bool kHasChannelWeightScale = Ctx::kHasChannelWeightScale;
   static constexpr bool kHasTensorWeightScale = Ctx::kHasTensorWeightScale;
-  static constexpr bool kUseNativeChannelScale = Ctx::kUseUmma && ElementA::kBits == 8 && kHasChannelWeightScale;
+  static constexpr bool kUseNativeChannelScale = Ctx::kUseUmma && ElementA::kBits <= 8 && kHasChannelWeightScale;
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
   static constexpr bool kUseNativeDequantB =
       Ctx::kUseNativeDequant && kUseNativeWeightDequant<ElementB, ElementA>;
@@ -79,7 +79,7 @@ public:
       // Apply channel scaling before narrowing: an FP8 dot product can exceed
       // FP16's range even when the scaled output is representable.
       if (row_group == 0 && column_group == 0) may_process_on_smem_write(0, 0);
-      const uint32_t *scales = ElementBS::kBits == 8 ? dq_bs : bs;
+      const uint32_t *scales = kIsChannelWeightScale2 ? bs2 : (ElementBS::kBits == 8 ? dq_bs : bs);
       uint32_t channel = (threadIdx.x % 32) / 4;
       uint32_t packed_scale = __shfl_sync(0xffffffff, scales[column_group], channel / 2);
       float2 pair = this->num22float2(*reinterpret_cast<scalar_t2 *>(&packed_scale));

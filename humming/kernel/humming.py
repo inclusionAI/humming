@@ -323,6 +323,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.mma_a_dtype,
             self.mma_b_dtype,
             mma_cd_dtype,
+            sf_dtype=self.as_dtype if self.is_group_input_scale else self.bs_dtype,
         )
 
     def check_shape(self):
@@ -360,7 +361,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.warp_shape[2] >= 128
 
     def check_scale(self):
-        if self.mma_type == MmaType.MXMMA:
+        if self.use_block_scaled_mma:
             mma_k = 256 // self.a_dtype.num_bits
             for gs in (self.input_scale_group_size, self.weight_scale_group_size):
                 if gs > 0:
@@ -395,7 +396,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             dtypes.int4: 80,
             dtypes.int8: 75,
             dtypes.float4e0m3: 120,
-            dtypes.float4e2m1: 120,
+            dtypes.float4e2m1: 100 if self.mma_type == MmaType.UMMA else 120,
             dtypes.float8e3m4: 120,
             dtypes.float8e4m3: 89,
             dtypes.float8e5m2: 89,
@@ -452,7 +453,13 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             )
         if self.mma_type == MmaType.UMMA:
             assert self.umma_num_dequant_warpgroups in (1, 2)
-            assert self.a_dtype in (dtypes.bfloat16, dtypes.float16, dtypes.float8e4m3, dtypes.float8e5m2)
+            assert self.a_dtype in (
+                dtypes.bfloat16,
+                dtypes.float16,
+                dtypes.float8e4m3,
+                dtypes.float8e5m2,
+                dtypes.float4e2m1,
+            )
             if self.a_dtype.num_bits == 8:
                 assert self.b_dtype in (
                     dtypes.float8e4m3,
@@ -471,6 +478,17 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                             assert group_size == 32 and scale_dtype == dtypes.float8e8m0, (
                                 "mxf8f6f4 requires E8M0 scales with group size 32"
                             )
+            if self.a_dtype.num_bits == 4:
+                assert not self.is_block_weight_scale and not self.has_zero_point
+                assert self.b_dtype == dtypes.float4e2m1
+                assert self.use_block_scaled_mma
+                group_size = self.input_scale_group_size or self.weight_scale_group_size
+                scale_dtype = self.as_dtype if self.is_group_input_scale else self.bs_dtype
+                assert (group_size, scale_dtype) in (
+                    (32, dtypes.float8e8m0),
+                    (16, dtypes.float8e8m0),
+                    (16, dtypes.float8e4m3),
+                ), "FP4 UMMA requires group-32 E8M0 or group-16 E8M0/E4M3 scales"
             block_m, block_n, block_k = self.block_shape
             warp_m, warp_n, warp_k = self.warp_shape
             assert block_m == warp_m, "UMMA requires block M to equal warp M"

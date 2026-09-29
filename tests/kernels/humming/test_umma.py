@@ -1030,6 +1030,7 @@ def test_umma_cooperative_dequant(
         (64, 128, 128, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (32, 64, 64, True, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (32, 512, 128, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
+        (8, 64, 256, False, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (32, 512, 128, False, 2, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (96, 128, 256, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (160, 128, 256, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
@@ -1084,16 +1085,37 @@ def test_umma_mxf8_mxf4(
     _assert_results(case, (17, 257))
 
 
-def test_umma_mxf8_mxf4_public_dispatch():
-    schema = HummingWeightSchema(b_dtype="float4e2m1", bs_dtype="float8e8m0", weight_scale_group_size=32)
+@pytest.mark.parametrize(
+    "activation_dtype,group_size,scale_dtype,quant_mode",
+    (
+        ("float8e4m3", 32, "float8e8m0", "dynamic_group"),
+        ("float4e2m1", 32, "float8e8m0", "dynamic_group"),
+        ("float4e2m1", 16, "float8e4m3", "dynamic_group_token"),
+        ("float4e2m1", 16, "float8e4m3", "static_tensor_dynamic_group"),
+        ("float8e4m3", 32, "float8e8m0", "static_tensor_dynamic_group"),
+    ),
+)
+def test_umma_mxf8_mxf4_public_dispatch(activation_dtype, group_size, scale_dtype, quant_mode):
+    schema = HummingWeightSchema(
+        b_dtype="float4e2m1", bs_dtype=scale_dtype, weight_scale_group_size=group_size
+    )
     weight = generate_random_tensor((256, 256), torch.bfloat16, device="cuda")
     tensors = schema.quant_tensor(weight, schema, torch.bfloat16)
     weight_ref = schema.dequant_tensors(tensors).float()
+    static_scale = None
+    if quant_mode == "static_tensor_dynamic_group":
+        static_scale = torch.tensor([0.25], device="cuda")
+        tensors["input_scale_2"] = static_scale
     layer = HummingLayer(
         shape_n=256,
         shape_k=256,
         weight_config=schema,
-        input_config={"dtype": "float8e4m3", "group_size": 32, "scale_dtype": "float8e8m0"},
+        input_config={
+            "dtype": activation_dtype,
+            "group_size": group_size,
+            "scale_dtype": scale_dtype,
+            "quant_mode": quant_mode,
+        },
         torch_dtype=torch.bfloat16,
     ).cuda()
     layer.load_state_dict(tensors, strict=False)
@@ -1109,7 +1131,7 @@ def test_umma_mxf8_mxf4_public_dispatch():
     )
     for shape_m in (1, 17, 257):
         inputs = torch.randn((shape_m, 256), device="cuda", dtype=torch.bfloat16)
-        inputs_ref, _, _, _ = runner.prepare_inputs(inputs)
+        inputs_ref, _, _, _ = runner.prepare_inputs(inputs, static_scale)
         outputs = layer(inputs)
         expected = inputs_ref @ weight_ref.T
         torch.testing.assert_close(outputs, expected.to(torch.bfloat16), rtol=0.01, atol=0.05)
@@ -1187,3 +1209,126 @@ def test_umma_cooperative_fp8(
         seed=2026,
     )
     _assert_results(case, (17, 13 * block_m + 1))
+
+
+@pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
+@pytest.mark.parametrize(
+    "group_size,scale_dtype,quant_mode,cta_group_size,gemm_type,use_tma",
+    (
+        (32, dtypes.float8e8m0, "dynamic_group", 1, GemmType.DENSE, True),
+        (32, dtypes.float8e8m0, "static_tensor_dynamic_group", 2, GemmType.DENSE, True),
+        (16, dtypes.float8e4m3, "dynamic_group_token", 1, GemmType.DENSE, True),
+        (16, dtypes.float8e4m3, "static_tensor_dynamic_group", 2, GemmType.DENSE, False),
+        (16, dtypes.float8e8m0, "dynamic_group", 1, GemmType.GROUPED_CONTIGUOUS, True),
+        (16, dtypes.float8e4m3, "dynamic_group_token", 2, GemmType.INDEXED, False),
+    ),
+)
+@pytest.mark.parametrize("block_shape", ((64, 128, 128), (48, 256, 256)))
+def test_umma_fp4_activation(
+    group_size,
+    scale_dtype,
+    quant_mode,
+    cta_group_size,
+    gemm_type,
+    use_tma,
+    compiler,
+    block_shape,
+    monkeypatch,
+):
+    monkeypatch.setenv("HUMMING_COMPILER", compiler)
+    monkeypatch.setattr(KernelRuntime, "_instances", {})
+    monkeypatch.setattr(HummingKernel, "_str2kernel_cache", {})
+
+    def select_config(layer_config, shape_m, gemm_type, **kwargs):
+        return dict(
+            mma_type="umma",
+            block_shape=block_shape,
+            warp_shape=(block_shape[0], 32, block_shape[2]),
+            num_stages=3,
+            num_ctas_per_sm=1,
+            num_sms=4,
+            use_warp_spec=True,
+            use_tma=use_tma,
+            use_tma_as=use_tma,
+            use_stream_k=True,
+            smem_reuse_mode="none",
+            umma_cta_group_size=cta_group_size,
+            umma_output_chunk_rows=32,
+        )
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+    config = LayerConfig(
+        shape_n=2 * block_shape[1],
+        shape_k=1024,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+        a_dtype=dtypes.float4e2m1,
+        b_dtype=dtypes.float4e2m1,
+        c_dtype=dtypes.bfloat16,
+        as_dtype=scale_dtype,
+        bs_dtype=scale_dtype,
+        input_scale_group_size=group_size,
+        weight_scale_group_size=group_size,
+        input_quant_mode=quant_mode,
+        weight_scale_type="group",
+        weight_scale_2_type="tensor",
+        has_bias=True,
+        mma_type=MmaType.UMMA,
+    )
+    case = KernelTestCase(
+        name="fp4-activation",
+        layer_config=config,
+        compute_config=ComputeConfig(gemm_type=gemm_type, use_m_major_input_scale=use_tma),
+        top_k=2,
+        seed=2026,
+    )
+    _assert_results(case, (17, 833))
+
+
+@pytest.mark.parametrize("gemm_type", (GemmType.DENSE, GemmType.GROUPED_CONTIGUOUS, GemmType.INDEXED))
+@pytest.mark.parametrize("cta_group_size", (1, 2))
+def test_umma_fp8_secondary_input_scale(gemm_type, cta_group_size, monkeypatch):
+    def select_config(layer_config, shape_m, gemm_type, **kwargs):
+        return dict(
+            mma_type="umma",
+            block_shape=(48, 128, 64),
+            warp_shape=(48, 32, 64),
+            num_stages=3,
+            num_ctas_per_sm=1,
+            num_sms=4,
+            use_warp_spec=True,
+            use_tma=gemm_type != GemmType.INDEXED,
+            use_stream_k=True,
+            smem_reuse_mode="none",
+            umma_cta_group_size=cta_group_size,
+            umma_output_chunk_rows=32,
+        )
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+    config = LayerConfig(
+        shape_n=256,
+        shape_k=1024,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        c_dtype=dtypes.float16,
+        as_dtype=dtypes.float8e8m0,
+        bs_dtype=dtypes.float8e8m0,
+        input_scale_group_size=32,
+        weight_scale_group_size=32,
+        input_quant_mode="static_tensor_dynamic_group",
+        weight_scale_type="group",
+        weight_scale_2_type="channel",
+        has_bias=True,
+        mma_type=MmaType.UMMA,
+    )
+    case = KernelTestCase(
+        name="fp8-secondary",
+        layer_config=config,
+        compute_config=ComputeConfig(
+            gemm_type=gemm_type,
+            use_m_major_input_scale=gemm_type != GemmType.INDEXED,
+        ),
+        top_k=2,
+        seed=2026,
+    )
+    _assert_results(case, (17, 625))
