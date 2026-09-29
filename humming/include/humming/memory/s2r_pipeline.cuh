@@ -24,7 +24,7 @@ private:
   static constexpr bool kHasInputScale = Ctx::kHasInputScale;
   static constexpr bool kHasInputScale2 = Ctx::kHasInputScale2;
   static constexpr bool kIsChannelInputScale = kHasInputScale && !Ctx::kIsGroupInputScale && !Ctx::kIsTensorInputScale;
-  static constexpr bool kIsChannelInputScale2 = kHasInputScale2 && !Ctx::kIsTensorInputScale2;
+  static constexpr bool kIsChannelInputScale2 = !Ctx::kUseUmma && kHasInputScale2 && !Ctx::kIsTensorInputScale2;
   static constexpr bool kIsGroupInputScale = kHasInputScale && Ctx::kIsGroupInputScale;
   static constexpr bool kIsChannelWeightScale = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsChannelWeightScale2 = Ctx::kIsChannelWeightScale2;

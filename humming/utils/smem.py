@@ -124,7 +124,11 @@ def estimate_smem_size_layer(
         and not layer_config.is_group_input_scale
         and not layer_config.is_tensor_input_scale
     )
-    has_channel_input_scale |= layer_config.has_input_scale_2 and not layer_config.is_tensor_input_scale_2
+    has_channel_input_scale |= (
+        layer_config.mma_type != MmaType.UMMA
+        and layer_config.has_input_scale_2
+        and not layer_config.is_tensor_input_scale_2
+    )
     channel_as_bytes = (scale_block_m * 4) if has_channel_input_scale else 0
 
     channel_bytes = _struct_size(

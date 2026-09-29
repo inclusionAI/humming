@@ -1396,14 +1396,23 @@ def test_umma_fp4_activation(
     _assert_results(case, (17, 833))
 
 
-@pytest.mark.parametrize("gemm_type", (GemmType.DENSE, GemmType.GROUPED_CONTIGUOUS, GemmType.INDEXED))
+@pytest.mark.parametrize(
+    "gemm_type", (GemmType.DENSE, GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED, GemmType.INDEXED)
+)
 @pytest.mark.parametrize("cta_group_size", (1, 2))
-def test_umma_fp8_secondary_input_scale(gemm_type, cta_group_size, monkeypatch):
+@pytest.mark.parametrize(
+    "quant_mode,has_channel_data", (("static_tensor_dynamic_group", True), ("dynamic_group_token", False))
+)
+def test_umma_secondary_input_scale(gemm_type, cta_group_size, quant_mode, has_channel_data, monkeypatch):
+    has_token_scale = quant_mode == "dynamic_group_token"
+    block_k = 128 if has_token_scale else 64
+    group_size = 16 if has_token_scale else 32
+
     def select_config(layer_config, shape_m, gemm_type, **kwargs):
         return dict(
             mma_type="umma",
-            block_shape=(48, 128, 64),
-            warp_shape=(48, 32, 64),
+            block_shape=(48, 128, block_k),
+            warp_shape=(48, 32, block_k),
             num_stages=3,
             num_ctas_per_sm=1,
             num_sms=4,
@@ -1420,21 +1429,21 @@ def test_umma_fp8_secondary_input_scale(gemm_type, cta_group_size, monkeypatch):
         shape_n=256,
         shape_k=1024,
         num_experts=0 if gemm_type == GemmType.DENSE else 4,
-        a_dtype=dtypes.float8e4m3,
+        a_dtype=dtypes.float4e2m1 if has_token_scale else dtypes.float8e4m3,
         b_dtype=dtypes.float4e2m1,
         c_dtype=dtypes.float16,
-        as_dtype=dtypes.float8e8m0,
-        bs_dtype=dtypes.float8e8m0,
-        input_scale_group_size=32,
-        weight_scale_group_size=32,
-        input_quant_mode="static_tensor_dynamic_group",
+        as_dtype=dtypes.float8e4m3 if has_token_scale else dtypes.float8e8m0,
+        bs_dtype=dtypes.float8e4m3 if has_token_scale else dtypes.float8e8m0,
+        input_scale_group_size=group_size,
+        weight_scale_group_size=group_size,
+        input_quant_mode=quant_mode,
         weight_scale_type="group",
-        weight_scale_2_type="channel",
-        has_bias=True,
+        weight_scale_2_type="channel" if has_channel_data else "tensor",
+        has_bias=has_channel_data,
         mma_type=MmaType.UMMA,
     )
     case = KernelTestCase(
-        name="fp8-secondary",
+        name="secondary-input-scale",
         layer_config=config,
         compute_config=ComputeConfig(
             gemm_type=gemm_type,

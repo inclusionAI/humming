@@ -302,6 +302,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         }
         if constexpr (kHasChannelZeroPoint) consumer.arrive(kNumStages);
       } else {
+        epilogue.load_secondary_input_scale(scheduler.m_block_id, scheduler.current_shape_m, scheduler.m_offset);
         mbarrier_wait(&smem.umma_accumulator_ready, tile_index % 2);
         tcgen05_fence_after_thread_sync();
         if constexpr (Ctx::kUseTmaC && !Ctx::kUmmaOutputChunkRows) tma_wait_store_group<0, true>();

@@ -93,10 +93,35 @@ public:
     }
   }
 
+  // Load directly into epilogue registers while UMMA is still accumulating. Indexed
+  // rows come from the immutable routing table, not the next tile's shared indices.
+  CUDA_INLINE
+  void load_secondary_input_scale(uint32_t m_block_id, uint32_t current_shape_m, uint32_t m_offset) {
+    if constexpr (Ctx::kHasInputScale2) {
+      const uint32_t *scales = reinterpret_cast<const uint32_t *>(ctx.params.as2);
+      if constexpr (Ctx::kIsTensorInputScale2) {
+        arith.as[0] = scales[0];
+      } else {
+        PRAGMA_UNROLL
+        for (uint32_t i = 0; i < WarpShape::M / 8; i++) {
+          uint32_t row = i * 8 + ctx.lane_id() / 4;
+          if constexpr (Ctx::kIsIndexedGemm) {
+            row = ctx.params.sorted_ids_ptr[m_block_id * BlockShape::M + row] / ctx.params.top_k;
+          } else if constexpr (kIsGroupedGemm) {
+            row += m_offset;
+          } else {
+            row += m_block_id * BlockShape::M;
+          }
+          arith.as[i] = row < current_shape_m ? scales[row] : __float_as_uint(1.0f);
+        }
+      }
+    }
+  }
+
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t m_block_id, uint32_t n_block_id, uint32_t current_shape_m, uint32_t m_offset) {
     gmem_writer.seek(m_block_id, n_block_id, current_shape_m, m_offset);
-    if constexpr (kHasTensorInputScale) {
+    if constexpr (kHasTensorInputScale && !(Ctx::kUseUmma && Ctx::kHasInputScale2)) {
       const uint32_t *as_ptr = reinterpret_cast<const uint32_t *>(Ctx::kIsTensorInputScale2 ? ctx.params.as2 : ctx.params.as);
       arith.as[0] = as_ptr[0];
     }

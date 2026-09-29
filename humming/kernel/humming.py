@@ -560,7 +560,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.is_grouped_gemm and self.block_shape[0] + 4 > 256:
             self.use_tma_as = False
             self.use_tma_as2 = False
-        if not self.has_input_scale_2 or self.is_tensor_input_scale_2:
+        # UMMA preloads secondary scales directly into epilogue registers.
+        if self.mma_type == MmaType.UMMA or not self.has_input_scale_2 or self.is_tensor_input_scale_2:
             self.use_tma_as2 = False
 
         if self.is_indexed_gemm:

@@ -52,7 +52,7 @@
 #define IF_HAS_BIAS(x)
 #endif
 
-#if (HUMMING_HAS_INPUT_SCALE && HUMMING_INPUT_SCALE_GROUP_SIZE == 0 && !HUMMING_IS_TENSOR_INPUT_SCALE) || (HUMMING_HAS_INPUT_SCALE_2 && !HUMMING_IS_TENSOR_INPUT_SCALE_2)
+#if (HUMMING_HAS_INPUT_SCALE && HUMMING_INPUT_SCALE_GROUP_SIZE == 0 && !HUMMING_IS_TENSOR_INPUT_SCALE) || (HUMMING_MMA_TYPE_ID != 2 && HUMMING_HAS_INPUT_SCALE_2 && !HUMMING_IS_TENSOR_INPUT_SCALE_2)
 #define IF_HAS_CHANNEL_INPUT_SCALE(x) x
 #else
 #define IF_HAS_CHANNEL_INPUT_SCALE(x)
@@ -103,7 +103,7 @@ private:
   static constexpr bool kHasInputScale = LayerConfig::kHasInputScale;
   static constexpr bool kHasInputScale2 = LayerConfig::kHasInputScale2;
   static constexpr bool kIsChannelInputScale = kHasInputScale && !LayerConfig::kIsGroupInputScale && !LayerConfig::kIsTensorInputScale;
-  static constexpr bool kIsChannelInputScale2 = kHasInputScale2 && !LayerConfig::kIsTensorInputScale2;
+  static constexpr bool kIsChannelInputScale2 = LayerConfig::kMmaType != MmaType::UMMA && kHasInputScale2 && !LayerConfig::kIsTensorInputScale2;
   static constexpr bool kIsGroupInputScale = kHasInputScale && LayerConfig::kIsGroupInputScale;
   static constexpr bool kHasChannelInputScale = kIsChannelInputScale || kIsChannelInputScale2;
   static constexpr bool kIsChannelWeightScale = LayerConfig::kIsChannelWeightScale;
