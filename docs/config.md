@@ -93,7 +93,7 @@ weight_scale = weight_scale.to(torch.int16).view(dtype)
 - `block_shape[i]` must be a power-of-2 multiple of `warp_shape[i]`.
 - `block_shape_n` must be at least 64.
 - When using WGMMA, `block_shape_n` must be at least 4x `warp_shape_n`.
-- When using UMMA, block M/K must equal warp M/K, warp N is 32, M is a multiple of 8 in [8, 256], and K is a power of two of at least 32. Block N can be 64, 128, 256, or 512; the tile must fit SMEM and TMEM.
+- When using UMMA, block M/K must equal warp M/K, warp N is 32, M is a multiple of 8 in [8, 256], and K is a power of two of at least 32. Block N can be 128, 256, or 512; the tile must fit SMEM and TMEM.
 - For indexed GEMMs, align `sorted_ids` and `expert_ids` to each projection's `block_shape_m`.
 - `warp_shape_m` must be a multiple of MMA shape M.
 - Valid values for `warp_shape_n` and `warp_shape_k` depend on the activation type:
@@ -147,7 +147,7 @@ layout and register-to-TMEM conversion. MMA completion releases operands in both
 CTAs through multicast barrier commits; this does not enable TMA multicast.
 
 Chunked output supports dense, indexed, and grouped GEMMs, TMA or ordinary
-stores, and all `smem_reuse_mode` values. Block N can be 64, 128, 256, or 512;
+stores, and all `smem_reuse_mode` values. Block N can be 128, 256, or 512;
 block M is a multiple of 8 for one CTA, or 16 for two CTAs, subject to SMEM and
 TMEM capacity. The two-CTA M alignment comes from the transposed `tcgen05.mma`
 instruction's N dimension. Indexed output uses ordinary stores and preserves

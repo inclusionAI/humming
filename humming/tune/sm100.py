@@ -110,7 +110,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     @staticmethod
     def _get_tmem_columns(layer_config, block_shape, num_stages, num_ctas_per_sm, cta_group_size=1):
         block_m, block_n, block_k = block_shape
-        output_groups = math.ceil(block_n / 128)
+        output_groups = block_n // 128
         operand_columns = 0 if layer_config.use_umma_ss else block_k * layer_config.a_dtype.num_bits // 32
         if layer_config.use_block_scaled_mma:
             scale_group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
@@ -320,7 +320,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             if shape_k % block_k:
                 continue
             k_iters = shape_k // block_k
-            for block_n in (256, 128, 64):
+            for block_n in (256, 128):
                 if shape_n % block_n:
                     continue
                 block_shape = (block_m, block_n, block_k)
@@ -328,14 +328,14 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                 # Narrow short-K grids need more N tiles because splitting K
                 # cannot provide enough work for all SMs.
                 can_fill_grid = output_tiles * k_iters >= num_sms * 4
-                if block_n > 64 and output_tiles < num_sms and not can_fill_grid:
+                if block_n > 128 and output_tiles < num_sms and not can_fill_grid:
                     continue
 
                 for num_ctas_per_sm in (2, 1):
                     resident_ctas = num_sms * num_ctas_per_sm
                     # Two resident CTAs hide latency with a short pipeline.
                     # With one CTA, wider N provides more work per stage.
-                    output_groups = math.ceil(block_n / 128)
+                    output_groups = block_n // 128
                     target_stages = 5 - output_groups - (num_ctas_per_sm - 1)
                     target_stages = min(target_stages, max(2, k_iters))
                     for num_stages in range(target_stages, 1, -1):
@@ -400,10 +400,10 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     def _get_moe_candidates(cls, layer_config: LayerConfig, gemm_type: GemmType) -> tuple:
         candidates = []
         indexed = gemm_type == GemmType.INDEXED
-        for block_n in (256, 128) if layer_config.shape_n % 128 == 0 else (64,):
+        for block_n in (256, 128):
             if layer_config.shape_n % block_n:
                 continue
-            output_groups = math.ceil(block_n / 128)
+            output_groups = block_n // 128
             preferred_k = 1024 // layer_config.a_dtype.num_bits
             for block_k in (preferred_k,) if layer_config.shape_k % preferred_k == 0 else (preferred_k // 2,):
                 if layer_config.shape_k % block_k:

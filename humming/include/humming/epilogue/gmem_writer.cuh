@@ -127,7 +127,7 @@ public:
   void write_chunk(uint32_t slice_id, uint32_t slice_count, uint32_t first_row,
                    uint32_t rows, uint32_t buffer_offset) {
     constexpr uint32_t kRows = Ctx::kUmmaOutputChunkRows;
-    constexpr uint32_t kColumns = MIN(BlockShape::N, 128);
+    constexpr uint32_t kColumns = 128;
     uint32_t first_column = ctx.math_group * 128;
     if constexpr (kUseTmaC) {
       // The descriptor height divides block M so a tail cannot overwrite the next tile.

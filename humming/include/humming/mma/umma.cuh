@@ -28,7 +28,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr uint32_t kInputScaleStride = MAX(4u, static_next_power_of_2(CEIL_DIV(BlockShape::M, 32)));
   static constexpr uint32_t kInputScaleColumns = kUseBlockScale ? kInputScaleStride * kScaleWords : 0;
   static constexpr uint32_t kOperandBufferColumns = CEIL_DIV(kOperandColumns + kWeightScaleColumns + kInputScaleColumns, 16) * 16;
-  static constexpr uint32_t kOutputGroups = CEIL_DIV(BlockShape::N, 128);
+  static constexpr uint32_t kOutputGroups = BlockShape::N / 128;
   static constexpr uint32_t kPreferredOperandBuffers = Ctx::kUseUmmaSs ? 1 : (Ctx::kUmmaCtaGroupSize == 2 ? 4 : Ctx::kNumStages);
   static constexpr uint32_t kBufferedTmemColumns = static_next_power_of_2(kOutputGroups * (kPreferredOperandBuffers * kOperandBufferColumns + WarpShape::M));
   static constexpr bool kBufferedOperandsFit = kBufferedTmemColumns * Ctx::kNumCtasPerSm <= 512;
@@ -61,7 +61,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
                                   std::is_same<typename Ctx::ElementA, Float8E5M2>::value ||
                                   std::is_same<typename Ctx::ElementA, Float8E3M4>::value;
   static_assert(kUseFp4 || kUseFp8 || kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
-  static_assert(BlockShape::N == 64 || BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512);
+  static_assert(BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512,
+                "UMMA requires block N in {128, 256, 512}");
   static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
                 "UMMA requires warp M in [8, 256], divisible by 8 (one CTA) or 16 (two CTAs)");
   static_assert(WarpShape::N == 32);

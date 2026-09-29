@@ -138,9 +138,6 @@ def test_umma_common_weights_and_moe(weight_name, gemm_type, block_n, monkeypatc
         (8, 256, 8, 2, True),
         (8, 128, 8, 3, False),
         (8, 256, 8, 3, True),
-        (128, 64, 128, 3, True),
-        (128, 64, 128, 3, False),
-        (16, 64, 16, 3, True),
         (16, 128, 16, 3, True),
         (24, 128, 24, 3, True),
         (40, 128, 40, 3, False),
@@ -186,7 +183,7 @@ def test_umma_native_output_partitions(
 
 
 @pytest.mark.parametrize("output_dtype", (dtypes.bfloat16, dtypes.float16))
-@pytest.mark.parametrize("block_m,block_n", ((8, 64), (128, 64), (128, 256)))
+@pytest.mark.parametrize("block_m,block_n", ((8, 128), (128, 128), (128, 256)))
 @pytest.mark.parametrize(
     "weight_values",
     (
@@ -241,7 +238,7 @@ def test_umma_native_output_channel_and_bias(weight_values, block_m, block_n, ou
         dict(b_dtype="uint4", weight_scale_group_size=128, weight_scale_2_type="tensor", has_bias=True),
     ),
 )
-@pytest.mark.parametrize("block_n", (64, 256))
+@pytest.mark.parametrize("block_n", (128, 256))
 def test_umma_native_output_weight_types(weight_values, block_n, monkeypatch):
     """Weight format does not determine stage readiness or native output support."""
     case = _case("native-output-weight-type", GemmType.DENSE, **weight_values)
@@ -812,20 +809,20 @@ def test_umma_cooperative_channel_parameters(
 @pytest.mark.parametrize(
     "gemm_type,block_m,block_n,block_k,use_tma_c,reuse_mode,cta_group_size",
     (
-        (GemmType.DENSE, 8, 64, 64, True, "none", 1),
-        (GemmType.DENSE, 48, 64, 64, True, "none", 2),
+        (GemmType.DENSE, 8, 128, 64, True, "none", 1),
+        (GemmType.DENSE, 48, 128, 64, True, "none", 2),
         (GemmType.DENSE, 16, 512, 32, False, "none", 2),
         (GemmType.DENSE, 24, 256, 64, True, "none", 1),
         (GemmType.DENSE, 56, 512, 64, True, "none", 1),
         (GemmType.DENSE, 40, 128, 64, False, "all_stages", 1),
         (GemmType.DENSE, 48, 128, 64, True, "last_stage", 2),
         (GemmType.DENSE, 64, 256, 64, False, "all_stages", 2),
-        (GemmType.INDEXED, 8, 64, 64, False, "none", 1),
+        (GemmType.INDEXED, 8, 128, 64, False, "none", 1),
         (GemmType.INDEXED, 48, 128, 64, False, "none", 2),
         (GemmType.INDEXED, 40, 256, 64, False, "all_stages", 1),
         (GemmType.GROUPED_CONTIGUOUS, 24, 128, 64, True, "none", 1),
         (GemmType.GROUPED_CONTIGUOUS, 40, 256, 64, False, "last_stage", 1),
-        (GemmType.GROUPED_MASKED, 40, 64, 64, True, "all_stages", 1),
+        (GemmType.GROUPED_MASKED, 40, 128, 64, True, "all_stages", 1),
         (GemmType.GROUPED_CONTIGUOUS, 48, 128, 64, True, "none", 2),
     ),
 )
@@ -1503,7 +1500,7 @@ def test_umma_ss_small_tile(dtype, weight_dtype, block_m, gemm_type, shape_k, mo
             return Sm100UmmaHeuristics.get_config(layer_config, shape_m, gemm_type=gemm_type)
         return dict(
             mma_type="umma",
-            block_shape=(block_m, 64, block_k),
+            block_shape=(block_m, 128, block_k),
             warp_shape=(block_m, 32, block_k),
             num_stages=3,
             num_sms=4,

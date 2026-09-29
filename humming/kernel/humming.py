@@ -505,6 +505,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             warp_m, warp_n, warp_k = self.warp_shape
             assert block_m == warp_m, "UMMA requires block M to equal warp M"
             assert block_k == warp_k, "UMMA requires block K to equal warp K"
+            assert block_n in (128, 256, 512), "UMMA requires block N in (128, 256, 512)"
             assert 8 <= warp_m <= 256 and warp_m % 8 == 0, "UMMA requires warp M in [8, 256], divisible by 8"
             assert warp_n == 32
             assert block_k * self.a_dtype.num_bits >= 512, (
