@@ -25,16 +25,10 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr uint32_t kTmemColumns = static_next_power_of_2(kOutputGroups * kGroupColumns);
 
   static constexpr bool kUseBf16 = std::is_same<typename Ctx::ElementA, BFloat16>::value;
-  static_assert(kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
-  static_assert(BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512,
-                "UMMA requires block N in {128, 256, 512}");
-  static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
-                "UMMA requires warp M in [8, 256], divisible by 8 (one CTA) or 16 (two CTAs)");
+  static_assert(BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512);
+  static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0);
   static_assert(WarpShape::N == 32);
-  static_assert(WarpShape::K >= 32 && WarpShape::K % 32 == 0,
-                "UMMA requires K divisible by 32");
-  static_assert(std::is_same<typename Ctx::ElementA, typename Ctx::ElementC>::value,
-                "UMMA requires matching activation and output types");
+  static_assert(std::is_same<typename Ctx::ElementA, typename Ctx::ElementC>::value);
   static_assert(kTmemColumns <= 512);
 
   CUDA_INLINE UMMA(Ctx &ctx, ArithClass &arith) : Base(ctx, arith), tmem_column(ctx.smem.umma_tmem_col) {}

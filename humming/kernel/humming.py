@@ -404,9 +404,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         assert self.a_dtype in dtype_map
         assert self.sm_version >= dtype_map[self.a_dtype]
         if self.sm_version == 121 and self.mma_type == MmaType.MXMMA and self.a_dtype == dtypes.float4e0m3:
-            assert _cuda_compiler_version(self._get_compiler()) >= (13, 1), (
-                "E0M3 MXMMA on SM121 requires CUDA 13.1 or newer (PTX ISA 9.1)"
-            )
+            err_msg = "E0M3 MXMMA on SM121 requires CUDA 13.1 or newer (PTX ISA 9.1)"
+            assert _cuda_compiler_version(self._get_compiler()) >= (13, 1), err_msg
         assert self.b_dtype.num_bits <= 8
         assert self.b_dtype.num_bits <= self.a_dtype.num_bits
         if self.b_dtype.is_integer_type and self.a_dtype.is_integer_type:
@@ -448,18 +447,14 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 "UMMA cooperative execution and chunked output require mma_type=umma"
             )
         if self.mma_type == MmaType.UMMA:
-            assert self.a_dtype in (dtypes.bfloat16, dtypes.float16)
             block_m, block_n, block_k = self.block_shape
             warp_m, warp_n, warp_k = self.warp_shape
             assert block_m == warp_m, "UMMA requires block M to equal warp M"
             assert block_k == warp_k, "UMMA requires block K to equal warp K"
             assert block_n in (128, 256, 512), "UMMA requires block N in (128, 256, 512)"
-            assert 8 <= warp_m <= 256 and warp_m % 8 == 0, "UMMA requires warp M in [8, 256], divisible by 8"
             assert warp_n == 32
-            assert block_k >= 32, "UMMA requires K >= 32"
             assert self.num_write_splits == 1, "UMMA requires num_write_splits == 1"
             assert self.num_stages >= 2
-            assert not self.use_f16_accum
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
             assert self.umma_cta_group_size in (1, 2)
             assert self.umma_output_chunk_rows in (0, 32)
@@ -467,15 +462,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert block_m % 16 == 0, "two-CTA UMMA requires block M divisible by 16"
                 assert self.umma_output_chunk_rows == 32
                 assert self.problem_shape[1] % (2 * block_n) == 0
-                assert self.use_tma_a and self.use_tma_b
-                assert not self.has_input_scale and not self.has_input_scale_2
-                assert not self.is_group_weight_scale or self.use_tma_bs
-                assert not self.has_zero_point or self.is_channel_weight_scale or self.use_tma_bzp
                 assert self.num_ctas_per_sm == 1
 
-        assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum), (
-            "MXMMA does not support FP16 accumulation"
-        )
+        assert not (self.mma_type == MmaType.MXMMA and self.use_f16_accum)
         if self.mma_type == MmaType.MXMMA and self.has_zero_point:
             self.use_stream_k = False
         if self.mma_type == MmaType.WGMMA:

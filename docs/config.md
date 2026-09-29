@@ -127,8 +127,10 @@ Each N partition writes only its own columns; the accumulator is released only
 after the last partition has been read. Reusing stage SMEM waits for output
 completion before loading the next tile, reducing load/epilogue overlap.
 
-Two-CTA execution still requires chunked output, N divisible by twice block N,
-TMA stage loads, and `num_ctas_per_sm=1`. Activation scales are not supported in
+Two-CTA execution supports TMA or cp.async stage loads, including indexed A
+gathers. Each CTA loads only its own half of A; both CTAs publish operand
+readiness before the leader issues UMMA. It requires chunked output, N divisible
+by twice block N, and `num_ctas_per_sm=1`. Activation scales are not supported in
 this cooperative pipeline. Channel weight scales, channel secondary scales,
 bias, and channel/group zero points reuse the existing loaders and arithmetic.
 Channel parameters are released once all consuming threads have read them.
