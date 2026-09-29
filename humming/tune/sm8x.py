@@ -6,6 +6,7 @@ from humming.tune.base import DeviceHeuristics
 class Sm80Heuristics(DeviceHeuristics):
     max_smem_size: int = 163 * 1024
     sm_version: int = 80
+    moe_occupancy_warps_per_sm: int = 16
     b16_allowed_dtypes: list[dtypes.DataType] = [dtypes.float16, dtypes.bfloat16]
     b8_allowed_dtypes: list[dtypes.DataType] = [dtypes.int8]
     b4_allowed_dtypes: list[dtypes.DataType] = [dtypes.int4]
@@ -106,6 +107,7 @@ class Sm86Heuristics(DeviceHeuristics):
 
 class Sm87Heuristics(Sm80Heuristics):
     sm_version: int = 87
+    moe_occupancy_warps_per_sm: int = 0
 
 
 class Sm89Heuristics(Sm86Heuristics):

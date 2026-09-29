@@ -35,6 +35,8 @@ class DeviceHeuristics:
     b8_allowed_dtypes: list[dtypes.DataType] = []
     b4_allowed_dtypes: list[dtypes.DataType] = []
     sm_version: int = 0
+    # Resident warps per SM to aim for in memory-bound MoE GEMMs (0 disables).
+    moe_occupancy_warps_per_sm: int = 0
 
     @classmethod
     def should_use_pdl_for_input(cls, layer_config: LayerConfig, shape_m: int) -> bool:
@@ -237,6 +239,27 @@ class DeviceHeuristics:
             if smem_size * num_ctas_per_sm < cls.max_smem_size:
                 num_stages = num_stages_new
 
+        # The compute-bound threshold is per expert, so compare tokens per expert.
+        # Wider expert blocks (48+ rows) sit near that threshold and keep their config.
+        num_experts = layer_config.num_experts or 0
+        is_memory_bound_moe = num_experts > 0 and shape_m / num_experts < compute_bound_min_shape_m
+        has_sparse_expert_blocks = block_shape_m <= 32
+        is_supported_moe_case = layer_config.a_dtype.num_bits == 16 and not use_batch_invariant
+        use_moe_occupancy = cls.moe_occupancy_warps_per_sm > 0 and is_supported_moe_case
+        use_moe_occupancy = use_moe_occupancy and is_memory_bound_moe and has_sparse_expert_blocks
+        if use_moe_occupancy:
+            moe_occupancy_config = cls._fit_moe_ctas_per_sm(
+                layer_config,
+                (block_shape_m, block_shape_n, block_shape_k),
+                (warp_shape_m, warp_shape_n, warp_shape_k),
+                gemm_type,
+                num_tiles=num_blocks_n * num_blocks_m,
+                num_sms=num_sms,
+                max_num_stages=max_num_stages,
+            )
+            if moe_occupancy_config is not None and moe_occupancy_config[1] > num_ctas_per_sm:
+                block_shape_k, num_ctas_per_sm, num_stages = moe_occupancy_config
+
         use_stream_k = True
         if use_batch_invariant:
             warp_shape_k = 512 // layer_config.a_dtype.num_bits
@@ -279,6 +302,44 @@ class DeviceHeuristics:
             "num_write_splits": num_write_splits,
             "use_pdl": cls.sm_version >= 90,
         }
+
+    @classmethod
+    def _fit_moe_ctas_per_sm(
+        cls,
+        layer_config: LayerConfig,
+        block_shape: tuple[int, int, int],
+        warp_shape: tuple[int, int, int],
+        gemm_type: GemmType,
+        num_tiles: int,
+        num_sms: int,
+        max_num_stages: int,
+    ) -> tuple[int, int, int] | None:
+        """Trade pipeline depth for resident CTAs in a memory-bound MoE GEMM.
+
+        With few tokens per expert, weight loads are latency-bound and hidden by
+        resident warps rather than by a deeper pipeline, so prefer several small
+        CTAs per SM over one deep-pipelined CTA. Returns
+        (block_shape_k, num_ctas_per_sm, num_stages) or None if nothing fits.
+        """
+        max_warps_per_cta = 4
+        block_shape_m, block_shape_n, block_shape_k = block_shape
+        warp_shape_m, warp_shape_n, warp_shape_k = warp_shape
+        num_mn_warps = (block_shape_m // warp_shape_m) * (block_shape_n // warp_shape_n)
+        num_k_warps = block_shape_k // warp_shape_k
+        while block_shape_k > warp_shape_k and num_mn_warps * num_k_warps > max_warps_per_cta:
+            block_shape_k = block_shape_k // 2
+            num_k_warps = block_shape_k // warp_shape_k
+
+        num_warps = num_mn_warps * num_k_warps
+        max_ctas_by_warps = cls.moe_occupancy_warps_per_sm // num_warps
+        max_ctas_by_tiles = num_tiles // num_sms
+        fitted_block_shape = (block_shape_m, block_shape_n, block_shape_k)
+        for num_ctas_per_sm in range(min(max_ctas_by_warps, max_ctas_by_tiles), 1, -1):
+            for num_stages in range(max_num_stages, 2, -1):
+                smem_size = estimate_smem_size_layer(layer_config, fitted_block_shape, gemm_type, num_stages)
+                if smem_size * num_ctas_per_sm <= cls.max_smem_size:
+                    return block_shape_k, num_ctas_per_sm, num_stages
+        return None
 
     @classmethod
     def estimate_num_blocks_m(cls, layer_config: LayerConfig, shape_m: int, block_shape_m: int):
