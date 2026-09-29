@@ -100,6 +100,18 @@ CUDA_INLINE constexpr uint2 get_mainloop_exp_offset() {
     if constexpr (std::is_same<ElementA, BFloat16>::value && ElementBS::kBits == 8 && kIsGroupWeightScale && !kNativeDequantBS) {
       constexpr uint32_t scale_offset = get_dtype_dequant_exp_offset<ElementA, ElementBS>();
       offset.y = MIN(total_offset - offset.x, scale_offset);
+
+      // With floating-point weights the whole offset can go on the group scales instead of
+      // every dequantized weight, as long as the largest scale (below 2^(2^(E-1)+1)) stays
+      // under the bf16 maximum of 2^128; the epilogue applies the rest.
+      if constexpr (ElementB::kIsFloatingPointType && !kHasZeroPoint) {
+        constexpr int32_t max_scale_log2 = (1 << (ElementBS::kExponentBits - 1)) + 1;
+        constexpr int32_t max_scale_offset = (int32_t)scale_offset + 128 - max_scale_log2;
+        if (max_scale_offset > (int32_t)(offset.y)) {
+          offset.y = MIN(total_offset, (uint32_t)max_scale_offset);
+          offset.x = 0;
+        }
+      }
     }
   }
 
