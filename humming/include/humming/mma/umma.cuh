@@ -15,7 +15,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   using Base::ctx;
 
   static constexpr uint32_t kOperandColumns = Ctx::kWarpIters * 8;
-  static constexpr uint32_t kOutputGroups = CEIL_DIV(BlockShape::N, 128);
+  static constexpr uint32_t kOutputGroups = BlockShape::N / 128;
   static constexpr uint32_t kStageTmemColumns = static_next_power_of_2(kOutputGroups * (Ctx::kNumStages * kOperandColumns + WarpShape::M));
   static constexpr bool kStageOperandsFit = kStageTmemColumns * Ctx::kNumCtasPerSm <= 512;
   static constexpr uint32_t kNumOperandBuffers = Ctx::kUmmaCtaGroupSize == 2 ? 4 : (kStageOperandsFit ? Ctx::kNumStages : 2);
@@ -26,7 +26,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
 
   static constexpr bool kUseBf16 = std::is_same<typename Ctx::ElementA, BFloat16>::value;
   static_assert(kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
-  static_assert(BlockShape::N == 64 || BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512);
+  static_assert(BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512,
+                "UMMA requires block N in {128, 256, 512}");
   static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
                 "UMMA requires warp M in [8, 256], divisible by 8 (one CTA) or 16 (two CTAs)");
   static_assert(WarpShape::N == 32);

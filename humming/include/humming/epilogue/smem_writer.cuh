@@ -226,7 +226,6 @@ public:
     uint32_t warp = ctx.math_thread_id() / 32;
     uint32_t n_partition = ctx.math_group;
     uint32_t column = n_partition * 128 + warp * 32 + (lane / 8) * 8;
-    bool has_output = column < BlockShape::N;
     uint32_t row_in_matrix = Ctx::kUmmaCtaGroupSize == 2 ? lane % 8 : (lane % 8) / 2 + (lane % 2) * 4;
     uint32_t smem_base = offsetof(SharedStorage, reduce) / 128 % 8;
     uint32_t output_base = cast_smem_ptr_to_uint(ctx.smem.reduce);
@@ -236,7 +235,7 @@ public:
       uint32_t lower[16];
       uint32_t upper[16];
       uint32_t rows = MIN(32, WarpShape::M - m * 32);
-      if (has_output) mma.load_output_chunk(m, rows, lower, upper);
+      mma.load_output_chunk(m, rows, lower, upper);
       if constexpr (kChunked && !Ctx::kIsIndexedGemm) {
         if (m + 1 == CEIL_DIV(WarpShape::M, 32) && ctx.math_group + 1 == MMA::kOutputGroups) {
           tcgen05_fence_before_thread_sync();
@@ -254,32 +253,30 @@ public:
         if constexpr (Ctx::kUseTmaC) tma_wait_store_group<1, true>();
         ctx.sync_math_threads();
       }
-      if (has_output) {
-        PRAGMA_UNROLL
-        for (uint32_t group = 0; group < rows / 8; group++) {
-          uint32_t values[4];
-          // TMEM holds N in rows and M in columns. stmatrix writes four 8-column
-          // matrices from the two 16-row TMEM loads.
-          if constexpr (Ctx::kUmmaCtaGroupSize == 2) {
-            values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 1]);
-            values[1] = convert_umma_pair(lower[group * 4 + 2], lower[group * 4 + 3]);
-            values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 1]);
-            values[3] = convert_umma_pair(upper[group * 4 + 2], upper[group * 4 + 3]);
-          } else {
-            values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 2]);
-            values[1] = convert_umma_pair(lower[group * 4 + 1], lower[group * 4 + 3]);
-            values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 2]);
-            values[3] = convert_umma_pair(upper[group * 4 + 1], upper[group * 4 + 3]);
-          }
-          uint32_t row = (kChunked ? 0 : m * 32) + group * 8 + row_in_matrix;
-          uint32_t swizzled_column = ((column % 64 / 8) ^ ((row + smem_base) % 8)) * 8;
-          uint32_t output_offset = buffer_offset + (row + kStorageRows * (column / 64)) * 64 + swizzled_column;
-          st_shared<4, true>(output_base + output_offset * 2, values);
+      PRAGMA_UNROLL
+      for (uint32_t group = 0; group < rows / 8; group++) {
+        uint32_t values[4];
+        // TMEM holds N in rows and M in columns. stmatrix writes four 8-column
+        // matrices from the two 16-row TMEM loads.
+        if constexpr (Ctx::kUmmaCtaGroupSize == 2) {
+          values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 1]);
+          values[1] = convert_umma_pair(lower[group * 4 + 2], lower[group * 4 + 3]);
+          values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 1]);
+          values[3] = convert_umma_pair(upper[group * 4 + 2], upper[group * 4 + 3]);
+        } else {
+          values[0] = convert_umma_pair(lower[group * 4], lower[group * 4 + 2]);
+          values[1] = convert_umma_pair(lower[group * 4 + 1], lower[group * 4 + 3]);
+          values[2] = convert_umma_pair(upper[group * 4], upper[group * 4 + 2]);
+          values[3] = convert_umma_pair(upper[group * 4 + 1], upper[group * 4 + 3]);
         }
+        uint32_t row = (kChunked ? 0 : m * 32) + group * 8 + row_in_matrix;
+        uint32_t swizzled_column = ((column % 64 / 8) ^ ((row + smem_base) % 8)) * 8;
+        uint32_t output_offset = buffer_offset + (row + kStorageRows * (column / 64)) * 64 + swizzled_column;
+        st_shared<4, true>(output_base + output_offset * 2, values);
       }
       if constexpr (kChunked) {
         if constexpr (ArithClass::kNeedsPackedOutputTransform)
-          if (has_output) apply_umma_packed_output_arithmetic(m * 32, rows, buffer_offset / 8, kStorageRows);
+          apply_umma_packed_output_arithmetic(m * 32, rows, buffer_offset / 8, kStorageRows);
         if constexpr (Ctx::kUseTmaC) tma_fence_async_shared();
         ctx.sync_math_threads();
         write_chunk(m * 32, rows, buffer_offset / 8);
@@ -292,7 +289,7 @@ public:
     }
     if constexpr (kChunked) output_chunk_phase ^= CEIL_DIV(WarpShape::M, 32) % 2;
     else if constexpr (ArithClass::kNeedsPackedOutputTransform) {
-      if (has_output) apply_umma_packed_output_arithmetic();
+      apply_umma_packed_output_arithmetic();
     }
   }
 
