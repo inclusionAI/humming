@@ -1,8 +1,11 @@
+import math
+
 import pytest
 
 from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import DeviceInfo
+from humming.tune.base import _estimate_compute_bound_threshold
 from humming.tune.sm8x import Sm86Heuristics, Sm89Heuristics
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -45,3 +48,19 @@ def test_a16_config_fits_in_smem(
         config["num_stages"],
     )
     assert smem_size * config["num_ctas_per_sm"] <= heuristics_cls.max_smem_size
+
+
+def test_missing_memory_bandwidth_keeps_tuning_available(monkeypatch):
+    monkeypatch.setattr(DeviceInfo, "memory_bandwidth_gbps", property(lambda self: 0.0))
+    layer_config = LayerConfig(
+        shape_n=256,
+        shape_k=4096,
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.int8,
+        c_dtype=dtypes.bfloat16,
+        bs_dtype=dtypes.float16,
+        weight_scale_group_size=32,
+    )
+
+    assert math.isinf(_estimate_compute_bound_threshold(layer_config, False))
+    assert Sm86Heuristics.get_config(layer_config, shape_m=8, gemm_type=GemmType.DENSE)

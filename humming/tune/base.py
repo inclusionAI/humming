@@ -17,6 +17,8 @@ def _estimate_compute_bound_threshold(layer_config: LayerConfig, use_f16_accum: 
 
     max_tops = info.tensorcore_tops[dtype]
     max_bandwidth = info.memory_bandwidth_gbps
+    if max_bandwidth <= 0:
+        return math.inf
     if info.sm_version in (75, 86, 89) and "float" in dtype and use_f16_accum:
         max_tops *= 2
 
