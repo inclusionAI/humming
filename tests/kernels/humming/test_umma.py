@@ -774,7 +774,7 @@ def test_umma_chunked_output(
 def test_umma_cooperative_channel_parameters(
     weight_values, use_tma_channel, output_dtype, use_stream_k, monkeypatch
 ):
-    """Channel buffers may be reused only after output and dequant consumers read them."""
+    """Channel buffers belong to the epilogue; first-stage zero points survive the K loop."""
 
     def select_output(layer_config, shape_m, gemm_type, **kwargs):
         return {
@@ -875,6 +875,13 @@ def test_umma_chunked_output_layout(
         }
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
-    case = _case("chunked-layout", gemm_type, b_dtype="uint4", weight_scale_group_size=0, has_bias=True)
+    case = _case(
+        "chunked-layout",
+        gemm_type,
+        b_dtype="uint4",
+        weight_scale_group_size=0,
+        has_zero_point=True,
+        has_bias=True,
+    )
     layer_config = dataclasses.replace(case.layer_config, shape_n=1024, shape_k=1024)
     _assert_results(dataclasses.replace(case, layer_config=layer_config), (17, 13 * block_m + 1))

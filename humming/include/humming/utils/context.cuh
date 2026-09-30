@@ -135,8 +135,7 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
   static constexpr bool kHasStageWeightScale = Base::kIsGroupWeightScale || Base::kIsBlockWeightScale;
   static constexpr bool kCanSplitWeightScaleLoad = !kHasStageWeightScale || Base::kUseTmaBS;
   static constexpr bool kCanSplitZeroPointLoad =
-      !Base::kHasZeroPoint || (Base::kIsGroupWeightScale && Base::kUseTmaBZP) ||
-      Base::kIsChannelWeightScale;
+      !Base::kHasZeroPoint || (Base::kIsGroupWeightScale && Base::kUseTmaBZP);
   static constexpr bool kCanSplitInputScaleLoad = !Base::kIsGroupInputScale || Base::kUseTmaAS;
   static constexpr bool kHasTmaWeightLoads = Base::kUseTmaB && kCanSplitWeightScaleLoad && kCanSplitZeroPointLoad;
   static constexpr bool kHasTmaActivationLoads = Base::kUseTmaA && kCanSplitInputScaleLoad;

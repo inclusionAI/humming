@@ -65,7 +65,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   static_assert(TuningConfig::kNumThreads == 384);
   constexpr bool kCooperative = Ctx::kUmmaCtaGroupSize == 2;
   constexpr bool kHasChannelZeroPoint = Ctx::kHasZeroPoint && Ctx::kIsChannelWeightScale;
-  constexpr uint32_t kChannelConsumers = kHasChannelZeroPoint ? 256 : 128;
   constexpr bool kSeparateOutputStorage = Ctx::kSmemReuseMode == SmemReuseMode::NONE;
   constexpr bool kNeedsEpilogueGate = !kSeparateOutputStorage || Consumer::kHasChannelData;
 
@@ -85,7 +84,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   // contribute to that stage's next ready phase.
   constexpr uint32_t kNumReadinessThreads = 128 - Ctx::kNumLoadThreads - 32;
   constexpr bool kEarlyWeightReuse = Ctx::kUseUmmaSplitLoads && kNumOperandBuffers <= kNumStages;
-  if (ctx.is_load_thread()) Producer::template init_mbarrier<1, kChannelConsumers>(ctx);
+  if (ctx.is_load_thread()) Producer::template init_mbarrier<1, 128>(ctx);
   if (threadIdx.x < kNumStages) {
     __mbarrier_init(&smem.umma_operand_ready[threadIdx.x], (128 + kNumReadinessThreads) * Ctx::kUmmaCtaGroupSize);
     if constexpr (Ctx::kUseUmmaSplitLoads) {
@@ -149,9 +148,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                       scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
         producer.prefetch_stage();
 
-        if constexpr (kSeparateOutputStorage) producer.wait_channel();
-        producer.load_channel();
-
 #pragma unroll 4
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           auto *free_barrier = &smem.math_mbar[pipeline_stage];
@@ -159,15 +155,22 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             free_barrier = &smem.umma_weight_free[pipeline_stage];
           mbarrier_wait(free_barrier, pipeline_phase ^ 1);
 
-          if constexpr (!Ctx::kUseUmmaSplitLoads) producer.load_stage(pipeline_stage);
-          else if constexpr (decltype(is_weight_warp)::value) producer.load_weight_stage(pipeline_stage);
+          if constexpr (!Ctx::kUseUmmaSplitLoads) {
+            if (kHasChannelZeroPoint && iter == 0) producer.template load_stage<true, true>(pipeline_stage);
+            else producer.load_stage(pipeline_stage);
+          } else if constexpr (decltype(is_weight_warp)::value) producer.load_weight_stage(pipeline_stage);
           else producer.load_activation_stage(pipeline_stage);
           advance_stage();
         }
 
-        if constexpr (Ctx::kIsIndexedGemm) {
-          // Issuing this tile implies the preceding output has finished reading
-          // its row indices. The producer may now reuse that index buffer.
+        // Only the epilogue consumes channel data; stage loading can proceed
+        // while the preceding tile still owns the channel buffers.
+        if constexpr (kSeparateOutputStorage) producer.wait_channel();
+        producer.load_channel();
+
+        if constexpr (Ctx::kIsIndexedGemm || kHasChannelZeroPoint) {
+          // Completing this tile releases its BZP buffer and the preceding
+          // output's row indices before the producer loads the next tile.
           uint32_t last_stage = (pipeline_stage + kNumStages - 1) % kNumStages;
           uint32_t last_phase = pipeline_phase ^ (pipeline_stage == 0);
           mbarrier_wait(&smem.math_mbar[last_stage], last_phase);
@@ -213,10 +216,14 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     }
   } else if (threadIdx.x < 128) {
     // This warp joins A readiness with the dequantization WG's B readiness.
+    Consumer consumer(ctx);
     while (next_tile()) {
 #pragma unroll 4
       for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
-        mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
+        if constexpr (kHasChannelZeroPoint) {
+          if (iter == 0) consumer.template wait_stage<true>(pipeline_stage);
+          else consumer.wait_stage(pipeline_stage);
+        } else mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
         if constexpr (!Ctx::kUseTmaA) tma_fence_async_shared();
         arrive_operand_ready(pipeline_stage);
         advance_stage();
@@ -232,7 +239,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     Consumer consumer(ctx);
 
     if constexpr (kNeedsEpilogueGate) {
-      if (ctx.is_math_thread() || kHasChannelZeroPoint) consumer.arrive(kNumStages);
+      if (ctx.is_math_thread()) consumer.arrive(kNumStages);
     }
 
     while (next_tile()) {
@@ -277,7 +284,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           tcgen05_fence_before_thread_sync();
         };
 
-        if constexpr (kHasChannelZeroPoint) consumer.wait_channel();
 #pragma unroll 4
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           uint32_t buffer = operand_step % kNumOperandBuffers;
@@ -287,9 +293,12 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             tcgen05_fence_after_thread_sync();
           };
 
-          auto *ready_barrier = &smem.load_mbar[pipeline_stage];
-          if constexpr (Ctx::kUseUmmaSplitLoads) ready_barrier = &smem.umma_weight_ready[pipeline_stage];
-          mbarrier_wait(ready_barrier, pipeline_phase);
+          if constexpr (Ctx::kUseUmmaSplitLoads) {
+            mbarrier_wait(&smem.umma_weight_ready[pipeline_stage], pipeline_phase);
+          } else if constexpr (kHasChannelZeroPoint) {
+            if (iter == 0) consumer.template wait_stage<true>(pipeline_stage);
+            else consumer.wait_stage(pipeline_stage);
+          } else mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
           if constexpr (Ctx::kUseUmmaSplitLoads && Ctx::kIsGroupInputScale)
             mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
 
@@ -301,7 +310,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           operand_step++;
           advance_stage();
         }
-        if constexpr (kHasChannelZeroPoint) consumer.arrive(kNumStages);
       } else {
         mbarrier_wait(&smem.umma_accumulator_ready, tile_index % 2);
         tcgen05_fence_after_thread_sync();
