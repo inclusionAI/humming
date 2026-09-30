@@ -3,6 +3,13 @@
 #include "./torch_api.h"
 #include <cuda.h>
 
+#if CUDA_VERSION < 12080
+// CUDA 12.8 added these Driver API values. Wheels built with older headers can
+// still use them when running with a Blackwell-capable driver.
+inline constexpr CUtensorMapDataType CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B = static_cast<CUtensorMapDataType>(14);
+inline constexpr CUtensorMapDataType CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B = static_cast<CUtensorMapDataType>(15);
+#endif
+
 inline CUtensorMapDataType get_tma_dtype(ScalarType type) {
   switch (type) {
     case ScalarType::Float: return CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
