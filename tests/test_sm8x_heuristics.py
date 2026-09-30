@@ -169,7 +169,6 @@ def test_sm80_memory_bound_moe_uses_more_ctas(
         ),
         pytest.param(dict(shape_m=15360), dict(shape_m=10240), id="48-row-expert-blocks"),
         pytest.param(dict(shape_m=10), dict(shape_m=160), id="too-few-tiles"),
-        pytest.param(dict(heuristics_cls=Sm87Heuristics), dict(), id="sm87"),
         # Sm100Heuristics inherits from Sm80Heuristics and falls back to its MMA configs.
         pytest.param(dict(heuristics_cls=Sm100Heuristics), dict(), id="sm100"),
         # Sm120Heuristics inherits from Sm89Heuristics, which has the rule.
@@ -292,7 +291,7 @@ def test_sm80_moe_occupancy_shared_memory_fallback(sm80_device, monkeypatch):
     assert config == baseline_config
 
 
-SM86_MOE_CASES = [
+SM8X_MOE_CASES = [
     *[
         (fmt, n, k, 160)
         for fmt in ("nvfp4", "mxfp4", "uint4-g128", "uint8-channel")
@@ -302,13 +301,30 @@ SM86_MOE_CASES = [
     *[(fmt, 1280, 2560, 10240) for fmt in ("nvfp4", "mxfp4", "uint4-g128")],
 ]
 
+SM8X_DEVICES = {
+    # heuristics: (sm_version, sm_count, memory bandwidth GB/s, FP16 tensor core TFLOPS)
+    Sm86Heuristics: (86, 68, 760.0, 61.1),
+    Sm87Heuristics: (87, 16, 204.8, 42.6),
+    Sm89Heuristics: (89, 60, 504.2, 80.2),
+}
 
-@pytest.mark.usefixtures("_mock_rtx3080_device")
-@pytest.mark.parametrize("heuristics_cls", [Sm86Heuristics, Sm89Heuristics])
-@pytest.mark.parametrize("weight_format, shape_n, shape_k, shape_m", SM86_MOE_CASES)
-def test_sm86_memory_bound_moe_uses_more_ctas(
+
+@pytest.mark.parametrize("heuristics_cls", list(SM8X_DEVICES), ids=lambda cls: f"sm{cls.sm_version}")
+@pytest.mark.parametrize("weight_format, shape_n, shape_k, shape_m", SM8X_MOE_CASES)
+def test_sm8x_memory_bound_moe_uses_more_ctas(
     monkeypatch, heuristics_cls, weight_format, shape_n, shape_k, shape_m
 ):
+    sm_version, sm_count, memory_bandwidth, fp16_tops = SM8X_DEVICES[heuristics_cls]
+    tensorcore_tops = {
+        "float16": fp16_tops,
+        "bfloat16": fp16_tops,
+        "int8": 2 * fp16_tops,
+        "int4": 4 * fp16_tops,
+    }
+    monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: sm_count))
+    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
+    monkeypatch.setattr(DeviceInfo, "memory_bandwidth_gbps", property(lambda self: memory_bandwidth))
+    monkeypatch.setattr(DeviceInfo, "tensorcore_tops", property(lambda self: tensorcore_tops))
     monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
     layer_config = _make_moe_layer_config(shape_n, shape_k, 512, weight_format)
 
@@ -324,6 +340,7 @@ def test_sm86_memory_bound_moe_uses_more_ctas(
     )
     assert config["num_ctas_per_sm"] > 1
     assert warps_per_cta * config["num_ctas_per_sm"] >= baseline_warps_per_sm
+    assert warps_per_cta * config["num_ctas_per_sm"] <= heuristics_cls.moe_occupancy_warps_per_sm
     assert config["num_stages"] == 3
     assert not config["use_stream_k"]
     assert smem_size * config["num_ctas_per_sm"] <= heuristics_cls.max_smem_size

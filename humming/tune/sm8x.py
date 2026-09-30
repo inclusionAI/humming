@@ -108,7 +108,6 @@ class Sm86Heuristics(DeviceHeuristics):
 
 class Sm87Heuristics(Sm80Heuristics):
     sm_version: int = 87
-    moe_occupancy_warps_per_sm: int = 0
 
 
 class Sm89Heuristics(Sm86Heuristics):
