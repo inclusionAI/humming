@@ -158,6 +158,7 @@ struct KernelData {
   bool use_tma_bias;
   bool use_pdl;
   bool use_packed_k_layout;
+  bool use_ldmatrix_s4;
 };
 
 struct LoadedKernel {

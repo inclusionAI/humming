@@ -187,6 +187,47 @@ __global__ void weight_repack_nk(
 
   __syncthreads();
 
+<<<<<<< ours
+=======
+  if constexpr (kUseLdmatrixS4) {
+    static_assert(kNumBitsB == 4, "ldmatrix.s8.s4 requires 4-bit weight");
+    static_assert(kNumBitsA == 8, "ldmatrix.s8.s4 requires 8-bit activation");
+    static_assert(!kShouldPreprocessForINT2FP, "ldmatrix.s8.s4 (v1) is int-only, not int->fp");
+    static_assert(!kShouldPreprocessWithZP, "ldmatrix.s8.s4 (v1) requires a symmetric weight, no zero point");
+    // K-major, gapless 64(N) x 64(K) tile of packed signed 4-bit weights.
+    // `ldmatrix.s8.s4` sign-extends each nibble to INT8; symmetric weights only.
+    uint32_t packed_out_stride = 64 * padded_shape_n * kNumBitsB / 32;
+    uint32_t packed_max_row = gridDim.z * padded_shape_k / 64;
+    uint32_t out_row = (blockIdx.y * 64 + blockIdx.z * padded_shape_k) / 64;
+    if (out_row < packed_max_row) {
+      uint8_t *out_bytes = reinterpret_cast<uint8_t *>(out_ptr + out_row * packed_out_stride);
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < 8; i++) {
+        uint32_t n = i * 8 + threadIdx.x / 4;
+        uint32_t *smem_row = smem[n];
+        PRAGMA_UNROLL
+        for (uint32_t j = 0; j < 4; j++) {
+          uint32_t k_base = j * 16 + (threadIdx.x % 4) * 4;
+          uint32_t v0 = extract_packed_value<kNumBitsB, kPackedInput>(smem_row, k_base + 0);
+          uint32_t v1 = extract_packed_value<kNumBitsB, kPackedInput>(smem_row, k_base + 1);
+          uint32_t v2 = extract_packed_value<kNumBitsB, kPackedInput>(smem_row, k_base + 2);
+          uint32_t v3 = extract_packed_value<kNumBitsB, kPackedInput>(smem_row, k_base + 3);
+          constexpr uint32_t mask = (1u << kNumBitsB) - 1;
+          uint8_t byte0 = static_cast<uint8_t>((v0 & mask) ^ 0x8) |
+                          static_cast<uint8_t>(((v1 & mask) ^ 0x8) << 4);
+          uint8_t byte1 = static_cast<uint8_t>((v2 & mask) ^ 0x8) |
+                          static_cast<uint8_t>(((v3 & mask) ^ 0x8) << 4);
+          uint32_t global_n = blockIdx.x * 64 + n;
+          uint32_t byte_row_offset = global_n * 32 + k_base / 2;
+          out_bytes[byte_row_offset + 0] = byte0;
+          out_bytes[byte_row_offset + 1] = byte1;
+        }
+      }
+    }
+    return;
+  }
+
+>>>>>>> theirs
   // 4bit: [1][4][1][2][2][8]
   // 8bit: [2][2][2][2][2][4]
   // 16bit: [4][1][4][2][2][2]

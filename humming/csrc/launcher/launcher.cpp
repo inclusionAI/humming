@@ -145,6 +145,12 @@ Tensor launch_kernel_impl(
   }
   KernelLaunchData kernel_launch_data = find_kernel_launch_data(configs, valid_shape_m, context);
   KernelData &kernel_data = kernel_launch_data.metadata;
+  if (kernel_data.use_ldmatrix_s4) {
+    CUstreamCaptureStatus capture_status;
+    check_curesult(cuStreamIsCapturing(get_current_cuda_stream(dev), &capture_status), "cuStreamIsCapturing");
+    ASSERT_CHECK(capture_status == CU_STREAM_CAPTURE_STATUS_NONE,
+                 "ldmatrix.s8.s4 does not support CUDA Graph capture; prepare legacy weights");
+  }
   int64_t &num_sms = kernel_launch_data.num_sms;
   Tensor c = may_make_tensor_c(c_, a, kernel_data, top_k);
   uint32_t num_ctas = kernel_data.num_ctas_per_sm * get_num_sms(num_sms, dev);
@@ -329,7 +335,8 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getBool("USE_TMA_BZP"),
       reader.getBool("USE_TMA_BIAS"),
       reader.getBool("USE_PDL"),
-      reader.getBool("USE_PACKED_K_LAYOUT")};
+      reader.getBool("USE_PACKED_K_LAYOUT"),
+      reader.getBool("USE_LDMATRIX_S4")};
 
   std::unique_lock lock(g_kernel_mutex);
   auto path_it = g_path_ids.find(cubin_path);

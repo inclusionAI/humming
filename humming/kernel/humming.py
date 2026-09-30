@@ -17,7 +17,12 @@ from humming.config import (
     TuningConfig,
 )
 from humming.config.config import _cuda_compiler_version
+<<<<<<< ours
 from humming.device import current_device, get_device_index
+=======
+from humming.config.ldmatrix_s4 import resolve_specialization_loader
+from humming.device import get_device_index
+>>>>>>> theirs
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
 from humming.utils.smem import estimate_smem_size_config
@@ -143,6 +148,12 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         self.check_dtype()
         self.check_scale()
         self.check_config()
+        # Raise if an explicit tuning can't run the prepared ldmatrix.s8.s4 layout.
+        resolve_specialization_loader(
+            json.loads(LayerConfig.to_str(self)),
+            json.loads(self.to_str()),
+            self.ldmatrix_s4_rejection_reasons,
+        )
         self.mma_op_class = self.select_mma_op_class()
 
         assert self.bs_dtype is not None

@@ -321,6 +321,18 @@ def transform_humming_weight(
             unpacked_zp = unpacked_zp.view(*unpacked_zp.shape[:-1], shape_n // 8, 8)
             unpacked_zp = unpacked_zp[..., ppu_perm].flatten(-2).contiguous()
             zero_point = ops.pack_weight(unpacked_zp, b_dtype.num_bits).transpose(-1, -2).contiguous()
+    if use_ldmatrix_s4:
+        if is_moe or weight.ndim != 3 or not weight.is_contiguous():
+            raise ValueError("ldmatrix.s8.s4 requires contiguous dense NK weights")
+        if (
+            b_dtype != dtypes.uint4
+            or a_dtype != dtypes.int8
+            or not packed
+            or (zero_point is not None and zero_point.numel())
+        ):
+            raise ValueError("ldmatrix.s8.s4 requires symmetric packed uint4/int8 without zero points")
+        assert use_packed_k_layout, "use_ldmatrix_s4 requires use_packed_k_layout"
+        assert not should_preprocess_with_zp, "use_ldmatrix_s4 (v1) requires a symmetric weight"
 
     repacked_weight = ops.repack_weight(
         inputs=weight,

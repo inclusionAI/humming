@@ -3,6 +3,7 @@ import functools
 import torch
 
 from humming.config import GemmType, LayerConfig
+from humming.config.ldmatrix_s4 import forced_tuning
 from humming.device import DeviceInfo, get_device_index
 from humming.tune.base import DeviceHeuristics
 from humming.tune.ppu_sm80 import PPUSm80Heuristics
@@ -91,6 +92,14 @@ def _apply_raster_group_m(config: dict, layer_config, gemm_type) -> None:
         pass
 
 
+def _apply_ldmatrix_s4_contract(config: dict, layer_config, gemm_type) -> None:
+    if not layer_config.use_ldmatrix_s4:
+        return
+    if gemm_type != GemmType.DENSE:
+        raise ValueError("ldmatrix.s8.s4 prepared weights require dense execution")
+    config.update(forced_tuning(config["block_shape"][0], layer_config.shape_n))
+
+
 @functools.lru_cache(maxsize=1024)
 def _get_heuristics_config(
     layer_config: LayerConfig,
@@ -120,6 +129,7 @@ def _get_heuristics_config(
         _apply_m_major_input_scale(config, use_m_major_input_scale, layer_config, gemm_type)
         _disable_indexed_input_scale_tma(config, gemm_type)
         _apply_raster_group_m(config, layer_config, gemm_type)
+        _apply_ldmatrix_s4_contract(config, layer_config, gemm_type)
         return config
     else:
         configs = heuristics_cls.get_configs(
@@ -132,6 +142,7 @@ def _get_heuristics_config(
             _apply_m_major_input_scale(entry[2], use_m_major_input_scale, layer_config, gemm_type)
             _disable_indexed_input_scale_tma(entry[2], gemm_type)
             _apply_raster_group_m(entry[2], layer_config, gemm_type)
+            _apply_ldmatrix_s4_contract(entry[2], layer_config, gemm_type)
         return configs
 
 

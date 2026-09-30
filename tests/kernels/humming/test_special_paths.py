@@ -50,6 +50,37 @@ def _kernel_case(
     return required_features, test_case
 
 
+def _ldmatrix_s4_case(
+    name: str, shape_n: int, shape_k: int, force_legacy: bool = False
+) -> tuple[tuple[str, ...], KernelTestCase]:
+    # force_legacy runs the same shape/seed on packed_k_legacy; both arms compare to the
+    # runner's reference, so matching it proves automatic-S4 == forced-legacy (A/B parity).
+    features = ("use_packed_k_layout",) if force_legacy else ("use_packed_k_layout", "use_ldmatrix_s4")
+    return _kernel_case(
+        required_features=features,
+        name=name,
+        layer_config=LayerConfig(
+            shape_n=shape_n,
+            shape_k=shape_k,
+            a_dtype=dtypes.int8,
+            b_dtype=dtypes.uint4,
+            c_dtype=dtypes.bfloat16,
+            bs_dtype=dtypes.bfloat16,
+            weight_scale_group_size=128,
+            has_zero_point=False,
+            mma_type=MmaType.WGMMA,
+            test_force_packed_k_legacy=force_legacy,
+        ),
+    )
+
+
+LDMATRIX_S4_SHAPE_MS = {
+    "packed-k-ldmatrix-s4-minimum": (1, 127, 128),
+    "packed-k-ldmatrix-s4-forced-legacy": (1, 127, 128),
+    "packed-k-ldmatrix-s4-model-shape": (256,),
+}
+
+
 SPECIAL_WEIGHT_CASES = (
     _kernel_case(
         required_features=(),
@@ -167,6 +198,29 @@ SPECIAL_WEIGHT_CASES = (
             mma_type=MmaType.WGMMA,
         ),
     ),
+<<<<<<< ours
+<<<<<<< ours
+=======
+    _kernel_case(
+        required_features=("use_packed_k_layout", "use_ldmatrix_s4"),
+        name="packed-k-ldmatrix-s4",
+        layer_config=_layer_config(
+            a_dtype=dtypes.int8,
+            b_dtype=dtypes.uint4,
+            bs_dtype=dtypes.bfloat16,
+            weight_scale_group_size=128,
+            has_zero_point=False,
+            mma_type=MmaType.WGMMA,
+            # The test re-resolves selection after its environment checks.
+        ),
+    ),
+>>>>>>> theirs
+=======
+    _ldmatrix_s4_case("packed-k-ldmatrix-s4-minimum", 128, 128),
+    _ldmatrix_s4_case("packed-k-ldmatrix-s4-forced-legacy", 128, 128, force_legacy=True),
+    _ldmatrix_s4_case("packed-k-ldmatrix-s4", SHAPE_N, SHAPE_K),
+    _ldmatrix_s4_case("packed-k-ldmatrix-s4-model-shape", 4096, 4096),
+>>>>>>> theirs
 )
 
 
@@ -222,14 +276,41 @@ def test_special_weight_path(required_features, test_case):
     if "use_fused_e8m0_scale" in required_features and config.mma_type == MmaType.MXMMA:
         pytest.skip("fused E8M0 scale is not supported by MXMMA")
 
+<<<<<<< ours
+<<<<<<< ours
+=======
+    min_cuda_version = (13, 4) if "use_ldmatrix_s4" in required_features else None
+=======
+>>>>>>> theirs
+    skip_if_unsupported(
+        a_dtype=config.a_dtype,
+        mma_type=config.mma_type.value,
+    )
+
+    if "use_ldmatrix_s4" in required_features:
+        config = dataclasses.replace(config, use_ldmatrix_s4=None)
+        if not config.can_use_ldmatrix_s4:
+            pytest.skip(str(config.ldmatrix_s4_rejection_reasons))
+        test_case = dataclasses.replace(test_case, layer_config=config)
+
+>>>>>>> theirs
     for feature in required_features:
         assert getattr(config, feature) is True
     if "use_int_weight_scale" in required_features or "use_fused_e8m0_scale" in required_features:
         assert config.weight_scale_2_type != WeightScale2Type.NONE
 
+<<<<<<< ours
     skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)
+=======
+    shape_ms = LDMATRIX_S4_SHAPE_MS.get(test_case.name)
+    results = KernelTestRunner(test_case).run(shape_ms)
+    assert_kernel_test_shape_coverage(results, shape_ms)
+    if "use_ldmatrix_s4" in required_features:
+        assert all(result.tuning_values["block_shape"][2] == 64 for result in results)
+        assert all(result.tuning_values["warp_shape"][2] == 64 for result in results)
+>>>>>>> theirs
 
 
 def test_special_weight_path_coverage():
@@ -251,3 +332,38 @@ def test_special_weight_path_coverage():
     odd_bit_fallback = next(case.layer_config for _, case in SPECIAL_WEIGHT_CASES if "odd-bit" in case.name)
     assert odd_bit_fallback.b_dtype.num_bits % 2 == 1
     assert odd_bit_fallback.use_packed_k_layout is False
+<<<<<<< ours
+=======
+
+
+def test_use_ldmatrix_s4_default_matches_eligibility():
+    skip_if_unsupported(mma_type="wgmma")
+    config = _layer_config(
+        a_dtype=dtypes.int8,
+        b_dtype=dtypes.uint4,
+        bs_dtype=dtypes.bfloat16,
+        weight_scale_group_size=128,
+        has_zero_point=False,
+        mma_type=MmaType.WGMMA,
+    )
+    assert config.use_ldmatrix_s4 == config.can_use_ldmatrix_s4
+
+
+def test_use_ldmatrix_s4_incompatible_geometry_rejected():
+    skip_if_unsupported(mma_type="wgmma")
+    from humming.testing.tuning import _is_legal_geometry
+
+    config = _layer_config(
+        a_dtype=dtypes.int8,
+        b_dtype=dtypes.uint4,
+        bs_dtype=dtypes.bfloat16,
+        weight_scale_group_size=128,
+        has_zero_point=False,
+        mma_type=MmaType.WGMMA,
+        use_ldmatrix_s4=None,
+    )
+    if not config.can_use_ldmatrix_s4:
+        pytest.skip(str(config.ldmatrix_s4_rejection_reasons))
+    assert not _is_legal_geometry(config, block_shape=(64, 128, 128), warp_shape=(64, 32, 128))
+    assert _is_legal_geometry(config, block_shape=(64, 128, 64), warp_shape=(64, 32, 64))
+>>>>>>> theirs
