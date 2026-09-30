@@ -48,8 +48,6 @@ private:
   static constexpr bool kIsBlockWeightScale = Ctx::kIsBlockWeightScale;
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
   static constexpr bool kHasBias = Ctx::kHasBias;
-  static constexpr bool kLoadChannelZeroPoint =
-      Ctx::kUseUmma && kHasZeroPoint && kIsChannelWeightScale;
   static constexpr bool kHasChannelData =
       kIsChannelInputScale || kIsChannelInputScale2 || kIsChannelWeightScale ||
       kIsChannelWeightScale2 || kHasBias;
@@ -77,7 +75,7 @@ private:
       else legacy_load_bytes += SharedStorage::kStageBytesBS;
     }
 
-    if constexpr (kHasZeroPoint && !kLoadChannelZeroPoint && (kIsGroupWeightScale || kIsFirst)) {
+    if constexpr (kHasZeroPoint && (kIsGroupWeightScale || kIsFirst)) {
       constexpr uint32_t zero_point_bytes = kIsChannelWeightScale ? SharedStorage::kChannelBytesBZP : SharedStorage::kStageBytesBZP;
       if constexpr (kUseTmaBZP) tma_load_bytes += zero_point_bytes;
       else legacy_load_bytes += zero_point_bytes;
@@ -115,11 +113,6 @@ private:
     if constexpr (kHasBias) {
       if constexpr (kUseTmaBias) tma_load_bytes += SharedStorage::kBiasBytes;
       else legacy_load_bytes += SharedStorage::kBiasBytes;
-    }
-
-    if constexpr (kLoadChannelZeroPoint) {
-      if constexpr (kUseTmaBZP) tma_load_bytes += SharedStorage::kChannelBytesBZP;
-      else legacy_load_bytes += SharedStorage::kChannelBytesBZP;
     }
 
     return {tma_load_bytes, legacy_load_bytes};
@@ -254,7 +247,7 @@ public:
       if constexpr (kIsGroupWeightScale || kIsBlockWeightScale) {
         loader_bs.template load<kShouldAdvance>(smem.stages[stage_id].bs, mbar_ptr);
       };
-      if constexpr (kHasZeroPoint && !kLoadChannelZeroPoint && (kIsGroupWeightScale || kIsFirst)) {
+      if constexpr (kHasZeroPoint && (kIsGroupWeightScale || kIsFirst)) {
         if constexpr (kIsChannelWeightScale)
           loader_bzp.template load<kShouldAdvance>(smem.bzp_c, mbar_ptr);
         else
@@ -321,7 +314,6 @@ public:
     if constexpr (kIsChannelWeightScale) loader_bs.load(smem.bs_c, channel_mbar_ptr);
     if constexpr (kIsChannelWeightScale2) loader_bs2.load(smem.bs2_c, channel_mbar_ptr);
     if constexpr (kHasBias) loader_bias.load(smem.bias, channel_mbar_ptr);
-    if constexpr (kLoadChannelZeroPoint) loader_bzp.load(smem.bzp_c, channel_mbar_ptr);
 
     if constexpr (load_bytes.x > 0 || load_bytes.y > 0) {
       commit_cp_async_load<kHasChannelCpAsyncMBarrier>(kNumStages + 1);

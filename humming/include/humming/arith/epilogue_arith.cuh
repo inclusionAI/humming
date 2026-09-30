@@ -222,7 +222,7 @@ public:
       regs_half2[0] = __hfma2(regs_half2[0], cs_half2[col], bias_half2[col]);
     } else if constexpr (kHasChannelWeightScale && !kUseNativeChannelScale) {
       regs_half2[0] = __hmul2(regs_half2[0], cs_half2[col]);
-    } else if constexpr (kHasBias) {
+    } else if constexpr (kHasBias && !kIsF16Accum) {
       regs_half2[0] = __hadd2(regs_half2[0], bias_half2[col]);
     };
 

@@ -676,16 +676,20 @@ def test_umma_operand_buffer_selection(
 
 
 @pytest.mark.parametrize(
-    "cta_group_size,block_m,block_k,num_stages,weight_name,output_dtype",
+    "cta_group_size,block_m,block_k,num_stages,weight_name,output_dtype,use_tma",
     (
-        (1, 96, 64, 4, "uint4", dtypes.bfloat16),
-        (1, 256, 64, 4, "nvfp4", dtypes.bfloat16),
-        (2, 96, 32, 3, "uint4", dtypes.bfloat16),
-        (2, 256, 64, 6, "uint4", dtypes.bfloat16),
-        (2, 256, 64, 9, "nvfp4", dtypes.bfloat16),
-        (2, 192, 128, 4, "uint4-zp", dtypes.bfloat16),
-        (2, 96, 64, 5, "uint4-fp-zp", dtypes.float16),
-        (2, 256, 64, 6, "nvfp4", dtypes.float16),
+        (1, 96, 64, 4, "uint4", dtypes.bfloat16, True),
+        (1, 256, 64, 4, "nvfp4", dtypes.bfloat16, True),
+        (2, 96, 32, 3, "uint4", dtypes.bfloat16, True),
+        (2, 256, 64, 6, "uint4", dtypes.bfloat16, True),
+        (2, 256, 64, 9, "nvfp4", dtypes.bfloat16, True),
+        (2, 192, 128, 4, "uint4-zp", dtypes.bfloat16, True),
+        (2, 96, 64, 5, "uint4-fp-zp", dtypes.float16, True),
+        (2, 256, 64, 6, "nvfp4", dtypes.float16, True),
+        (2, 48, 32, 3, "uint4", dtypes.bfloat16, False),
+        (2, 96, 64, 4, "uint4-zp", dtypes.bfloat16, False),
+        (2, 48, 64, 3, "uint4-fp-zp", dtypes.float16, False),
+        (2, 96, 64, 4, "nvfp4", dtypes.bfloat16, False),
     ),
 )
 @pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
@@ -697,6 +701,7 @@ def test_umma_chunked_output(
     num_stages,
     weight_name,
     output_dtype,
+    use_tma,
     compiler,
     use_stream_k,
     monkeypatch,
@@ -715,7 +720,7 @@ def test_umma_chunked_output(
             "num_stages": num_stages,
             "num_sms": 6,
             "num_ctas_per_sm": 1,
-            "use_tma": True,
+            "use_tma": use_tma,
             "use_stream_k": use_stream_k,
             "smem_reuse_mode": "none",
             "umma_cta_group_size": cta_group_size,
@@ -771,7 +776,7 @@ def test_umma_chunked_output(
 def test_umma_cooperative_channel_parameters(
     weight_values, use_tma_channel, output_dtype, use_stream_k, monkeypatch
 ):
-    """Channel buffers may be reused only after output and dequant consumers read them."""
+    """Channel buffers belong to the epilogue; first-stage zero points survive the K loop."""
 
     def select_output(layer_config, shape_m, gemm_type, **kwargs):
         return {
@@ -807,23 +812,29 @@ def test_umma_cooperative_channel_parameters(
 
 
 @pytest.mark.parametrize(
-    "gemm_type,block_m,block_n,block_k,use_tma_c,reuse_mode,cta_group_size",
+    "gemm_type,block_m,block_n,block_k,use_tma_c,reuse_mode,cta_group_size,use_tma",
     (
-        (GemmType.DENSE, 8, 128, 64, True, "none", 1),
-        (GemmType.DENSE, 48, 128, 64, True, "none", 2),
-        (GemmType.DENSE, 16, 512, 32, False, "none", 2),
-        (GemmType.DENSE, 24, 256, 64, True, "none", 1),
-        (GemmType.DENSE, 56, 512, 64, True, "none", 1),
-        (GemmType.DENSE, 40, 128, 64, False, "all_stages", 1),
-        (GemmType.DENSE, 48, 128, 64, True, "last_stage", 2),
-        (GemmType.DENSE, 64, 256, 64, False, "all_stages", 2),
-        (GemmType.INDEXED, 8, 128, 64, False, "none", 1),
-        (GemmType.INDEXED, 48, 128, 64, False, "none", 2),
-        (GemmType.INDEXED, 40, 256, 64, False, "all_stages", 1),
-        (GemmType.GROUPED_CONTIGUOUS, 24, 128, 64, True, "none", 1),
-        (GemmType.GROUPED_CONTIGUOUS, 40, 256, 64, False, "last_stage", 1),
-        (GemmType.GROUPED_MASKED, 40, 128, 64, True, "all_stages", 1),
-        (GemmType.GROUPED_CONTIGUOUS, 48, 128, 64, True, "none", 2),
+        (GemmType.DENSE, 8, 128, 64, True, "none", 1, True),
+        (GemmType.DENSE, 48, 128, 64, True, "none", 2, True),
+        (GemmType.DENSE, 16, 512, 32, False, "none", 2, True),
+        (GemmType.DENSE, 24, 256, 64, True, "none", 1, True),
+        (GemmType.DENSE, 56, 512, 64, True, "none", 1, True),
+        (GemmType.DENSE, 40, 128, 64, False, "all_stages", 1, True),
+        (GemmType.DENSE, 48, 128, 64, True, "last_stage", 2, True),
+        (GemmType.DENSE, 64, 256, 64, False, "all_stages", 2, True),
+        (GemmType.INDEXED, 8, 128, 64, False, "none", 1, True),
+        (GemmType.INDEXED, 40, 256, 64, False, "all_stages", 1, True),
+        (GemmType.GROUPED_CONTIGUOUS, 24, 128, 64, True, "none", 1, True),
+        (GemmType.GROUPED_CONTIGUOUS, 40, 256, 64, False, "last_stage", 1, True),
+        (GemmType.GROUPED_MASKED, 40, 128, 64, True, "all_stages", 1, True),
+        (GemmType.GROUPED_CONTIGUOUS, 48, 128, 64, True, "none", 2, True),
+        (GemmType.DENSE, 48, 128, 32, False, "none", 2, False),
+        (GemmType.DENSE, 48, 256, 64, True, "none", 2, False),
+        (GemmType.INDEXED, 48, 128, 32, False, "none", 2, False),
+        (GemmType.INDEXED, 48, 128, 64, False, "all_stages", 2, False),
+        (GemmType.INDEXED, 48, 128, 64, False, "none", 2, True),
+        (GemmType.GROUPED_CONTIGUOUS, 48, 128, 64, False, "none", 2, False),
+        (GemmType.GROUPED_MASKED, 48, 128, 64, False, "last_stage", 2, False),
     ),
 )
 @pytest.mark.parametrize("compiler", ("nvcc", "nvrtc"))
@@ -836,6 +847,7 @@ def test_umma_chunked_output_layout(
     use_tma_c,
     reuse_mode,
     cta_group_size,
+    use_tma,
     use_stream_k,
     compiler,
     monkeypatch,
@@ -852,8 +864,11 @@ def test_umma_chunked_output_layout(
             "num_stages": 3,
             "num_sms": 6,
             "num_ctas_per_sm": 1,
-            "use_tma": True,
-            "use_tma_a": gemm_type != GemmType.INDEXED,
+            "use_tma": use_tma or use_tma_c,
+            "use_tma_b": use_tma,
+            "use_tma_bs": use_tma,
+            "use_tma_bzp": use_tma,
+            "use_tma_a": use_tma and gemm_type != GemmType.INDEXED,
             "use_tma_c": use_tma_c,
             "use_stream_k": use_stream_k,
             "smem_reuse_mode": reuse_mode,
@@ -862,7 +877,14 @@ def test_umma_chunked_output_layout(
         }
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
-    case = _case("chunked-layout", gemm_type, b_dtype="uint4", weight_scale_group_size=0, has_bias=True)
+    case = _case(
+        "chunked-layout",
+        gemm_type,
+        b_dtype="uint4",
+        weight_scale_group_size=0,
+        has_zero_point=True,
+        has_bias=True,
+    )
     layer_config = dataclasses.replace(case.layer_config, shape_n=1024, shape_k=1024)
     _assert_results(dataclasses.replace(case, layer_config=layer_config), (17, 13 * block_m + 1))
 

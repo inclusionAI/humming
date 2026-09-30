@@ -75,6 +75,7 @@ class Sm86Heuristics(DeviceHeuristics):
             return {
                 "block_shape": (128, 256, 64),
                 "warp_shape": (64, 64, 64),
+                "num_stages": num_stages,
             }
         elif use_fused_e8m0_scale:
             return {

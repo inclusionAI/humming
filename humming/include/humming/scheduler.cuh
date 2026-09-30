@@ -178,8 +178,7 @@ public:
           if (index < kNumExperts) {
             uint32_t expert_tokens;
             if constexpr (kIsGroupedContiguousGemm) {
-              uint32_t next_offset =
-                  index + 1 < kNumExperts ? ctx.smem.expert_offset[index + 1] : ctx.params.shape_m;
+              uint32_t next_offset = ctx.smem.expert_offset[index + 1];
               expert_tokens = next_offset - ctx.smem.expert_offset[index];
               ctx.smem.expert_tokens[index] = expert_tokens;
             } else {

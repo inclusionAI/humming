@@ -545,6 +545,9 @@ class Sm100Heuristics(Sm100MmaHeuristics):
 
     @classmethod
     def _should_use_mma(cls, layer_config: LayerConfig, shape_m: int) -> bool:
+        # All supported UMMA N tiles are multiples of 128.
+        if layer_config.shape_n % 128:
+            return True
         effective_m = float(shape_m)
         if layer_config.num_experts:
             counts = Sm100UmmaHeuristics._sample_expert_rows(

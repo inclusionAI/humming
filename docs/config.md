@@ -161,7 +161,9 @@ after the last partition has been read. Reusing stage SMEM waits for output
 completion before loading the next tile, reducing load/epilogue overlap.
 
 Two-CTA execution still requires chunked output, N divisible by twice block N,
-and `num_ctas_per_sm=1`. Both TMA and cp.async stage loads are supported.
+and `num_ctas_per_sm=1`. Both TMA and cp.async stage loads are supported,
+including indexed A gathers. Each CTA loads only its own half of A; both CTAs
+publish operand readiness before the leader issues UMMA.
 Cooperative instructions support FP16/BF16, ordinary FP8 with FP8/FP6/FP4
 weights, and MXFP8 with MXFP8/MXFP6/MXFP4 weights and group-32 E8M0 scales.
 FP4 activations use native `mxf4nvf4` instructions with packed FP4 weights:

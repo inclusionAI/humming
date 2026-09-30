@@ -65,6 +65,13 @@ F16_ACCUM_CASES = (
         weight_scale_group_size=64,
     ),
     _case(
+        "fp16-group-scale-bias",
+        a_dtype=dtypes.float16,
+        b_dtype=dtypes.uint4,
+        weight_scale_group_size=64,
+        has_bias=True,
+    ),
+    _case(
         "fp16-bias-pad-nk",
         a_dtype=dtypes.float16,
         b_dtype=dtypes.uint4,
@@ -125,6 +132,9 @@ def test_f16_accumulation_case_coverage():
     assert any(case.layer_config.has_bias for case in F16_ACCUM_CASES)
     assert any(case.layer_config.pad_shape_k for case in F16_ACCUM_CASES)
     assert any(case.layer_config.weight_scale_group_size for case in F16_ACCUM_CASES)
+    assert any(
+        case.layer_config.weight_scale_group_size and case.layer_config.has_bias for case in F16_ACCUM_CASES
+    )
     assert any(case.layer_config.input_scale_group_size for case in F16_ACCUM_CASES)
     assert not any(case.layer_config.use_fused_e8m0_scale for case in F16_ACCUM_CASES)
     assert any(case.compute_config.gemm_type == GemmType.GROUPED_CONTIGUOUS for case in F16_ACCUM_CASES)
