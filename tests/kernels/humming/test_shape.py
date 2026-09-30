@@ -53,6 +53,11 @@ PROBLEM_SHAPE_CASES = (
         shape_k=MIN_SHAPE_K,
     ),
     _case(
+        "non-umma-aligned-n",
+        shape_n=192,
+        shape_k=128,
+    ),
+    _case(
         "small-tile-boundary",
         shape_n=128,
         shape_k=64,
