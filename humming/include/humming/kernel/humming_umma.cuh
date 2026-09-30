@@ -148,7 +148,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                       scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
         producer.prefetch_stage();
 
-#pragma unroll 4
+        PRAGMA_UNROLL_COUNT(4)
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           auto *free_barrier = &smem.math_mbar[pipeline_stage];
           if constexpr (kEarlyWeightReuse && decltype(is_weight_warp)::value)
@@ -191,7 +191,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         mbarrier_wait(&smem.umma_accumulator_free, tile_index % 2);
         tcgen05_fence_after_thread_sync();
 
-#pragma unroll 4
+        PRAGMA_UNROLL_COUNT(4)
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           mbarrier_wait(&smem.umma_operand_ready[pipeline_stage], pipeline_phase);
           tcgen05_fence_after_thread_sync();
@@ -218,7 +218,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     // This warp joins A readiness with the dequantization WG's B readiness.
     Consumer consumer(ctx);
     while (next_tile()) {
-#pragma unroll 4
+      PRAGMA_UNROLL_COUNT(4)
       for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
         if constexpr (kHasChannelZeroPoint) {
           if (iter == 0) consumer.template wait_stage<true>(pipeline_stage);
@@ -284,7 +284,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           tcgen05_fence_before_thread_sync();
         };
 
-#pragma unroll 4
+        PRAGMA_UNROLL_COUNT(4)
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           uint32_t buffer = operand_step % kNumOperandBuffers;
           auto wait_for_operand = [&]() {
