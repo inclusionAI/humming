@@ -270,6 +270,13 @@ def transform_humming_weight(
     assert padded_shape_n % 64 == 0
     assert padded_shape_k % (2 * packed_block_size_k) == 0
 
+    if a_dtype == dtypes.int8 and b_dtype in [dtypes.int8, dtypes.uint8]:
+        if not packed:
+            weight = ops.pack_weight(weight, b_dtype.num_bits)
+            packed = True
+        # Both TS and SS consume signed INT8 instead of offset-binary weight codes.
+        weight = (weight.view(torch.int8) - 128).view(torch.int32)
+
     if use_umma_ss:
         if a_dtype.num_bits == 8 and b_dtype.num_bits < 8:
             padded_shape_k = round_up(padded_shape_k, 128)
@@ -290,9 +297,6 @@ def transform_humming_weight(
             should_preprocess_for_int2fp = b_dtype.num_bits > 6
         elif a_dtype == dtypes.bfloat16 and not has_zero_point:
             should_preprocess_for_int2fp = b_dtype.num_bits > 7
-
-    if a_dtype == dtypes.int8 and b_dtype in [dtypes.int8, dtypes.uint8]:
-        weight = (weight.view(torch.int8) - 128).view(torch.int32)
 
     if a_dtype == dtypes.int4 and b_dtype in [dtypes.int4, dtypes.uint4]:
         weight = weight.view(torch.uint8)

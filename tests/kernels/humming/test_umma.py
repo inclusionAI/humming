@@ -3,7 +3,7 @@ import dataclasses
 import pytest
 import torch
 
-from humming import dtypes
+from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, SmemReuseMode
 from humming.config.config import _cuda_compiler_version
 from humming.jit.runtime import KernelRuntime
@@ -12,6 +12,7 @@ from humming.layer import HummingLayer
 from humming.schema import HummingWeightSchema
 from humming.testing import KernelTestCase, KernelTestRunner
 from humming.testing.data import generate_moe_tensors, generate_random_tensor
+from humming.transform import transform_humming_weight
 from humming.tune import get_heuristics_config
 from humming.tune.sm100 import Sm100Heuristics, Sm100UmmaHeuristics
 
@@ -85,6 +86,26 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
     )
     expected = MmaType.MMA if a_dtype == dtypes.int8 and sm_version in (103, 107) else MmaType.UMMA
     assert config.mma_type == expected
+
+
+@pytest.mark.parametrize("packed", (False, True))
+@pytest.mark.parametrize("num_experts", (0, 2))
+@pytest.mark.parametrize("b_dtype", (dtypes.int8, dtypes.uint8))
+def test_umma_int8_ss_weight_encoding(packed, num_experts, b_dtype):
+    shape = (2, 65, 256) if num_experts else (65, 256)
+    codes = torch.arange(256, dtype=torch.int32, device="cuda").expand(shape).contiguous()
+    weight = ops.pack_weight(codes, 8) if packed else codes
+    transformed = transform_humming_weight(
+        weight,
+        b_dtype=b_dtype,
+        a_dtype=dtypes.int8,
+        packed=packed,
+        padded_shape_n=128,
+        padded_shape_k=384,
+        use_umma_ss=True,
+    )
+    expected = torch.nn.functional.pad((codes - 128).to(torch.int8), (0, 128, 0, 63))
+    torch.testing.assert_close(transformed.view(torch.int8), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
@@ -1005,7 +1026,7 @@ def test_umma_fp8(fp8_dtype, input_quant_mode, weight_scale_type, output_dtype, 
         (GemmType.DENSE, dtypes.bfloat16, 256, 128, True, True),
         (GemmType.INDEXED, dtypes.bfloat16, 256, 64, False, True),
         (GemmType.GROUPED_CONTIGUOUS, dtypes.float16, 128, 128, True, False),
-        (GemmType.GROUPED_MASKED, dtypes.bfloat16, 64, 64, True, False),
+        (GemmType.GROUPED_MASKED, dtypes.bfloat16, 128, 64, True, False),
     ),
 )
 @pytest.mark.parametrize("output_chunk_rows", (0, 32))
@@ -1105,7 +1126,7 @@ def test_umma_fp8_public_dispatch(shape_k, activation_dtype, weight_dtype):
         (128, 64, "fp8", GemmType.DENSE, 4, False, 1),
         (256, 64, "nvfp4", GemmType.INDEXED, 3, False, 1),
         (512, 64, "uint4", GemmType.DENSE, 4, True, 1),
-        (64, 32, "nvfp4", GemmType.DENSE, 4, True, 2),
+        (128, 32, "nvfp4", GemmType.DENSE, 4, True, 2),
     ),
 )
 def test_umma_cooperative_dequant(
@@ -1141,15 +1162,15 @@ def test_umma_cooperative_dequant(
         (64, 128, 128, False, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (64, 128, 64, False, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (64, 128, 128, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
-        (32, 64, 64, True, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
+        (32, 128, 64, True, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (32, 512, 128, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
-        (8, 64, 256, False, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
+        (8, 128, 256, False, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (32, 512, 128, False, 2, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (96, 128, 256, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (160, 128, 256, True, 1, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
         (24, 256, 128, True, 2, True, dtypes.float8e5m2, dtypes.float4e2m1, GemmType.DENSE),
         (256, 128, 128, True, 2, False, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.DENSE),
-        (8, 64, 64, False, 1, True, dtypes.float8e4m3, dtypes.float6e3m2, GemmType.DENSE),
+        (8, 128, 64, False, 1, True, dtypes.float8e4m3, dtypes.float6e3m2, GemmType.DENSE),
         (32, 128, 128, True, 1, False, dtypes.float8e4m3, dtypes.float8e5m2, GemmType.DENSE),
         (24, 256, 128, True, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.GROUPED_CONTIGUOUS),
         (24, 128, 64, False, 1, True, dtypes.float8e4m3, dtypes.float4e2m1, GemmType.INDEXED),
