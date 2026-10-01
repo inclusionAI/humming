@@ -24,6 +24,7 @@ def _case(
     *,
     use_m_major_input_scale: bool = False,
     expert_max_tokens: int | None = None,
+    shape_k: int = SHAPE_K,
     **layer_values,
 ) -> KernelTestCase:
     defaults = {
@@ -36,7 +37,7 @@ def _case(
         name=name,
         layer_config=LayerConfig(
             shape_n=SHAPE_N,
-            shape_k=SHAPE_K,
+            shape_k=shape_k,
             num_experts=NUM_EXPERTS,
             **(defaults | layer_values),
         ),
@@ -80,6 +81,7 @@ MOE_CASES = (
         input_quant_mode="dynamic_group_token",
         mma_type=MmaType.MXMMA,
     ),
+    _case("indexed-partial-k-tile", GemmType.INDEXED, shape_k=96),
     _case("grouped-contiguous", GemmType.GROUPED_CONTIGUOUS),
     _case(
         "grouped-contiguous-dynamic-group-token",
