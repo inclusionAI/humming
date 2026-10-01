@@ -12,7 +12,6 @@ private:
   using PadShape = typename Ctx::PadShape;
   using ElementA = typename Ctx::ElementA;
 
-  static constexpr bool kEvictInputsLast = Ctx::kUseUmmaSs && Ctx::kIsDenseGemm;
   static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
   static constexpr bool kUseTma = Ctx::kUseTmaA;
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
@@ -84,9 +83,9 @@ public:
       const uint32_t smem_offset = BlockShape::M / Ctx::kUmmaCtaGroupSize * 8 * block_idx;
       const uint32_t col_offset2 = col_offset + (1024 / MAX(ElementA::kBits, 8)) * block_idx;
       if constexpr (kMultiCastSizeA == 1) {
-        tma_load_2d<1, false, Ctx::kUseUmmaCooperativeTma ? 2 : 1, kEvictInputsLast>(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
+        tma_load_2d<1, false, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
       } else if (blockIdx.x % kMultiCastSizeA == 0) {
-        tma_load_2d<kMultiCastSizeA, false, 1, kEvictInputsLast>(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
+        tma_load_2d<kMultiCastSizeA>(tensor_map_ptr, smem_ptr + smem_offset, mbar_ptr, col_offset2, row_offset);
       }
     }
   }

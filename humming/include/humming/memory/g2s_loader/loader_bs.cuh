@@ -11,11 +11,10 @@ private:
   using BlockShape = typename Ctx::BlockShape;
   using ElementBS = typename Ctx::ElementBS;
 
-  static constexpr bool kEvictInputsLast = Ctx::kUseUmmaSs && Ctx::kIsDenseGemm;
   static constexpr bool kUseBlockScaledMma = Ctx::kUseBlockScaledMma;
   static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
   static constexpr bool kUseTma = Ctx::kUseTmaBS;
-  static constexpr bool kEvictWeightsFirst = !kEvictInputsLast && Ctx::kUseUmmaSplitLoads && Ctx::kRasterGroupM > 1;
+  static constexpr bool kEvictWeightsFirst = Ctx::kUseUmmaSplitLoads && Ctx::kRasterGroupM > 1;
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
   static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
   static constexpr uint32_t kLoadThreadOffset = Ctx::kLoadThreadOffset;
@@ -78,9 +77,9 @@ public:
   template <uint32_t kCtaGroupSize = 1>
   CUDA_INLINE void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     if (ctx.load_thread_id() == 0) {
-      if constexpr (!kUseMxScale) tma_load_3d<1, kEvictWeightsFirst, kCtaGroupSize, kEvictInputsLast>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
-      else if constexpr (kMxTmaWidth > 256) tma_load_3d<1, false, kCtaGroupSize, kEvictInputsLast>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset / 256, row_offset);
-      else tma_load_2d<1, false, kCtaGroupSize, kEvictInputsLast>(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
+      if constexpr (!kUseMxScale) tma_load_3d<1, kEvictWeightsFirst, kCtaGroupSize>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+      else if constexpr (kMxTmaWidth > 256) tma_load_3d<1, false, kCtaGroupSize>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset / 256, row_offset);
+      else tma_load_2d<1, false, kCtaGroupSize>(tensor_map_ptr, smem_ptr, mbar_ptr, col_offset, row_offset);
     }
   }
 

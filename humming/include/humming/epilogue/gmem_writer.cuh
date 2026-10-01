@@ -150,7 +150,7 @@ public:
   void write_tma_tile(uint32_t slice_id, uint32_t slice_count, uint32_t smem_offset,
                       uint32_t column, uint32_t row) {
     if (!kUseStreamK || slice_count == 1 || slice_id == 0)
-      tma_store_2d<Ctx::kUseUmmaSs && Ctx::kIsDenseGemm>(ctx.smem.reduce + smem_offset, tensor_map_ptr, column, row);
+      tma_store_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, column, row);
     else
       tma_reduce_add_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, column, row);
     tma_commit_store_group();
