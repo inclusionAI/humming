@@ -307,7 +307,7 @@ class LayerConfig(BaseHummingConfig):
                 self.mma_type = MmaType.WGMMA
             elif self.mxmma_supported:
                 self.mma_type = MmaType.MXMMA
-            elif self.sm_version // 10 == 10 and (use_bf16_umma or use_fp8_umma or use_fp4_umma):
+            elif self.sm_version // 10 in (10, 11) and (use_bf16_umma or use_fp8_umma or use_fp4_umma):
                 from humming.jit.runtime import KernelRuntime
 
                 version = _cuda_compiler_version(KernelRuntime._get_compiler())

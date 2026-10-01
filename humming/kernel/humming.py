@@ -133,15 +133,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.num_load_threads = 96 if use_wide_async_load else 64
         KernelRuntime.__post_init__(self)
 
-    def init_sm_version(self):
-        super().init_sm_version()
-        if self.mma_type == MmaType.UMMA:
-            assert self.sm_version // 10 == 10, "UMMA requires SM100 family"
-            assert _cuda_compiler_version(self._get_compiler()) >= (12, 9), (
-                "UMMA sm_100f requires CUDA 12.9 or newer"
-            )
-            self.sm_version_str = "100f"
-
     def init_kernel(self) -> None:
         self.check_shape()
         self.check_dtype()
@@ -587,7 +578,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert not self.use_tma_as2, "indexed GEMM does not support TMA secondary input scale loads"
 
         if self.multi_cast_size_a * self.multi_cast_size_b > 1:
-            assert self.sm_version in (90, 100, 103)
+            assert self.sm_version == 90 or self.sm_version // 10 in (10, 11)
 
         if self.use_tma_as:
             assert self.use_m_major_input_scale, "use_tma_as requires use_m_major_input_scale=True"

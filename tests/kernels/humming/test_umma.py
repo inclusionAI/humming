@@ -40,17 +40,49 @@ WEIGHT_CONFIGS = {
 
 
 @pytest.fixture(autouse=True)
-def require_sm100_family(monkeypatch):
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
-        pytest.skip("UMMA BF16 requires an SM100-family GPU")
+def require_umma_device(monkeypatch):
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] not in (10, 11):
+        pytest.skip("UMMA requires an SM10x or SM11x GPU")
     if _cuda_compiler_version(KernelRuntime._get_compiler()) < (12, 9):
-        pytest.skip("UMMA sm100f requires CUDA 12.9 or newer")
+        pytest.skip("UMMA requires CUDA 12.9 or newer")
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
 
     def force_umma(layer_config, shape_m, gemm_type, **kwargs):
         return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {"mma_type": "umma"}
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", force_umma)
+
+
+@pytest.mark.parametrize("sm_version", (100, 103, 107, 110))
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype",
+    (
+        (dtypes.bfloat16, dtypes.uint4),
+        (dtypes.float8e4m3, dtypes.float8e4m3),
+        (dtypes.float8e4m3, dtypes.float4e2m1),
+        (dtypes.float4e2m1, dtypes.float4e2m1),
+    ),
+)
+def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
+    scale_config = {}
+    if a_dtype == dtypes.float4e2m1:
+        scale_config = dict(
+            as_dtype=dtypes.float8e4m3,
+            bs_dtype=dtypes.float8e4m3,
+            input_scale_group_size=16,
+            weight_scale_group_size=16,
+            input_quant_mode="dynamic_group",
+        )
+    config = LayerConfig(
+        sm_version=sm_version,
+        shape_n=256,
+        shape_k=256,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=dtypes.bfloat16,
+        **scale_config,
+    )
+    assert config.mma_type == MmaType.UMMA
 
 
 def _case(name, gemm_type, **weight_values):

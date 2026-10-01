@@ -16,7 +16,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
 
   static constexpr bool kUseBlockScale = Ctx::kUseBlockScaledMma;
   static constexpr uint32_t kOperandColumns = Ctx::kUseUmmaSs ? 0 : Ctx::kWarpIters * 8;
-  static constexpr bool kUseK96 = Ctx::kUseUmmaSs && Ctx::ElementA::kBits == 4 && BlockShape::K % 256 == 0;
+  static constexpr bool kHasK96 = Ctx::LayerConfig::kSmVersion == 103 || Ctx::LayerConfig::kSmVersion == 107;
+  static constexpr bool kUseK96 = kHasK96 && Ctx::kUseUmmaSs && Ctx::ElementA::kBits == 4 && BlockShape::K % 256 == 0;
   static constexpr bool kUseFp4 = Ctx::ElementA::kBits == 4;
   static constexpr uint32_t kScaleGroupSize = Ctx::LayerConfig::kMmaScaleGroupSize;
   static constexpr uint32_t kScalesPerIter = kUseBlockScale ? Ctx::kPartMmaShapeK / kScaleGroupSize : 1;
