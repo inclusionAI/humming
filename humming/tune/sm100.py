@@ -104,7 +104,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     sm_version = 100
     expert_probability_cv = 0.25
     b16_allowed_dtypes = [dtypes.float16, dtypes.bfloat16]
-    b8_allowed_dtypes = [dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4]
+    b8_allowed_dtypes = [dtypes.int8, dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4]
     b4_allowed_dtypes = [dtypes.float4e2m1, dtypes.float4e0m3]
 
     @staticmethod
@@ -154,6 +154,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         if tmem_columns * num_ctas_per_sm > 512:
             return False
         block_m, _, block_k = block_shape
+        if layer_config.a_dtype == dtypes.int8 and block_m > 32 and block_m % 16:
+            return False
         smem_size = estimate_smem_size_layer(
             layer_config,
             block_shape,
@@ -319,6 +321,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         # Balance the final M tile before considering additional parallelism.
         m_blocks = math.ceil(shape_m / 256)
         block_m = round_up(math.ceil(shape_m / m_blocks), 8)
+        if layer_config.a_dtype == dtypes.int8 and block_m > 32:
+            block_m = round_up(block_m, 16)
         shape_n, shape_k = layer_config.shape_n, layer_config.shape_k
         num_sms = current_device.sm_count
 

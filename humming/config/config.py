@@ -97,7 +97,7 @@ class LayerConfig(BaseHummingConfig):
         has_group_scales = self.input_scale_group_size > 0 or self.weight_scale_group_size > 0
         return (
             self.mma_type == MmaType.UMMA
-            and self.a_dtype.num_bits <= 8
+            and self.a_dtype.is_floating_point_type and self.a_dtype.num_bits <= 8
             and (self.a_dtype.num_bits == 4 or has_group_scales)
         )
 
@@ -303,11 +303,17 @@ class LayerConfig(BaseHummingConfig):
             )
             use_fp4_umma = has_fp8_output and has_fp4_operands and has_fp4_scales
             use_bf16_umma = self.a_dtype == self.c_dtype == dtypes.bfloat16
+            has_int8_operands = self.a_dtype == dtypes.int8 and self.b_dtype.is_integer_type
+            use_int8_umma = (
+                self.sm_version in (100, 110) and has_int8_operands
+                and has_fp8_output and has_fp8_epilogue_scales
+            )
+            use_umma = use_bf16_umma or use_fp8_umma or use_fp4_umma or use_int8_umma
             if self.sm_version // 10 == 9:
                 self.mma_type = MmaType.WGMMA
             elif self.mxmma_supported:
                 self.mma_type = MmaType.MXMMA
-            elif self.sm_version // 10 in (10, 11) and (use_bf16_umma or use_fp8_umma or use_fp4_umma):
+            elif self.sm_version // 10 in (10, 11) and use_umma:
                 from humming.jit.runtime import KernelRuntime
 
                 version = _cuda_compiler_version(KernelRuntime._get_compiler())
@@ -380,9 +386,11 @@ class LayerConfig(BaseHummingConfig):
 
         if self.use_umma_ss:
             assert self.mma_type == MmaType.UMMA, "SS operands require UMMA"
-            assert self.b_dtype.is_floating_point_type and self.b_dtype.num_bits in (4, 6, 8)
+            has_float_weights = self.b_dtype.is_floating_point_type and self.b_dtype.num_bits in (4, 6, 8)
+            has_int8_weights = self.a_dtype == self.b_dtype == dtypes.int8
+            assert has_float_weights or has_int8_weights
             assert not self.has_zero_point and not self.is_block_weight_scale
-            assert self.a_dtype.num_bits in (4, 8), "SS operands require native FP8/FP6/FP4 MMA"
+            assert self.a_dtype.num_bits in (4, 8), "SS operands require native 4-bit or 8-bit MMA"
 
         if self.use_packed_k_layout is None:
             self.use_packed_k_layout = (

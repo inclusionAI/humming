@@ -58,6 +58,7 @@ def require_umma_device(monkeypatch):
     "a_dtype,b_dtype",
     (
         (dtypes.bfloat16, dtypes.uint4),
+        (dtypes.int8, dtypes.int8),
         (dtypes.float8e4m3, dtypes.float8e4m3),
         (dtypes.float8e4m3, dtypes.float4e2m1),
         (dtypes.float4e2m1, dtypes.float4e2m1),
@@ -82,7 +83,57 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
         c_dtype=dtypes.bfloat16,
         **scale_config,
     )
-    assert config.mma_type == MmaType.UMMA
+    expected = MmaType.MMA if a_dtype == dtypes.int8 and sm_version in (103, 107) else MmaType.UMMA
+    assert config.mma_type == expected
+
+
+@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
+@pytest.mark.parametrize("cta_group_size", (1, 2))
+@pytest.mark.parametrize("gemm_type", (GemmType.DENSE, GemmType.INDEXED))
+def test_umma_int8(use_umma_ss, cta_group_size, gemm_type, monkeypatch):
+    major, minor = torch.cuda.get_device_capability()
+    if major * 10 + minor not in (100, 110):
+        pytest.skip("Native INT8 UMMA requires SM100 or SM110")
+
+    def select_config(layer_config, shape_m, gemm_type, **kwargs):
+        indexed = gemm_type == GemmType.INDEXED
+        return dict(
+            mma_type="umma",
+            block_shape=(64, 128, 128),
+            warp_shape=(64, 32, 128),
+            num_stages=3,
+            num_ctas_per_sm=1,
+            use_warp_spec=True,
+            use_tma=True,
+            use_tma_a=not indexed,
+            use_tma_c=not indexed,
+            use_stream_k=True,
+            smem_reuse_mode="none",
+            umma_cta_group_size=cta_group_size,
+            umma_output_chunk_rows=32 if cta_group_size == 2 else 0,
+        )
+
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+    case = KernelTestCase(
+        name="int8-umma",
+        layer_config=LayerConfig(
+            shape_n=512,
+            shape_k=1024,
+            num_experts=0 if gemm_type == GemmType.DENSE else 4,
+            a_dtype=dtypes.int8,
+            b_dtype=dtypes.int8,
+            c_dtype=dtypes.bfloat16,
+            bs_dtype=dtypes.bfloat16,
+            input_quant_mode="dynamic_token",
+            weight_scale_type="channel",
+            mma_type=MmaType.UMMA,
+            use_umma_ss=use_umma_ss,
+        ),
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        top_k=2,
+        seed=2026,
+    )
+    _assert_results(case, (1, 17, 129))
 
 
 def _case(name, gemm_type, **weight_values):

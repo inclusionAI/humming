@@ -309,6 +309,10 @@ private:
   CUDA_INLINE uint32_t convert_umma_pair(uint32_t first, uint32_t second, uint32_t row_group, uint32_t column_group) {
     float first_value = __uint_as_float(first);
     float second_value = __uint_as_float(second);
+    if constexpr (kIsIntAccum) {
+      first_value = float(int32_t(first));
+      second_value = float(int32_t(second));
+    }
     arith.apply_native_f32_output_scale(first_value, second_value, row_group, column_group);
     float2 values = {first_value, second_value};
     auto packed = this->float22num2(values);

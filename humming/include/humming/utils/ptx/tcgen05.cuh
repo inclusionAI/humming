@@ -92,6 +92,38 @@ CUDA_INLINE void tcgen05_mma_f16(uint32_t d, uint32_t a, uint64_t b, bool accumu
 }
 
 
+template <uint32_t kN, uint32_t kCtaGroupSize = 1>
+CUDA_INLINE void tcgen05_mma_i8(uint32_t d, uint32_t a, uint64_t b, bool accumulate) {
+  constexpr uint32_t input_format = (1u << 7) | (1u << 10);
+  constexpr uint32_t descriptor = (2u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::2.kind::i8 [%0], [%1], %2, %3, {%5,%5,%5,%5,%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  } else {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::1.kind::i8 [%0], [%1], %2, %3, {%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "r"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  }
+}
+
+
+template <uint32_t kN, uint32_t kCtaGroupSize = 1>
+CUDA_INLINE void tcgen05_mma_i8(uint32_t d, uint64_t a, uint64_t b, bool accumulate) {
+  constexpr uint32_t input_format = (1u << 7) | (1u << 10);
+  constexpr uint32_t descriptor = (2u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  if constexpr (kCtaGroupSize == 2) {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::2.kind::i8 [%0], %1, %2, %3, {%5,%5,%5,%5,%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  } else {
+    asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+                 "tcgen05.mma.cta_group::1.kind::i8 [%0], %1, %2, %3, {%5,%5,%5,%5}, p; }" ::"r"(d),
+                 "l"(a), "l"(b), "r"(descriptor), "r"(uint32_t(accumulate)), "r"(0u) : "memory");
+  }
+}
+
+
 template <uint32_t kN, uint32_t kAFormat, uint32_t kBFormat, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint32_t a, uint64_t b, bool accumulate) {
   constexpr uint32_t input_format = (kAFormat << 7) | (kBFormat << 10);

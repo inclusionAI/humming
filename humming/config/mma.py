@@ -502,6 +502,7 @@ class MmaOpClass:
         elif mma_type == MmaType.UMMA:
             assert m in (8, 16) and (n, k) == (8, 256 // a_dtype.num_bits)
             assert a_dtype in (
+                dtypes.int8,
                 dtypes.bfloat16,
                 dtypes.float16,
                 dtypes.float8e4m3,
@@ -510,7 +511,7 @@ class MmaOpClass:
                 dtypes.float4e2m1,
                 dtypes.float4e0m3,
             )
-            if a_dtype.num_bits == 16:
+            if a_dtype == dtypes.int8 or a_dtype.num_bits == 16:
                 assert a_dtype == b_dtype
             else:
                 assert b_dtype in (
@@ -522,7 +523,7 @@ class MmaOpClass:
                     dtypes.float6e3m2,
                     dtypes.float6e2m3,
                 )
-            assert cd_dtype == dtypes.float32
+            assert cd_dtype == (dtypes.int32 if a_dtype == dtypes.int8 else dtypes.float32)
             return UmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype, sf_dtype)
         elif mma_type == MmaType.WGMMA:
             return WgmmaOpClassImpl(m, n, k, a_dtype, b_dtype, cd_dtype)

@@ -62,10 +62,11 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr uint32_t kTmemColumns = MAX(32u, static_next_power_of_2(kConstantScaleColumns + kOutputGroups * kGroupColumns));
 
   static constexpr bool kUseBf16 = std::is_same<typename Ctx::ElementA, BFloat16>::value;
+  static constexpr bool kUseInt8 = std::is_same<typename Ctx::ElementA, Int8>::value;
   static constexpr bool kUseFp8 = std::is_same<typename Ctx::ElementA, Float8E4M3>::value ||
                                   std::is_same<typename Ctx::ElementA, Float8E5M2>::value ||
                                   std::is_same<typename Ctx::ElementA, Float8E3M4>::value;
-  static_assert(kUseFp4 || kUseFp8 || kUseBf16 || std::is_same<typename Ctx::ElementA, Float16>::value);
+  static_assert(kUseFp4 || kUseFp8 || kUseBf16 || kUseInt8 || std::is_same<typename Ctx::ElementA, Float16>::value);
   static_assert(BlockShape::N == 128 || BlockShape::N == 256 || BlockShape::N == 512,
                 "UMMA requires block N in {128, 256, 512}");
   static_assert(WarpShape::M >= 8 && WarpShape::M <= 256 && WarpShape::M % (8 * Ctx::kUmmaCtaGroupSize) == 0,
@@ -363,6 +364,9 @@ struct UMMA : WMMA<Ctx, ArithClass> {
               accumulator, weight_operand, descriptor,
               weight_scale, input_scale, scale_id, !is_first || k != 0);
         }
+      } else if constexpr (kUseInt8) {
+        tcgen05_mma_i8<WarpShape::M, Ctx::kUmmaCtaGroupSize>(accumulator,
+                                                           weight_operand, descriptor, !is_first || k != 0);
       } else if constexpr (kUseFp8) {
         tcgen05_mma_f8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(accumulator,
                                                                                               weight_operand, descriptor, !is_first || k != 0);

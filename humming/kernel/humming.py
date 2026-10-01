@@ -464,6 +464,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.mma_type == MmaType.UMMA:
             assert self.umma_num_dequant_warpgroups in (1, 2)
             assert self.a_dtype in (
+                dtypes.int8,
                 dtypes.bfloat16,
                 dtypes.float16,
                 dtypes.float8e4m3,
@@ -472,7 +473,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 dtypes.float4e2m1,
                 dtypes.float4e0m3,
             )
-            if self.a_dtype.num_bits == 8:
+            if self.a_dtype == dtypes.int8:
+                assert self.sm_version in (100, 110), "INT8 UMMA requires SM100/110; use MMA on SM103/107"
+                assert self.b_dtype.is_integer_type
+                has_group_scales = self.is_group_input_scale or self.is_group_weight_scale
+                has_group_scales |= self.is_block_weight_scale
+                assert not has_group_scales, "INT8 UMMA requires scales applied after accumulation"
+                block_m = self.block_shape[0]
+                assert block_m <= 32 or block_m % 16 == 0, "INT8 UMMA requires M divisible by 16 above M=32"
+            elif self.a_dtype.num_bits == 8:
                 assert self.b_dtype.is_integer_type or self.b_dtype in (
                     dtypes.float8e4m3,
                     dtypes.float8e5m2,
