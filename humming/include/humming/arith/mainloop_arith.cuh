@@ -144,12 +144,22 @@ public:
         }
 
         if constexpr (kExpOffset.y) {
-          const scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, kExpOffset.y>();
+          // A bf16 factor holds at most 2^127, so a larger offset takes a second factor.
+          constexpr uint32_t kFirstExpOffset = MIN(kExpOffset.y, 127u);
+          const scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, kFirstExpOffset>();
           scalar_t2 *dq_bs_scalar2_ptr = reinterpret_cast<scalar_t2 *>(dq_bs);
 
           PRAGMA_UNROLL
           for (uint32_t j = 0; j < 4; j++) {
             dq_bs_scalar2_ptr[j] = __hmul2(dq_bs_scalar2_ptr[j], scale_factor);
+          }
+
+          if constexpr (kExpOffset.y > kFirstExpOffset) {
+            const scalar_t2 scale_factor2 = prepare_exp_scale_factor<scalar_t2, kExpOffset.y - kFirstExpOffset>();
+            PRAGMA_UNROLL
+            for (uint32_t j = 0; j < 4; j++) {
+              dq_bs_scalar2_ptr[j] = __hmul2(dq_bs_scalar2_ptr[j], scale_factor2);
+            }
           }
         }
       };
