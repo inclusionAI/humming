@@ -26,6 +26,7 @@ def _layer(
     weight_scale_group_size: int = 32,
 ) -> LayerConfig:
     return LayerConfig(
+        sm_version=90,
         shape_n=shape_n,
         shape_k=shape_k,
         num_experts=num_experts,
@@ -238,6 +239,7 @@ def test_dense_a16_requires_padding_when_n_has_no_wgmma_tile():
 def test_short_k_does_not_leave_warp_k_larger_than_block_k():
     config = Sm90Heuristics.get_config(
         LayerConfig(
+            sm_version=90,
             shape_n=128,
             shape_k=64,
             a_dtype=dtypes.int8,
