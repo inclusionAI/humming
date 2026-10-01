@@ -318,8 +318,18 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)
             and self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
         )
-        umma_native_mixed = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits <= 8
+        umma_native_mixed = (
+            self.mma_type == MmaType.UMMA
+            and self.a_dtype.num_bits <= 8
+            and self.b_dtype.is_floating_point_type
+        )
         self.mma_b_dtype = self.b_dtype if mma_native_mixed or umma_native_mixed else self.a_dtype
+
+        scale_dtype = dtypes.float8e8m0
+        if self.is_group_input_scale:
+            scale_dtype = self.as_dtype
+        elif self.is_group_weight_scale:
+            scale_dtype = self.bs_dtype
 
         return MmaOpClass.from_config(
             self.mma_type,
@@ -329,7 +339,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.mma_a_dtype,
             self.mma_b_dtype,
             mma_cd_dtype,
-            sf_dtype=self.as_dtype if self.is_group_input_scale else self.bs_dtype,
+            sf_dtype=scale_dtype,
         )
 
     def check_shape(self):
@@ -423,6 +433,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert not self.b_dtype.is_signed
         elif self.b_dtype.is_integer_type and self.a_dtype.is_floating_point_type:
             assert not self.b_dtype.is_signed
+            assert self.b_dtype.num_bits < self.a_dtype.num_bits
             if self.has_zero_point:
                 assert self.b_dtype.num_bits <= self.a_dtype.mantissa_bits + 1
             else:
@@ -471,7 +482,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 dtypes.float4e0m3,
             )
             if self.a_dtype.num_bits == 8:
-                assert self.b_dtype in (
+                assert self.b_dtype.is_integer_type or self.b_dtype in (
                     dtypes.float8e4m3,
                     dtypes.float8e5m2,
                     dtypes.float8e3m4,
@@ -491,15 +502,18 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                             )
             if self.a_dtype.num_bits == 4:
                 assert not self.is_block_weight_scale and not self.has_zero_point
-                assert self.b_dtype in (dtypes.float4e2m1, dtypes.float4e0m3)
+                assert self.b_dtype.is_integer_type or self.b_dtype in (dtypes.float4e2m1, dtypes.float4e0m3)
                 assert self.use_block_scaled_mma
-                group_size = self.input_scale_group_size or self.weight_scale_group_size
-                scale_dtype = self.as_dtype if self.is_group_input_scale else self.bs_dtype
-                assert (group_size, scale_dtype) in (
-                    (32, dtypes.float8e8m0),
-                    (16, dtypes.float8e8m0),
-                    (16, dtypes.float8e4m3),
-                ), "FP4 UMMA requires group-32 E8M0 or group-16 E8M0/E4M3 scales"
+                for group_size, scale_dtype in (
+                    (self.input_scale_group_size, self.as_dtype),
+                    (self.weight_scale_group_size, self.bs_dtype),
+                ):
+                    if group_size:
+                        assert (group_size, scale_dtype) in (
+                            (32, dtypes.float8e8m0),
+                            (16, dtypes.float8e8m0),
+                            (16, dtypes.float8e4m3),
+                        ), "FP4 UMMA requires group-32 E8M0 or group-16 E8M0/E4M3 scales"
             block_m, block_n, block_k = self.block_shape
             warp_m, warp_n, warp_k = self.warp_shape
             assert block_m == warp_m, "UMMA requires block M to equal warp M"

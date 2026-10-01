@@ -112,22 +112,28 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         block_m, block_n, block_k = block_shape
         output_groups = block_n // 128
         operand_columns = 0 if layer_config.use_umma_ss else block_k * layer_config.a_dtype.num_bits // 32
+        constant_scale_columns = 0
         if layer_config.use_block_scaled_mma:
-            scale_group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
+            scale_group_size = layer_config.mma_scale_group_size
             scale_words = math.ceil(block_k / (4 * scale_group_size))
             input_scale_stride = max(4, 1 << (math.ceil(block_m / 32) - 1).bit_length())
-            operand_columns += scale_words * (4 + input_scale_stride)
+            if layer_config.is_group_weight_scale:
+                operand_columns += scale_words * 4
+            if layer_config.is_group_input_scale:
+                operand_columns += scale_words * input_scale_stride
+            if not layer_config.is_group_input_scale or not layer_config.is_group_weight_scale:
+                constant_scale_columns = 16
             operand_columns = round_up(operand_columns, 16)
         accumulator_columns = (
             round_up(block_m, 32) if layer_config.use_umma_ss and cta_group_size == 2 else block_m
         )
-        buffers = 1 if layer_config.use_umma_ss else num_stages
-        columns = output_groups * (buffers * operand_columns + accumulator_columns)
+        buffers = 1 if layer_config.use_umma_ss else (4 if cta_group_size == 2 else num_stages)
+        columns = constant_scale_columns + output_groups * (buffers * operand_columns + accumulator_columns)
         tmem_columns = 1 << (columns - 1).bit_length()
         if not layer_config.use_umma_ss and tmem_columns * num_ctas_per_sm > 512:
             # TS falls back to two operand buffers; SS copies scales on the
             # issuer stream and needs only one, independently of stage count.
-            columns = output_groups * (2 * operand_columns + accumulator_columns)
+            columns = constant_scale_columns + output_groups * (2 * operand_columns + accumulator_columns)
             tmem_columns = 1 << (columns - 1).bit_length()
         return tmem_columns
 

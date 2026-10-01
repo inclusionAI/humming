@@ -22,7 +22,9 @@
 #define HUMMING_UMMA_DIRECT_WEIGHT_SCALE 0
 #endif
 
-#if HUMMING_USE_UMMA_SS && HUMMING_USE_BLOCK_SCALED_MMA && !(HUMMING_UMMA_INPLACE_INPUT_SCALE && HUMMING_UMMA_DIRECT_WEIGHT_SCALE)
+#if HUMMING_USE_UMMA_SS && HUMMING_USE_BLOCK_SCALED_MMA && \
+    ((HUMMING_IS_GROUP_INPUT_SCALE && !HUMMING_UMMA_INPLACE_INPUT_SCALE) || \
+     (HUMMING_IS_GROUP_WEIGHT_SCALE && !HUMMING_UMMA_DIRECT_WEIGHT_SCALE))
 #define IF_HAS_UMMA_SCALE_SCRATCH(x) x
 #else
 #define IF_HAS_UMMA_SCALE_SCRATCH(x)
@@ -171,11 +173,11 @@ public:
   static constexpr uint32_t kWeightStageK = kExpandUmmaWeight
                                                 ? CEIL_DIV(BlockShape::K + 128 - kWeightKAlignment, 128) * 128
                                                 : BlockShape::K;
-  static constexpr uint32_t kUmmaScaleWords = CEIL_DIV(BlockShape::K, 4 * MAX(1u, kIsGroupInputScale ? kGroupSizeA : kGroupSizeB));
+  static constexpr uint32_t kUmmaScaleWords = CEIL_DIV(BlockShape::K, 4 * LayerConfig::kMmaScaleGroupSize);
   static constexpr uint32_t kUmmaWeightScaleRows = MAX(BlockShape::N, 128);
   static constexpr bool kUseUmmaDirectWeightScale = LayerConfig::kUseUmmaSs && kIsGroupWeightScale &&
                                                     BlockShape::N >= 128 && BlockShape::K % (4 * MAX(1u, kGroupSizeB)) == 0;
-  static constexpr uint32_t kUmmaWeightScaleScratchRows = kUseUmmaDirectWeightScale ? 0 : kUmmaWeightScaleRows;
+  static constexpr uint32_t kUmmaWeightScaleScratchRows = kIsGroupWeightScale && !kUseUmmaDirectWeightScale ? kUmmaWeightScaleRows : 0;
   static constexpr uint32_t kUmmaInputScaleRows = CEIL_DIV(BlockShape::M, 128) * 128;
   // Keep contiguous scale vectors intact during indexed cp.async gathers.
   // Only the stage layout changes; the input tensor keeps its original layout.
@@ -183,7 +185,7 @@ public:
                                                          BlockShape::K % (16 * MAX(1u, kGroupSizeA)) == 0;
   static constexpr bool kUseUmmaInplaceInputScale = LayerConfig::kUseUmmaSs && kIsGroupInputScale &&
                                                     BlockShape::M % 128 == 0;
-  static constexpr uint32_t kUmmaInputScaleScratchRows = kUseUmmaInplaceInputScale ? 0 : kUmmaInputScaleRows;
+  static constexpr uint32_t kUmmaInputScaleScratchRows = kIsGroupInputScale && !kUseUmmaInplaceInputScale ? kUmmaInputScaleRows : 0;
   static constexpr uint32_t kStageSizeUmmaScales = LayerConfig::kUseUmmaSs && kUseBlockScaledMma
                                                        ? kUmmaScaleWords * (kUmmaWeightScaleScratchRows + kUmmaInputScaleScratchRows) / 4
                                                        : 0;

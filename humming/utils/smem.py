@@ -80,16 +80,21 @@ def _stage_storage_bytes(
             fields.append((num_groups_b * block_n * zp_bits // 8, 128))
 
     if layer_config.use_umma_ss and is_mxmma:
-        scale_group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
+        scale_group_size = layer_config.mma_scale_group_size
         scale_words = ceil_div(block_k, 4 * scale_group_size)
         use_direct_weight_scale = (
             layer_config.is_group_weight_scale
             and block_n >= 128
             and block_k % (4 * layer_config.weight_scale_group_size) == 0
         )
-        weight_scale_rows = 0 if use_direct_weight_scale else max(block_n, 128)
+        weight_scale_rows = 0
+        if layer_config.is_group_weight_scale and not use_direct_weight_scale:
+            weight_scale_rows = max(block_n, 128)
         use_inplace_input_scale = layer_config.is_group_input_scale and logical_block_m % 128 == 0
-        input_scale_rows = 0 if use_inplace_input_scale else round_up(logical_block_m, 128)
+        input_scale_rows = (
+            round_up(logical_block_m, 128)
+            if layer_config.is_group_input_scale and not use_inplace_input_scale else 0
+        )
         scale_rows = weight_scale_rows + input_scale_rows
         if scale_rows:
             fields.append((scale_words * scale_rows * 4, 128))

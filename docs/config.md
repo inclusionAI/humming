@@ -171,6 +171,13 @@ MXFP4 uses group-32 E8M0, while group-16 supports E8M0 or E4M3 (NVFP4).
 Both one-CTA and two-CTA execution support these formats. The SM100 dispatcher
 also selects UMMA for supported FP4 activation configurations.
 
+TS also supports lower-bit integer weights, such as INT2 with MXFP4 or NVFP4
+activations, through the existing register conversion and TMEM store path.
+Hardware group scales must be nonnegative (E8M0 or unsigned E4M3).
+Either operand may omit group scales: its hardware scales are filled with one,
+while tensor/token activation scales and tensor/channel weight scales are applied
+in the epilogue. This includes tokenwise FP4 with channelwise FP4 in TS and SS.
+
 SM100-family UMMA also supports the undocumented `float8e3m4` and
 `float4e0m3` formats. E3M4 supports ordinary FP8 and group-32 E8M0 scaling;
 E0M3 requires group-16 E8M0 or E4M3 scales (group-32 faults in hardware).

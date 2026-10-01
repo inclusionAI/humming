@@ -1115,6 +1115,7 @@ def test_umma_mxf8_mxf4(
     _assert_results(case, (17, 257))
 
 
+@pytest.mark.parametrize("weight_dtype", ("float4e2m1", "uint2"))
 @pytest.mark.parametrize(
     "activation_dtype,group_size,scale_dtype,quant_mode",
     (
@@ -1127,12 +1128,12 @@ def test_umma_mxf8_mxf4(
         ("float8e4m3", 32, "float8e8m0", "static_tensor_dynamic_group"),
     ),
 )
-def test_umma_mxf8_mxf4_public_dispatch(activation_dtype, group_size, scale_dtype, quant_mode):
+def test_umma_mxf8_mxf4_public_dispatch(activation_dtype, group_size, scale_dtype, quant_mode, weight_dtype):
     schema = HummingWeightSchema(
-        b_dtype="float4e2m1", bs_dtype=scale_dtype, weight_scale_group_size=group_size
+        b_dtype=weight_dtype, bs_dtype=scale_dtype, weight_scale_group_size=group_size
     )
     weight = generate_random_tensor((256, 256), torch.bfloat16, device="cuda")
-    tensors = schema.quant_tensor(weight, schema, torch.bfloat16)
+    tensors = schema.quant_tensor(weight, schema, torch.bfloat16, allow_negative_scale=False)
     weight_ref = schema.dequant_tensors(tensors).float()
     static_scale = None
     if quant_mode == "static_tensor_dynamic_group":
@@ -1564,9 +1565,35 @@ def test_umma_ss_small_tile(dtype, weight_dtype, block_m, gemm_type, shape_k, mo
     _assert_results(case, (1, 137, 833) if block_m is None else (1, 137))
 
 
-@pytest.mark.parametrize("input_group,weight_group", ((0, 32), (32, 0)))
+@pytest.mark.parametrize(
+    "input_group,weight_group,quant_mode",
+    (
+        (0, 32, "dynamic_token"),
+        (32, 0, "dynamic_group"),
+        (0, 0, "dynamic_token"),
+        (0, 0, "static_tensor"),
+    ),
+)
 @pytest.mark.parametrize("cooperative", (False, True))
-def test_umma_ss_optional_group_scales(input_group, weight_group, cooperative, monkeypatch):
+@pytest.mark.parametrize(
+    "activation_dtype,weight_dtype",
+    (
+        (dtypes.float8e4m3, dtypes.float8e4m3),
+        (dtypes.float8e4m3, dtypes.float4e2m1),
+        (dtypes.float4e2m1, dtypes.float4e2m1),
+    ),
+)
+@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
+def test_umma_optional_group_scales(
+    input_group,
+    weight_group,
+    quant_mode,
+    cooperative,
+    activation_dtype,
+    weight_dtype,
+    use_umma_ss,
+    monkeypatch,
+):
     # Exercise automatic configuration and cooperative readiness without AS or BS.
     if cooperative:
 
@@ -1592,22 +1619,24 @@ def test_umma_ss_optional_group_scales(input_group, weight_group, cooperative, m
     config = LayerConfig(
         shape_n=256,
         shape_k=512,
-        a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float8e4m3,
+        a_dtype=activation_dtype,
+        b_dtype=weight_dtype,
         c_dtype=dtypes.bfloat16,
         as_dtype=dtypes.float8e8m0 if input_group else None,
         bs_dtype=dtypes.float8e8m0 if weight_group else dtypes.bfloat16,
-        input_quant_mode="dynamic_group" if input_group else "dynamic_token",
+        input_quant_mode=quant_mode,
         input_scale_group_size=input_group,
         weight_scale_group_size=weight_group,
         weight_scale_type="group" if weight_group else "channel",
-        mma_type=MmaType.UMMA,
-        use_umma_ss=True,
+        use_umma_ss=use_umma_ss,
     )
+    assert config.mma_type == MmaType.UMMA
     case = KernelTestCase(
-        name="ss-optional-group-scales",
+        name="optional-group-scales",
         layer_config=config,
-        compute_config=ComputeConfig(gemm_type=GemmType.DENSE, use_m_major_input_scale=cooperative),
+        compute_config=ComputeConfig(
+            gemm_type=GemmType.DENSE, use_m_major_input_scale=cooperative and bool(input_group)
+        ),
         seed=2026,
     )
     _assert_results(case, (1, 137, 833) if cooperative else (1, 137))

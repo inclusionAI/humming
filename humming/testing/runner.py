@@ -174,7 +174,8 @@ class KernelTestRunner:
             has_zero_point=config.has_zero_point,
             is_fp_zero_point=config.is_fp_zero_point,
         )
-        allow_negative_scale = config.mma_type != MmaType.MXMMA
+        uses_unsigned_weight_scale = config.use_block_scaled_mma and config.is_group_weight_scale
+        allow_negative_scale = not uses_unsigned_weight_scale
         dtype = config.param_dtype
         tensors = schema.quant_tensor(weight_orig, schema, dtype, allow_negative_scale=allow_negative_scale)
         self.weight_ref = schema.dequant_tensors(tensors)
