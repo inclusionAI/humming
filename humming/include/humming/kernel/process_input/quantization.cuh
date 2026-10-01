@@ -160,7 +160,31 @@ CUDA_INLINE float lane_absmax(const float *values) {
 }
 
 
-template <uint32_t kValuesPerLane, uint32_t kGroupSize, uint32_t kNumWarps, uint32_t kWarpOffset>
+// Synchronizes the kSyncThreads-wide slice of the block containing the calling
+// thread.  Thread sets with different counts must never meet on one named
+// barrier, so slices use barriers 1..15 and leave barrier 0 to __syncthreads(),
+// and back-to-back reduction stages must synchronize the same slices.
+template <uint32_t kSyncThreads, uint32_t kNumWarps, uint32_t kWarpOffset>
+CUDA_INLINE void sync_slice_threads() {
+  constexpr uint32_t kSlices = kNumWarps * 32 / kSyncThreads;
+  static_assert(kSyncThreads % 32 == 0 && kNumWarps * 32 % kSyncThreads == 0);
+  static_assert(kSlices <= 16);
+
+  if constexpr (kSlices > 1 && kSlices < 16) {
+    uint32_t barrier = (threadIdx.x - kWarpOffset * 32) / kSyncThreads + 1;
+    asm volatile("bar.sync %0, %1;" : : "r"(barrier), "r"(kSyncThreads) : "memory");
+  } else {
+    __syncthreads();
+  }
+}
+
+
+template <
+    uint32_t kValuesPerLane,
+    uint32_t kGroupSize,
+    uint32_t kNumWarps,
+    uint32_t kWarpOffset,
+    uint32_t kSyncThreads = kGroupSize / kValuesPerLane>
 CUDA_INLINE float group_absmax(const float *values, float *shared) {
   static_assert(kValuesPerLane >= 1);
   static_assert((kValuesPerLane & (kValuesPerLane - 1)) == 0);
@@ -170,7 +194,6 @@ CUDA_INLINE float group_absmax(const float *values, float *shared) {
 
   constexpr uint32_t kLanes = kGroupSize / kValuesPerLane;
   constexpr uint32_t kThreads = kNumWarps * 32;
-  constexpr uint32_t kGroups = kThreads / kLanes;
   static_assert(kLanes >= 1 && kLanes <= 1024);
   static_assert(kLanes < 32 ? (kLanes & (kLanes - 1)) == 0 : kLanes % 32 == 0);
   static_assert(kThreads % kLanes == 0);
@@ -188,7 +211,7 @@ CUDA_INLINE float group_absmax(const float *values, float *shared) {
 
   if constexpr (kLanes > 32) {
     constexpr uint32_t kWarpsPerGroup = kLanes / 32;
-    static_assert(kGroups <= 16);
+    static_assert(kSyncThreads % kLanes == 0);
 
     uint32_t thread = threadIdx.x - kWarpOffset * 32;
     uint32_t warp = thread / 32;
@@ -198,11 +221,7 @@ CUDA_INLINE float group_absmax(const float *values, float *shared) {
     uint32_t warp_in_group = warp - group_warp;
 
     if (lane == 0) shared[warp] = maximum;
-    if constexpr (kGroups == 1) {
-      asm volatile("bar.sync 0, %0;" : : "r"(kLanes) : "memory");
-    } else {
-      asm volatile("bar.sync %0, %1;" : : "r"(group), "r"(kLanes) : "memory");
-    }
+    sync_slice_threads<kSyncThreads, kNumWarps, kWarpOffset>();
 
     if constexpr (kWarpsPerGroup < 32) {
 // SM80/89 favor uniform shared-memory broadcasts; SM100+ favors distributed loads followed by REDUX.
@@ -221,7 +240,7 @@ CUDA_INLINE float group_absmax(const float *values, float *shared) {
         if (lane == 0) shared[group_warp] = maximum;
       }
 
-      asm volatile("bar.sync %0, %1;" : : "r"(group), "r"(kLanes) : "memory");
+      sync_slice_threads<kSyncThreads, kNumWarps, kWarpOffset>();
       maximum = shared[group_warp];
     }
   }
@@ -262,7 +281,7 @@ CUDA_INLINE float token_group_scale_max(float group_scale, float *shared) {
     uint32_t token = thread / kThreadsPerToken;
     uint32_t first_warp = token * kWarpsPerToken;
     if (lane == 0) shared[warp] = group_scale;
-    asm volatile("bar.sync %0, %1;" : : "r"(token), "r"(kThreadsPerToken) : "memory");
+    sync_slice_threads<kThreadsPerToken, kNumWarps, kWarpOffset>();
     group_scale = shared[first_warp + lane % kWarpsPerToken];
 #if __CUDA_ARCH__ >= 800
     group_scale = warp_max(group_scale);
@@ -511,7 +530,10 @@ CUDA_INLINE auto quant_group(
   if constexpr (kPhase == ProcessInputQuantizationPhase::Quantize) {
     result.scale = collected_scale;
   } else if constexpr (Context::kDynamicScale) {
-    float maximum = group_absmax<kValuesPerLane, kScaleSize, kNumWarps, kWarpOffset>(values, shared);
+    // The fused token reduction follows immediately, so both stages share its slices.
+    constexpr uint32_t kGroupLanes = kScaleSize / kValuesPerLane;
+    constexpr uint32_t kSyncThreads = Context::kFusedGroupToken ? Context::kThreadsPerTask : kGroupLanes;
+    float maximum = group_absmax<kValuesPerLane, kScaleSize, kNumWarps, kWarpOffset, kSyncThreads>(values, shared);
     float raw_scale = fmaxf(maximum / target_maximum<TargetType>(), 1e-30f);
     if constexpr (Context::kStaticTensorScale && Context::kDynamicGroupScale)
       raw_scale /= static_scale;

@@ -10,12 +10,14 @@ from humming.testing.process_input import (
 )
 
 
+@pytest.mark.parametrize("use_pdl", [False, True])
 @pytest.mark.parametrize("quant_dtype", ["int4", "int8", "float8e4m3"])
 @pytest.mark.parametrize(
     "shape_m,hidden_size,quant_group_size,quant_mode,group_scale_dtype,use_m_major_input_scale",
     [
         (3, 768, 128, "static_tensor", "float32", False),
         (129, 32768, 512, "dynamic_token", "float32", False),
+        (2049, 768, 128, "dynamic_token", "float32", False),
         (129, 32768, 512, "dynamic_token", "float32", True),
         (3, 768, 128, "dynamic_token", "float32", True),
         (4, 7168, 128, "dynamic_group", "float32", False),
@@ -39,6 +41,7 @@ def test_quantization_scales(
     quant_mode,
     group_scale_dtype,
     use_m_major_input_scale,
+    use_pdl,
 ):
     skip_if_process_input_unsupported(quant_dtype, group_scale_dtype)
     torch.manual_seed(0)
@@ -66,7 +69,7 @@ def test_quantization_scales(
     )
 
     expected = process_input_ref(inputs, static_tensor_scale=static_tensor_scale, **options)
-    actual = process_input(inputs, token_scales=static_tensor_scale, **options)
+    actual = process_input(inputs, token_scales=static_tensor_scale, use_pdl=use_pdl, **options)
 
     assert_process_input_close(
         actual,
