@@ -16,6 +16,7 @@ from humming.tune.sm8x import (
 from humming.tune.sm75 import Sm75Heuristics
 from humming.tune.sm90 import Sm90Heuristics
 from humming.tune.sm90_h20 import Sm90H20Heuristics
+from humming.tune.sm90_policies import apply_w4a8_config, specialize_w4a8_ranges
 from humming.tune.sm100 import Sm100Heuristics
 from humming.tune.sm120 import Sm120Heuristics
 from humming.tune.sm121 import Sm121Heuristics
@@ -120,6 +121,7 @@ def _get_heuristics_config(
         _apply_m_major_input_scale(config, use_m_major_input_scale, layer_config, gemm_type)
         _disable_indexed_input_scale_tma(config, gemm_type)
         _apply_raster_group_m(config, layer_config, gemm_type)
+        apply_w4a8_config(config, layer_config, use_m_major_input_scale, gemm_type, shape_m)
         return config
     else:
         configs = heuristics_cls.get_configs(
@@ -132,7 +134,7 @@ def _get_heuristics_config(
             _apply_m_major_input_scale(entry[2], use_m_major_input_scale, layer_config, gemm_type)
             _disable_indexed_input_scale_tma(entry[2], gemm_type)
             _apply_raster_group_m(entry[2], layer_config, gemm_type)
-        return configs
+        return specialize_w4a8_ranges(configs, layer_config, use_m_major_input_scale, gemm_type)
 
 
 def get_heuristics_config(

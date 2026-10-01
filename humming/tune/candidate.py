@@ -348,6 +348,8 @@ def _analyze_geometry(
     if warp_shape[1] < min_warp_n:
         reasons.append(f"warp_n={warp_shape[1]} is smaller than minimum {min_warp_n}")
     min_warp_k = {16: 32, 8: 64, 4: 128}[layer_config.a_dtype.num_bits]
+    if layer_config.use_packed_k_layout and warp_shape[2] != 128:
+        reasons.append("use_packed_k_layout requires warp_k=128")
     if warp_shape[2] < min_warp_k:
         reasons.append(f"warp_k={warp_shape[2]} is smaller than minimum {min_warp_k}")
 

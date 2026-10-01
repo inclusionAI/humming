@@ -5,6 +5,7 @@ import pytest
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType
 from humming.device import DeviceInfo
+from humming.tune import _get_heuristics_config
 from humming.tune.sm90 import Sm90Heuristics
 
 
@@ -25,6 +26,7 @@ def _layer(
     weight_scale_group_size: int = 32,
 ) -> LayerConfig:
     return LayerConfig(
+        sm_version=90,
         shape_n=shape_n,
         shape_k=shape_k,
         num_experts=num_experts,
@@ -365,3 +367,42 @@ def test_fp4_a16_dense_uses_small_tile_only_through_m128():
     assert small["warp_shape"][1:] == (32, 64)
     assert small["num_ctas_per_sm"] == 2
     assert large["block_shape"][1:] != (128, 64)
+
+
+@pytest.mark.parametrize("device_name", ["H200", "L20X"])
+@pytest.mark.parametrize("num_experts", [8, 33])
+@pytest.mark.parametrize("shape_n,shape_k", [(4096, 6144), (6144, 2048), (4096, 3072), (4096, 4096)])
+def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, num_experts, shape_n, shape_k):
+    monkeypatch.setattr("humming.tune.sm90_policies.torch.cuda.get_device_name", lambda: device_name)
+    monkeypatch.setattr("humming.tune.get_heuristics_class", lambda **kwargs: Sm90Heuristics)
+    layer = _layer(shape_n, shape_k, num_experts=num_experts)
+    assert layer.use_packed_k_layout
+    select = _get_heuristics_config.__wrapped__
+    kwargs = dict(use_m_major_input_scale=True, gemm_type=GemmType.GROUPED_CONTIGUOUS)
+    ranges = select(layer, **kwargs)
+    assert ranges[0][0] == 0 and ranges[-1][1] == 1 << 30
+    previous_upper = 0
+    for lower, upper, config in ranges:
+        assert lower == previous_upper and lower < upper
+        assert config["use_packed_k_layout"]
+        assert config["warp_shape"][1:] == (16, 128)
+        for shape_m in (lower + 1, min(upper, lower + num_experts * 2048)):
+            assert select(layer, shape_m=shape_m, **kwargs) == config
+        previous_upper = upper
+    for rows, tile in [
+        (128, 144),
+        (144, 160),
+        (160, 176),
+        (256, 144),
+        (288, 160),
+        (320, 176),
+        (512, 176),
+        (640, 176),
+    ]:
+        config = select(layer, shape_m=rows * num_experts, **kwargs)
+        expected_tile = tile if device_name == "H200" else 128
+        assert config["warp_shape"][0] == expected_tile
+        expected_stages = 4 if device_name == "H200" and (tile >= 160 or shape_k > 2048) else 5
+        assert config["num_stages"] == expected_stages
+    generic = select(layer, shape_m=4096, gemm_type=GemmType.GROUPED_CONTIGUOUS)
+    assert generic.get("raster_group_m", 1) == 1

@@ -167,6 +167,22 @@ def test_geometry_validator_rejects_invalid_shapes(block_shape, warp_shape):
     assert reasons
 
 
+@pytest.mark.parametrize("warp_k", [64, 128, 256])
+def test_packed_k_geometry_requires_k128(warp_k):
+    layer = _layer(
+        a_dtype=dtypes.float8e4m3,
+        bs_dtype=dtypes.bfloat16,
+        input_scale_group_size=128,
+        weight_scale_group_size=128,
+    )
+    assert layer.use_packed_k_layout
+    reasons = get_geometry_rejection_reasons(layer, (64, 64, 256), (64, 16, warp_k))
+    if warp_k == 128:
+        assert not reasons
+    else:
+        assert "use_packed_k_layout requires warp_k=128" in reasons
+
+
 def test_analysis_rejects_scale_group_that_does_not_nest_tile():
     problem = _problem(layer_config=_layer(weight_scale_group_size=96))
     analysis = analyze_candidate(problem, _candidate())

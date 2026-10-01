@@ -75,7 +75,7 @@ def bench_humming(
         inputs = torch.randn((actual_shape_m, shape_k), dtype=torch_dtype, device="cuda:0")
         input_scale: torch.Tensor | None = None
         if a_dtype not in ["float16", "bfloat16"]:
-            m_major = use_m_major_input_scale and not layer_config.use_fused_e8m0_scale
+            m_major = use_m_major_input_scale
             inputs, group_scales, token_scales = may_process_input(
                 layer_config,
                 inputs,

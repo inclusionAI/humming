@@ -119,6 +119,7 @@ def estimate_smem_size_layer(
     smem_reuse_mode: SmemReuseMode | str | None = None,
     use_mbarrier: bool = False,
     use_warp_spec: bool = False,
+    raster_group_m: int = 1,
     num_write_splits: int = 1,
     mma_accum_bits: int = 32,
     umma_cta_group_size: int = 1,
@@ -204,6 +205,8 @@ def estimate_smem_size_layer(
     elif gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED):
         add(128, 64)  # tensor_map_buffer[1] (CUtensorMap)
         add(layer_config.num_experts * 4, 4)  # expert_tokens
+        if gemm_type == GemmType.GROUPED_CONTIGUOUS and raster_group_m > 1:
+            add((layer_config.num_experts + 1) * 4, 4)  # expert_m_block_offset
         add(4, 4)  # total_m_blocks
         if gemm_type == GemmType.GROUPED_CONTIGUOUS:
             add((layer_config.num_experts + 1) * 4, 4)  # expert_offset
@@ -247,6 +250,7 @@ def estimate_smem_size_config(
         smem_reuse_mode=tuning_config.smem_reuse_mode,
         use_mbarrier=bool(tuning_config.use_mbarrier),
         use_warp_spec=bool(tuning_config.use_warp_spec),
+        raster_group_m=tuning_config.raster_group_m,
         num_write_splits=tuning_config.num_write_splits,
         mma_accum_bits=16 if compute_config.use_f16_accum else 32,
         umma_cta_group_size=tuning_config.umma_cta_group_size,

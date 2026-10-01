@@ -3,9 +3,10 @@ import math
 from typing import Literal
 
 import numpy as np
+import torch
 
 from humming import dtypes
-from humming.config import GemmType, LayerConfig
+from humming.config import GemmType, LayerConfig, MmaType
 from humming.tune.candidate import (
     CandidateAnalysis,
     ScheduleCandidate,
@@ -153,6 +154,14 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         warp_shape_k = min(warp_shape_k, block_shape_k)
         assert block_shape_k >= warp_shape_k
 
+    if layer_config.use_packed_k_layout:
+        warp_shape_k = 128
+        block_shape_k = max(block_shape_k, warp_shape_k)
+
+    if problem.gemm_type == GemmType.INDEXED and layer_config.use_packed_k_layout:
+        while block_shape_n // warp_shape_n * (block_shape_k // warp_shape_k) > 8:
+            block_shape_k //= 2
+
     dense_small_fp4 = (
         problem.gemm_type == GemmType.DENSE
         and layer_config.a_dtype.num_bits == 16
@@ -262,6 +271,135 @@ def select_grouped_scale(
         considered=analyses,
         reason="selected the first legal measured-priority candidate",
     )
+
+
+# Packed MXFP4 x FP8(GS128) grouped-prefill Hopper schedule. The variable-M
+# tile policy was measured on H200; other SM90 devices use M128.
+_W4A8_DEFAULT_TILE_M = 128
+_W4A8_MAX_MODELED_EXPERT_ROWS = 4096
+
+
+def _w4a8_tile_m_for_expert_rows(rows_per_expert: int) -> int:
+    if rows_per_expert > _W4A8_MAX_MODELED_EXPERT_ROWS:
+        return 176
+    num_tiles = max(1, math.ceil(rows_per_expert / _W4A8_DEFAULT_TILE_M))
+    target_rows = rows_per_expert + math.sqrt(rows_per_expert)
+    alignment = 32 if num_tiles == 1 else 16
+    block_m = math.ceil(target_rows / num_tiles / alignment) * alignment
+    block_m = min(_W4A8_DEFAULT_TILE_M, max(64, block_m))
+    if rows_per_expert < _W4A8_DEFAULT_TILE_M:
+        return block_m
+
+    # Only the mean is available here, not the actual per-expert histogram.
+    # Approximate random routing with variance equal to the mean, so crossing a
+    # tile boundary has a probability rather than assuming perfectly equal rows.
+    deviation = math.sqrt(rows_per_expert)
+
+    def expected_work(tile: int) -> float:
+        upper = math.ceil((rows_per_expert + 6 * deviation) / tile)
+        expected_tiles = sum(
+            0.5 * math.erfc((index * tile + 0.5 - rows_per_expert) / (math.sqrt(2) * deviation))
+            for index in range(upper)
+        )
+        # A small per-tile cost accounts for repeated weight loading and setup.
+        return expected_tiles * (tile + 16)
+
+    return min((block_m, 128, 144, 160, 176), key=expected_work)
+
+
+_W4A8_EXPERT_ROW_BOUNDARIES = tuple(
+    rows
+    for rows in range(1, _W4A8_MAX_MODELED_EXPERT_ROWS + 1)
+    if _w4a8_tile_m_for_expert_rows(rows) != _w4a8_tile_m_for_expert_rows(rows + 1)
+)
+
+
+def _w4a8_enabled(
+    layer_config: LayerConfig,
+    use_m_major_input_scale: bool,
+    gemm_type: GemmType,
+) -> bool:
+    return (
+        gemm_type == GemmType.GROUPED_CONTIGUOUS
+        and layer_config.sm_version == 90
+        and layer_config.shape_n % 128 == 0
+        and use_m_major_input_scale
+        and layer_config.mma_type == MmaType.WGMMA
+        and layer_config.a_dtype == dtypes.float8e4m3
+        and layer_config.b_dtype == dtypes.float4e2m1
+        and layer_config.as_dtype == dtypes.float32
+        and layer_config.bs_dtype == dtypes.float8e8m0
+        and layer_config.use_fused_e8m0_scale
+        and layer_config.use_packed_k_layout
+        and layer_config.input_scale_group_size == 128
+        and layer_config.weight_scale_group_size == 32
+        and layer_config.num_experts > 0
+    )
+
+
+def _w4a8_block_m(layer_config: LayerConfig, shape_m: int) -> int:
+    rows_per_expert = (shape_m + layer_config.num_experts - 1) // layer_config.num_experts
+    return _w4a8_tile_m_for_expert_rows(rows_per_expert)
+
+
+def _w4a8_uses_variable_m_tiles() -> bool:
+    return "H200" in torch.cuda.get_device_name()
+
+
+def _set_w4a8_config(config: dict, block_m: int, shape_k: int = 0) -> None:
+    config.update(
+        block_shape=(block_m, 128, 128),
+        warp_shape=(block_m, 16, 128),
+        num_stages=4 if block_m >= 160 or (block_m >= 128 and shape_k > 2048) else 5,
+        use_warp_spec=True,
+        use_stream_k=False,
+        use_packed_k_layout=True,
+        raster_group_m=16,
+        multi_cast_size_a=1,
+        multi_cast_size_b=1,
+    )
+
+
+def apply_w4a8_config(
+    config: dict,
+    layer_config: LayerConfig,
+    use_m_major_input_scale: bool,
+    gemm_type: GemmType,
+    shape_m: int,
+) -> None:
+    if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
+        return
+    use_h200_policy = _w4a8_uses_variable_m_tiles()
+    block_m = _w4a8_block_m(layer_config, shape_m) if use_h200_policy else _W4A8_DEFAULT_TILE_M
+    _set_w4a8_config(config, block_m, layer_config.shape_k if use_h200_policy else 0)
+
+
+def specialize_w4a8_ranges(
+    configs: list,
+    layer_config: LayerConfig,
+    use_m_major_input_scale: bool,
+    gemm_type: GemmType,
+) -> list:
+    if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
+        return configs
+
+    if not _w4a8_uses_variable_m_tiles():
+        for _, _, config in configs:
+            _set_w4a8_config(config, _W4A8_DEFAULT_TILE_M)
+        return configs
+
+    boundaries = tuple(rows * layer_config.num_experts for rows in _W4A8_EXPERT_ROW_BOUNDARIES)
+    tuned_configs = []
+    for lower, upper, base_config in configs:
+        cuts = [lower, *(x for x in boundaries if lower < x < upper), upper]
+        for interval_lower, interval_upper in zip(cuts, cuts[1:], strict=False):
+            config = dict(base_config)
+            _set_w4a8_config(config, _w4a8_block_m(layer_config, interval_upper), layer_config.shape_k)
+            if tuned_configs and tuned_configs[-1][1] == interval_lower and tuned_configs[-1][2] == config:
+                tuned_configs[-1][1] = interval_upper
+            else:
+                tuned_configs.append([interval_lower, interval_upper, config])
+    return tuned_configs
 
 
 def _indexed_a16_ctas_per_sm(

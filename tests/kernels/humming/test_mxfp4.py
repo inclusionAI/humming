@@ -1,9 +1,12 @@
 """MXFP4 W4A8 coverage with grouped FP8 inputs."""
 
 import pytest
+import torch
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
+from humming.schema.compressed_tensors import CompressedTensorsInputSchema
+from humming.schema.humming import HummingWeightSchema
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -50,6 +53,9 @@ def _case(
     shape_n: int = SHAPE_N,
     shape_k: int = SHAPE_K,
     gemm_type: GemmType = GemmType.DENSE,
+    num_experts: int = NUM_EXPERTS,
+    top_k: int = 2,
+    use_m_major_input_scale: bool = False,
     use_fused_e8m0_scale: bool | None = None,
     a_dtype=dtypes.float8e4m3,
     as_dtype=None,
@@ -61,15 +67,16 @@ def _case(
         layer_config=_layer_config(
             shape_n=shape_n,
             shape_k=shape_k,
-            num_experts=0 if is_dense else NUM_EXPERTS,
+            num_experts=0 if is_dense else num_experts,
             use_fused_e8m0_scale=use_fused_e8m0_scale,
             a_dtype=a_dtype,
             as_dtype=as_dtype,
             input_scale_group_size=input_scale_group_size,
         ),
-        compute_config=ComputeConfig(gemm_type=gemm_type),
-        top_k=1 if is_dense else 2,
+        compute_config=ComputeConfig(gemm_type=gemm_type, use_m_major_input_scale=use_m_major_input_scale),
+        top_k=1 if is_dense else top_k,
         seed=2026,
+        atol=0.5 if use_m_major_input_scale else 0.05,
     )
 
 
@@ -118,6 +125,28 @@ MXFP4_CASES = (
             gemm_type=GemmType.GROUPED_MASKED,
         ),
     ),
+    *(
+        (
+            True,
+            _case(
+                f"mxfp4-m-major-e{experts}-n{shape_n}-k{shape_k}",
+                shape_n=shape_n,
+                shape_k=shape_k,
+                gemm_type=GemmType.GROUPED_CONTIGUOUS,
+                num_experts=experts,
+                top_k=8,
+                use_m_major_input_scale=True,
+            ),
+        )
+        for experts, shape_n, shape_k in (
+            (8, 1024, 1024),
+            (8, 1088, 1024),
+            (33, 1024, 1024),
+            (128, 1024, 1024),
+            (32, 4096, 6144),
+            (32, 6144, 2048),
+        )
+    ),
 )
 
 
@@ -131,9 +160,15 @@ def test_mxfp4(expected_fused, test_case):
     assert config.use_fused_e8m0_scale is expected_fused
     assert config.is_group_weight_scale
     assert config.is_tensor_weight_scale_2 is expected_fused
+    if test_case.uses_m_major_input_scale:
+        assert config.use_packed_k_layout
 
     skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
     results = KernelTestRunner(test_case).run()
+    if test_case.uses_m_major_input_scale:
+        assert all(
+            result.tuning_values.get("use_packed_k_layout", config.use_packed_k_layout) for result in results
+        )
     assert_kernel_test_shape_coverage(results)
 
 
@@ -149,3 +184,23 @@ def test_mxfp4_case_coverage():
         dtypes.bfloat16,
         dtypes.float8e4m3,
     }
+
+
+@pytest.mark.parametrize("checkpoint_format", ["mxfp4-pack-quantized", "float-quantized"])
+@pytest.mark.parametrize("group_size", [64, 128])
+def test_mxfp4_input_schema_compatibility(checkpoint_format, group_size):
+    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
+    weight = HummingWeightSchema(
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+        weight_scale_group_size=WEIGHT_GROUP_SIZE,
+    )
+    inputs = CompressedTensorsInputSchema(
+        format=checkpoint_format,
+        type="float",
+        num_bits=8,
+        dynamic=True,
+        group_size=group_size,
+    ).to_humming_schema(torch.bfloat16)
+    assert inputs.input_scale_dtype is None
+    assert inputs.is_compatible_with(weight, torch.bfloat16) == (group_size == INPUT_GROUP_SIZE)

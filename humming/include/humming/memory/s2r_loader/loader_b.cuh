@@ -15,7 +15,7 @@ private:
   static constexpr uint32_t K_WARPS = Ctx::K_WARPS;
 
   static constexpr bool kIsWarpHalfGroup = WarpShape::N == ElementA::kBits * 2;
-  static constexpr bool kLoadHalfGroup = ElementB::kBits % 2 == 0 && kIsWarpHalfGroup;
+  static constexpr bool kLoadHalfGroup = ElementB::kBits % 2 == 0 && kIsWarpHalfGroup && !Ctx::kUsePackedKLayout;
   static constexpr uint32_t TRUE_N_WARPS = kIsWarpHalfGroup ? N_WARPS / 2 : N_WARPS;
   static constexpr uint32_t kSmemStride = BlockShape::N * Ctx::kPartMmaShapeK * ElementB::kBits / 32 / 4 * (Ctx::kUsePackedKLayout ? 2 : 1);
   static constexpr uint32_t kNumIntsPerThread = ElementB::kBits / (kLoadHalfGroup ? 2 : 1);
@@ -33,7 +33,7 @@ public:
     static_assert(ElementA::kBits == 8);
     static_assert(Ctx::kUseWgmma);
     static_assert(Ctx::kWarpIters == WarpShape::N / 16);
-    static_assert(WarpShape::N / 16 >= 2);
+    static_assert(WarpShape::K == 128);
 
     uint32_t n_warp_id = ctx.n_warp_id();
     uint32_t lane_id = ctx.lane_id();

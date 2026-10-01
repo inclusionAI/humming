@@ -319,7 +319,6 @@ def transform_humming_weight(
         assert use_wgmma, "use_packed_k_layout requires wgmma"
         assert a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit (fp8/int8) activation"
         assert b_dtype.num_bits % 2 == 0, "use_packed_k_layout requires even-bit weight"
-        assert not use_fused_e8m0_scale, "use_packed_k_layout is incompatible with fused-e8m0 scale"
 
     if current_device.is_ppu:
         ppu_perm = [0, 2, 4, 6, 1, 3, 5, 7]

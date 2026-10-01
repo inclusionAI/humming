@@ -12,6 +12,7 @@ from humming.schema.gptq import GPTQWeightSchema
 from humming.schema.humming import HummingInputSchema, HummingWeightSchema, is_humming_schema_compatible
 from humming.schema.modelopt import ModeloptInputSchema, ModeloptWeightSchema
 from humming.schema.mxfp4 import Mxfp4WeightSchema
+from humming.schema.quark import QuarkInputSchema, QuarkWeightSchema
 
 WEIGHT_SCHEMA_MAP: dict[str, type[BaseWeightSchema]] = {
     "auto-round": AutoRoundWeightSchema,
@@ -25,6 +26,7 @@ WEIGHT_SCHEMA_MAP: dict[str, type[BaseWeightSchema]] = {
     "modelopt": ModeloptWeightSchema,
     "mxfp4": Mxfp4WeightSchema,
     "gpt_oss_mxfp4": GptOssMxfp4WeightSchema,
+    "quark": QuarkWeightSchema,
 }
 
 INPUT_SCHEMA_MAP: dict[str, type[BaseInputSchema]] = {
@@ -32,6 +34,7 @@ INPUT_SCHEMA_MAP: dict[str, type[BaseInputSchema]] = {
     "fp8": Fp8InputSchema,
     "humming": HummingInputSchema,
     "modelopt": ModeloptInputSchema,
+    "quark": QuarkInputSchema,
 }
 
 BaseWeightSchema.WEIGHT_SCHEMA_MAP = WEIGHT_SCHEMA_MAP

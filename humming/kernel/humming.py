@@ -35,13 +35,13 @@ CODE_TEMPLATE = jinja2.Template("""
 #define HUMMING_BLOCK_SHAPE_N {{block_shape[1]}}
 #define HUMMING_BLOCK_SHAPE_K {{block_shape[2]}}
 
-#if HUMMING_USE_UMMA_PIPELINE
+{% if use_umma_pipeline %}
 #include <humming/kernel/humming_umma.cuh>
-#elif {{use_warp_spec}}
+{% elif use_warp_spec %}
 #include <humming/kernel/humming_ws.cuh>
-#else
+{% else %}
 #include <humming/kernel/humming.cuh>
-#endif
+{% endif %}
 
 class MmaOpClass {
 public:
@@ -594,7 +594,10 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
         if self.use_packed_k_layout:
             warp_k = self.warp_shape[2]
-            for gs in (self.input_scale_group_size, self.weight_scale_group_size):
+            assert warp_k == 128, "use_packed_k_layout requires warp_k=128"
+            # Fused weight scales are applied to each B slab before WGMMA.
+            weight_group_size = 0 if self.use_fused_e8m0_scale else self.weight_scale_group_size
+            for gs in (self.input_scale_group_size, weight_group_size):
                 assert gs == 0 or gs >= warp_k
 
     def __call__(self):

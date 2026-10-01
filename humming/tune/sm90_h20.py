@@ -325,10 +325,8 @@ class Sm90H20Heuristics(DeviceHeuristics):
         block_shape_m, block_shape_n, block_shape_k = config["block_shape"]
         num_ctas_per_sm = config.get("num_ctas_per_sm", 1)
         warp_shape_m, warp_shape_n, warp_shape_k = config["warp_shape"]
-        if layer_config.use_packed_k_layout:
-            warp_shape_n = max(warp_shape_n, 32)
         num_stages = 3
-        min_warp_shape_n = 32 if a_dtype.num_bits == 16 or layer_config.use_packed_k_layout else 16
+        min_warp_shape_n = 32 if a_dtype.num_bits == 16 else 16
         while layer_config.shape_n % block_shape_n:
             block_shape_n //= 2
             warp_shape_n = min(warp_shape_n, block_shape_n // 4)
@@ -507,5 +505,11 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config["use_warp_spec"] = False
             config["use_mbarrier"] = False
             config["use_stream_k"] = False
+
+        if layer_config.use_packed_k_layout:
+            block_m, block_n, block_k = config["block_shape"]
+            warp_m, warp_n, _ = config["warp_shape"]
+            config["warp_shape"] = (warp_m, warp_n, 128)
+            config["block_shape"] = (block_m, block_n, 128 if use_batch_invariant else max(block_k, 128))
 
         return config

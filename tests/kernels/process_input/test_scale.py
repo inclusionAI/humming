@@ -10,7 +10,7 @@ from humming.testing.process_input import (
 )
 
 
-@pytest.mark.parametrize("quant_dtype", ["int8", "float8e4m3"])
+@pytest.mark.parametrize("quant_dtype", ["int4", "int8", "float8e4m3"])
 @pytest.mark.parametrize(
     "shape_m,hidden_size,quant_group_size,quant_mode,group_scale_dtype,use_m_major_input_scale",
     [

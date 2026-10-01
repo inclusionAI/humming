@@ -64,6 +64,7 @@ public:
 
   CUDA_INLINE void seek(uint32_t m_offset) {
     if constexpr (kHasInputScale) loader_as.seek(m_offset);
+    if constexpr (Ctx::kUsePackedLateAS) mma.m_scale_offset = Ctx::kIsGroupedGemm ? m_offset % 4 : 0;
     if constexpr (kHasInputScale2) loader_as2.seek(m_offset);
   }
 
@@ -73,11 +74,12 @@ public:
     iter_id = iter_id % Ctx::kWarpIters;
     uint32_t buffer_id = iter_id % 2;
     uint32_t k_iter_id = Ctx::kUsePackedKLayout ? 0 : iter_id;
+    uint32_t bs_iter_id = Ctx::kUsePackedKLayout && Ctx::kUseFusedE8m0Scale ? iter_id : k_iter_id;
     auto &smem = ctx.smem;
 
     loader_b.load(smem.stages[stage_id].b, mma.regs_qb_as_ptr(buffer_id), iter_id);
     if constexpr (USE_PPU && !kUseMxmma && kIsGroupOrBlockWeightScale)
-      loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), k_iter_id);
+      loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), bs_iter_id);
     if constexpr (!kUseWgmma && !Ctx::kUseUmma)
       loader_a.load(smem.stages[stage_id].a, mma.regs_a_as_ptr(buffer_id), iter_id, stage_id);
     if constexpr (kUseMxmma) {
@@ -86,10 +88,10 @@ public:
       if constexpr (kIsGroupOrBlockWeightScale)
         loader_bs.load_sf(smem.stages[stage_id].bs, mma.regs_sfb_as_ptr(buffer_id), k_iter_id);
     } else if constexpr (!Ctx::kUseBlockScaledMma) {
-      if constexpr (kIsGroupInputScale)
+      if constexpr (kIsGroupInputScale && !Ctx::kUsePackedLateAS)
         loader_as.load(smem.stages[stage_id].as, mma.arith.regs_as_as_ptr(buffer_id), k_iter_id);
       if constexpr (!USE_PPU && kIsGroupOrBlockWeightScale)
-        loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), k_iter_id);
+        loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), bs_iter_id);
     }
     if constexpr (kHasZeroPoint && (kIsGroupOrBlockWeightScale || kIsFirst)) {
       if constexpr (kIsChannelWeightScale)

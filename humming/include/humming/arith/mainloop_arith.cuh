@@ -69,7 +69,8 @@ private:
 public:
   uint32_t as[2][kNumASPerGroup];
   uint32_t q_as[kNumASPerGroup];
-  alignas(16) uint32_t bs[2][MAX(kNumBSPerGroup, 8) * ElementBS::kBits / 32];
+  static constexpr uint32_t kNumLoadedBS = kUsePackedKLayout && kUseFusedE8m0Scale ? 2 * kNumKSlabs : kNumBSPerGroup;
+  alignas(16) uint32_t bs[2][MAX(kNumLoadedBS, 8) * ElementBS::kBits / 32];
   uint32_t dq_bs[MAX(kNumBSPerGroup, 8) * kDequantBSBits / 32];
   uint32_t zp[2][(kIsFpZeroPoint ? 4 : CEIL_DIV(ElementB::kBits, 4)) * kNumZPGroupsPerMma];
 

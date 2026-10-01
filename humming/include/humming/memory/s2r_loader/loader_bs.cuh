@@ -65,12 +65,34 @@ public:
 
   CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {
-    if constexpr (kIsBlock) {
+    if constexpr (Ctx::kUsePackedKLayout && kUseFusedE8m0Scale) {
+      load_packed_k(smem_ptr, regs_ptr, iter_id);
+    } else if constexpr (kIsBlock) {
       load_block(smem_ptr, regs_ptr, iter_id);
     } else if constexpr (!kUseFusedE8m0Scale && (kIsChannel || (!kUseWgmma && ElementA::kBits != 16))) {
       load_layout2(smem_ptr, regs_ptr, iter_id);
     } else {
       load_layout1(smem_ptr, regs_ptr, iter_id);
+    }
+  }
+
+  CUDA_INLINE
+  void load_packed_k(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t iter_id) {
+    static_assert(kUseWgmma && ElementBS::kBits == 8);
+    static_assert(kGroupSize >= kPartMmaShapeK);
+    static_assert(WarpShape::K % (2 * kPartMmaShapeK) == 0);
+    constexpr uint32_t kNumKSlabs = WarpShape::K / kPartMmaShapeK;
+    const uint32_t n_tile = ctx.n_warp_offset() / 16 + iter_id;
+    // Layout1 packs the two N8 scale rows used by an N16 RS fragment.
+    const uint32_t n_index = ctx.lane_id() / 4 * 4 + n_tile % 4 + n_tile / 4 * 32;
+    const uint16_t *scales = reinterpret_cast<const uint16_t *>(smem_ptr);
+    PRAGMA_UNROLL
+    for (uint32_t slab = 0; slab < kNumKSlabs; slab += 2) {
+      const uint32_t k_base = ctx.k_warp_offset() + slab * kPartMmaShapeK;
+      const uint32_t group0 = k_base / kGroupSize;
+      const uint32_t group1 = (k_base + kPartMmaShapeK) / kGroupSize;
+      regs_ptr[slab / 2] = scales[group0 * BlockShape::N / 2 + n_index] |
+                          (uint32_t(scales[group1 * BlockShape::N / 2 + n_index]) << 16);
     }
   }
 

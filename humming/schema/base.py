@@ -176,12 +176,15 @@ class BaseWeightSchema:
             scale = scale.repeat_interleave(shape_n_repeats, 1)
             scale = scale.repeat_interleave(shape_k_repeats, 2)
         elif len(shape_k_stacks) > 1:
-            shape_n_repeats = torch.tensor([sum(shape_n_stacks)])
+            shape_n_repeats = torch.tensor([sum(shape_n_stacks)], device=scale.device)
             gcd = math.gcd(*shape_k_stacks)
             max_group_size = gcd & -gcd
             target_group_size = target_group_size or max_group_size
             assert target_group_size <= max_group_size
-            shape_k_repeats = torch.tensor([x // target_group_size for x in shape_k_stacks])
+            shape_k_repeats = torch.tensor(
+                [x // target_group_size for x in shape_k_stacks],
+                device=scale.device,
+            )
             scale = scale.view(-1, 1, len(shape_k_stacks))
             scale = scale.repeat_interleave(shape_n_repeats, 1)
             scale = scale.repeat_interleave(shape_k_repeats, 2)

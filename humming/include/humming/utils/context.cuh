@@ -65,7 +65,12 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kUseUmmaCooperativeTma = false;
 
   static constexpr bool kUsePackedKLayout = LayerConfig::kUsePackedKLayout;
+  static_assert(!kUsePackedKLayout || WarpShape::K == 128);
   static constexpr uint32_t kPackedKFactor = kUsePackedKLayout ? 2 : 1;
+  static constexpr bool kUsePackedLateAS = kUseWgmma && kUsePackedKLayout && WarpShape::N == 16 &&
+      LayerConfig::kUseFusedE8m0Scale && ElementA::kBits == 8 && ElementA::kIsFloatingPointType && MmaOpClass::kCTypeBits == 32 &&
+      LayerConfig::kInputScaleGroupSize == 128 && ComputeConfig::kUseMMajorInputScale;
+
 
   static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;
   static constexpr uint32_t N_WARPS = BlockShape::N / WarpShape::N;

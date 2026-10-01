@@ -78,7 +78,7 @@ def _is_legal_geometry(
         return False
     if layer_config.mma_type == MmaType.WGMMA and layer_config.a_dtype.is_integer_type and warp_shape[0] % 16:
         return False
-    min_warp_n = 32 if layer_config.a_dtype.num_bits == 16 or layer_config.use_packed_k_layout else 16
+    min_warp_n = 32 if layer_config.a_dtype.num_bits == 16 else 16
     min_warp_k = {16: 32, 8: 64, 4: 128}[layer_config.a_dtype.num_bits]
     if warp_shape[1] < min_warp_n or warp_shape[2] < min_warp_k:
         return False
@@ -88,11 +88,12 @@ def _is_legal_geometry(
         swizzle_bytes = 128 if layer_config.a_dtype.num_bits * block_shape[2] >= 1024 else 64
         if warp_shape[2] > swizzle_bytes * 8 // layer_config.a_dtype.num_bits:
             return False
+    weight_group_size = 0 if layer_config.use_fused_e8m0_scale else layer_config.weight_scale_group_size
     is_warp_k_gt_groupsize = any(
         group_size and group_size < warp_shape[2]
-        for group_size in (layer_config.input_scale_group_size, layer_config.weight_scale_group_size)
+        for group_size in (layer_config.input_scale_group_size, weight_group_size)
     )
-    if layer_config.use_packed_k_layout and is_warp_k_gt_groupsize:
+    if layer_config.use_packed_k_layout and (warp_shape[2] != 128 or is_warp_k_gt_groupsize):
         return False
     ratios = tuple(block // warp for block, warp in zip(block_shape, warp_shape, strict=True))
     return all(ratio > 0 and ratio & (ratio - 1) == 0 for ratio in ratios)
@@ -332,13 +333,6 @@ def _try_combine_candidate(
     if layer_config.shape_n % (block_shape[1] * config["multi_cast_size_a"]):
         return None
     if compute_config.use_batch_invariant and (config["use_stream_k"] or block_shape[2] != warp_shape[2]):
-        return None
-    actual_warp_iters = (
-        config["warp_shape"][1] // 16
-        if layer_config.use_packed_k_layout
-        else geometry_signature["warp_iters"]
-    )
-    if config["use_warp_spec"] and actual_warp_iters < 2:
         return None
     block_m = config["block_shape"][0]
     warp_m = config["warp_shape"][0]

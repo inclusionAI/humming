@@ -12,7 +12,8 @@ private:
 
   static constexpr bool kHasGroupScale = Ctx::kWeightScaleGroupSize > 0 || Ctx::kInputScaleGroupSize > 0;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
-  static constexpr bool kForceFloatAccum = std::is_same<typename MmaOpClass::ValTypeC, int32_t>::value && kHasGroupScale && !Ctx::kUseIntWeightScale && !kUseFusedE8m0Scale;
+  // Group input scales promote integer MMA partials to float before reduction.
+  static constexpr bool kForceFloatAccum = std::is_same<typename MmaOpClass::ValTypeC, int32_t>::value && kHasGroupScale && !Ctx::kUseIntWeightScale && (!kUseFusedE8m0Scale || Ctx::kInputScaleGroupSize > 0);
   using MmaTypeC = std::conditional_t<kForceFloatAccum, float, typename MmaOpClass::ValTypeC>;
   using MmaShape = typename MmaOpClass::MmaShape;
   using OutputType32 = std::conditional_t<std::is_same<ElementC, Float16>::value, half2, nv_bfloat162>;

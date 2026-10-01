@@ -26,6 +26,8 @@ HummingKernel configurations are divided into three categories:
 | `has_bias` | Whether to use fused bias addition. |
 | `use_umma_ss` | Use shared-memory operands for native UMMA FP8/FP6/FP4 instead of the default TS path. Set before transforming weights; SS uses K-contiguous packed weight rows and requires `use_tma_b=True`. |
 | `mma_type` | Can be `mma`, `wgmma`, `umma`, or `mxmma`. This selects the weight layout and preferred tensor-core backend. |
+| `use_fused_e8m0_scale` | Fuse E8M0 group scales into MXFP4-to-FP8/INT8 weight conversion. Weight preprocessing extracts a secondary scale. |
+| `use_packed_k_layout` | Pack K slabs for WGMMA with 8-bit activations and even-bit weights. Can be explicitly enabled together with `use_fused_e8m0_scale`; transformed weights must use the same setting as the kernel. |
 
 `umma` requires SM100-family GPUs and CUDA 12.9+, with FP16/BF16 outputs and FP32
 accumulation. It supports FP16/BF16, FP8 and FP4 inputs. The default TS path shares
@@ -103,6 +105,17 @@ weight_scale = weight_scale.to(torch.int16).view(dtype)
 | `float16` / `bfloat16` | 32, 64 | 32, 64 |
 | `float8e4m3` / `float8e5m2` / `int8` | 16, 32, 64 | 64, 128 |
 | `float4e2m1` / `int4` | 16, 32, 64 | 128, 256 |
+
+With `use_packed_k_layout`, warp N must be at least 32. Activation scale groups,
+when present, must cover warp K. Weight scale groups must also cover warp K unless
+`use_fused_e8m0_scale` is enabled; fused conversion applies each K32 slab's weight
+scale before WGMMA, so GS32 weights can use warp K64 or K128. Fused packed-K
+remains opt-in; the default layout selection is unchanged.
+
+`raster_group_m` controls M tile grouping for dense and grouped-contiguous GEMMs.
+For grouped-contiguous GEMMs, values greater than 1 automatically use an expert
+tile prefix table and binary lookup, allowing M tile IDs to move backwards as N
+advances. A value of 1 uses the existing forward warp scan without the prefix table.
 
 ### Pipeline and Synchronization
 

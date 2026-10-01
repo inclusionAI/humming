@@ -105,11 +105,7 @@ class KernelTestRunner:
             self.compute_config = dataclasses.replace(self.compute_config, use_batch_invariant=True)
 
         if self.layer_config.mma_type == MmaType.WGMMA:
-            min_warp_shape_n = (
-                32
-                if self.layer_config.a_dtype.num_bits == 16 or self.layer_config.use_packed_k_layout
-                else 16
-            )
+            min_warp_shape_n = 32 if self.layer_config.a_dtype.num_bits == 16 else 16
             if self.layer_config.shape_n % (min_warp_shape_n * 4):
                 import pytest
 

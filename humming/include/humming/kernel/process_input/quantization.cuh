@@ -542,6 +542,10 @@ CUDA_INLINE auto quant_group(
       pack_int8<kValuesPerLane>(values, result.packed);
     } else {
       static_assert(TargetType::kIsIntegerType && TargetType::kIsSigned && TargetType::kBits == 4);
+      // Saturate to INT4 before packing low nibbles; INT8 conversion alone wraps.
+      PRAGMA_UNROLL
+      for (uint32_t value = 0; value < kValuesPerLane; value++)
+        values[value] = fminf(fmaxf(values[value], -8.f), 7.f);
       pack_int4<kValuesPerLane>(values, result.packed);
     }
   }

@@ -169,9 +169,10 @@ def test_moe_case_coverage():
     }
 
 
+@pytest.mark.parametrize("raster_group_m", [1, 8])
 @pytest.mark.parametrize("use_stream_k", [False, True])
 @pytest.mark.parametrize("offset_dtype", [torch.int32, torch.int64])
-def test_grouped_contiguous_skips_unused_capacity(use_stream_k, offset_dtype):
+def test_grouped_contiguous_skips_unused_capacity(use_stream_k, offset_dtype, raster_group_m):
     """Graph replay uses live expert offsets and leaves unused rows untouched."""
     skip_if_unsupported(a_dtype=dtypes.bfloat16)
     layer = LayerConfig(
@@ -196,6 +197,7 @@ def test_grouped_contiguous_skips_unused_capacity(use_stream_k, offset_dtype):
     )
     tuning = get_heuristics_config(layer, shape_m=64, gemm_type=compute.gemm_type)
     tuning["use_stream_k"] = use_stream_k
+    tuning["raster_group_m"] = raster_group_m
     kernel = HummingKernel.prepare_kernels(
         layer.to_str(), compute.to_str(), tuning, device=torch.device("cuda", 0)
     )

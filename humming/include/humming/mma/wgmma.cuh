@@ -37,7 +37,7 @@ public:
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kSwizzleBytes = ElementA::kBits * BlockShape::K >= 1024 ? 128 : 64;
-  static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
+  static constexpr uint32_t kNumWarpShapeNSplits = !Ctx::kUsePackedKLayout && WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
 
   static constexpr bool kUsePackedKLayout = Ctx::kUsePackedKLayout;
   static constexpr uint32_t kPackedKFactor = Ctx::kPackedKFactor;
@@ -47,10 +47,11 @@ public:
 
   Ctx &ctx;
   ArithClass &arith;
-  uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
+  uint32_t regs_qb[2][kUsePackedKLayout ? kNumKSlabs * ElementB::kBits / 2 : ElementB::kBits * (16 / ElementA::kBits)];
   typename MmaOpClass::BRegisters regs_b[2][kUsePackedKLayout ? 1 : (WarpShape::N * 4 / MmaShape::N / kPackedKFactor)][kRegsBKDim];
   alignas(16) CRegistersArrayType regs_c[2];
   uint32_t smem_offset = 0;
+  uint32_t m_scale_offset = 0;
 
   CUDA_INLINE
   WGMMA(Ctx &ctx, ArithClass &arith)
@@ -82,7 +83,8 @@ public:
 
     if constexpr (kUseFusedE8m0Scale) {
       uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
-      fused_dequant_for_mxfp4<ElementA, WarpShape::N / 16, true>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
+      constexpr uint32_t kTransformIters = kUsePackedKLayout ? kNumKSlabs : WarpShape::N / 16;
+      fused_dequant_for_mxfp4<ElementA, kTransformIters, true>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
     } else {
       if constexpr (ElementB::kBits == 1 && kNumWarpShapeNSplits == 2) {
         regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (ctx.warp_id() % 2 * (ElementA::kBits / 2));
@@ -107,13 +109,13 @@ public:
   };
 
   CUDA_INLINE
-  void run(uint32_t stage_id, uint32_t iter_id) {
+  void issue(uint32_t stage_id, uint32_t iter_id) {
     static_assert(WarpShape::M == MmaShape::M);
     static_assert(kPartMmaShapeK == MmaShape::K);
     uint32_t buffer_id = iter_id % 2;
 
     const uint32_t smem_base = cast_smem_ptr_to_uint(&ctx.smem);
-    constexpr uint32_t kItersPerHalf = kWarpIters / kPackedKFactor;
+    constexpr uint32_t kItersPerHalf = kUsePackedKLayout ? 1 : kWarpIters;
     constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
     constexpr uint32_t kRunKLoop = kUsePackedKLayout ? kNumKSlabs : kPackedKFactor;
 
@@ -145,8 +147,33 @@ public:
     }
 
     wgmma_commit();
+  }
+
+  CUDA_INLINE
+  void wait_and_promote(uint32_t stage_id, uint32_t iter_id) {
+    constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
+    constexpr uint32_t kRunKLoop = kUsePackedKLayout ? kNumKSlabs : kPackedKFactor;
+    uint32_t delta_m = kUsePackedKLayout ? iter_id : 0;
+    uint32_t delta_j = final_regs_c_index() == 0 ? delta_m : 0;
     wgmma_wait<0>();
     may_fence_regs(delta_j);
+
+    if constexpr (Ctx::kUsePackedLateAS) {
+      // Read each scale only when promoting its accumulator, keeping AS out of
+      // the live register set during weight conversion and WGMMA.
+      constexpr uint32_t kScaleBlockM = BlockShape::M + (Ctx::kIsGroupedGemm ? 4 : 0);
+      const uint32_t base = ctx.k_warp_offset() / 128 * kScaleBlockM +
+          ctx.m_warp_offset() + m_scale_offset + (ctx.lane_id() % 4) * 2;
+      const float *scale = reinterpret_cast<const float *>(ctx.smem.stages[stage_id].as);
+      float2 *partial = reinterpret_cast<float2 *>(regs_c[0][0][0]);
+      float2 *final = reinterpret_cast<float2 *>(regs_c[1][0][0]);
+      PRAGMA_UNROLL
+      for (uint32_t index = 0; index < MmaShape::M / 4; ++index) {
+        final[index].x += scale[base + index / 2 * 8] * partial[index].x;
+        final[index].y += scale[base + index / 2 * 8 + 1] * partial[index].y;
+      }
+      return;
+    }
 
     PRAGMA_UNROLL
     for (uint32_t k = 0; k < kRunKLoop; k++) {
@@ -156,6 +183,11 @@ public:
       }
     }
   };
+
+  CUDA_INLINE void run(uint32_t stage_id, uint32_t iter_id) {
+    issue(stage_id, iter_id);
+    wait_and_promote(stage_id, iter_id);
+  }
 
   CUDA_INLINE void may_fence_regs(uint32_t delta_j) {
     if constexpr (final_regs_c_index() != 0) {

@@ -11,6 +11,7 @@ from humming.config import GemmType, LayerConfig
 from humming.device import current_device
 from humming.forward import humming_forward, may_process_input, may_quant_input
 from humming.schema import BaseInputSchema, BaseWeightSchema, HummingInputSchema, HummingWeightSchema
+from humming.schema.quark import QuarkWeightSchema, parse_quark_tensor_config
 from humming.transform import (
     check_and_pad_tensors,
     prepare_layer_config,
@@ -410,6 +411,11 @@ class HummingLayer(torch.nn.Module):
 
     def load_from_tensors(self, tensors: dict[str, torch.Tensor], prefix: str = ""):
         tensors = self.filter_tensors(tensors, prefix)
+        if isinstance(self.weight_schema, QuarkWeightSchema):
+            tensors = {
+                name: self.weight_schema.process_loaded_weight(tensor, name)
+                for name, tensor in tensors.items()
+            }
         self.load_state_dict(tensors, strict=False)
 
     def load_from_safetensors(self, name: str, prefix: str = ""):
@@ -501,6 +507,16 @@ class HummingLayer(torch.nn.Module):
                 if "quant_algo" in config:
                     target_input_config["quant_algo"] = config["quant_algo"]
                 input_layer_config = target_input_config
+        elif config["quant_method"] == "quark":
+            global_config = config["global_quant_config"]
+            if global_config.get("output_tensors") is not None or global_config.get("bias") is not None:
+                raise ValueError("Quark output/bias quantization is not supported")
+            quark_weight_config = parse_quark_tensor_config(global_config.get("weight"))
+            if quark_weight_config is None:
+                raise ValueError("Quark weight is unquantized")
+            layer_config = quark_weight_config
+            layer_config["pack_method"] = (config.get("export") or {}).get("pack_method", "reorder")
+            input_layer_config = parse_quark_tensor_config(global_config.get("input_tensors"))
         elif config["quant_method"] in BaseInputSchema.INPUT_SCHEMA_MAP:
             input_layer_config = layer_config
 
@@ -543,6 +559,10 @@ class HummingLayer(torch.nn.Module):
             torch_dtype=torch_dtype,
         )
 
+        if config["quant_method"] == "quark":
+            missing = set(dict(layer.named_parameters())) - tensors.keys()
+            if missing:
+                raise ValueError(f"Quark checkpoint is missing required tensors: {sorted(missing)}")
         layer.load_from_tensors(tensors)
         return layer
 
@@ -559,6 +579,7 @@ class HummingLayer(torch.nn.Module):
                     shape_n_stacks=[self.shape_n],
                     shape_k_stacks=[self.shape_k],
                     param_dtype=self.torch_dtype,
+                    num_experts=self.num_experts,
                     device=device,
                 )
             else:

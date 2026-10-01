@@ -90,6 +90,12 @@
 #define IF_IS_GROUPED_GEMM(x)
 #endif
 
+#if HUMMING_IS_GROUPED_CONTIGUOUS_GEMM && HUMMING_RASTER_GROUP_M > 1
+#define IF_USE_GROUPED_RASTER(x) x
+#else
+#define IF_USE_GROUPED_RASTER(x)
+#endif
+
 #if HUMMING_IS_GROUPED_CONTIGUOUS_GEMM
 #define IF_IS_GROUPED_CONTIGUOUS_GEMM(x) x
 #else
@@ -255,6 +261,7 @@ public:
 
   IF_IS_GROUPED_GEMM(CUtensorMap tensor_map_buffer[1];)
   IF_IS_GROUPED_GEMM(uint32_t expert_tokens[kNumExperts];)
+  IF_USE_GROUPED_RASTER(uint32_t expert_m_block_offset[kNumExperts + 1];)
   IF_IS_GROUPED_GEMM(uint32_t total_m_blocks[1];)
   IF_IS_GROUPED_CONTIGUOUS_GEMM(uint32_t expert_offset[kNumExperts + 1];)
 

@@ -481,6 +481,16 @@ def is_humming_schema_compatible(
 
     input_group_size = input_schema.input_scale_group_size
     weight_group_size = weight_schema.weight_scale_group_size
+    is_fp8_gs128_mxfp4_gs32 = (
+        sm_version == 90
+        and a_dtype == dtypes.float8e4m3
+        and is_mxfp4_weight
+        and input_group_size == 128
+        # On SM90, LayerConfig resolves an unspecified group-scale dtype to
+        # float32 for WGMMA. Do not encode that hardware choice in the
+        # checkpoint's compressed-tensors input schema.
+        and input_schema.input_scale_dtype in (None, dtypes.float32)
+    )
     if input_group_size > 0 and weight_group_size > 0:
         if input_group_size != weight_group_size and (not is_mxfp4_weight or sm_version >= 120):
             return False
@@ -495,9 +505,18 @@ def is_humming_schema_compatible(
         as_dtype = input_schema.input_scale_dtype
         if weight_group_size > 0 and bs_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]:
             return False
-        if input_group_size > 0 and as_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]:
+        if (
+            input_group_size > 0
+            and as_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]
+            and not is_fp8_gs128_mxfp4_gs32
+        ):
             return False
-        if input_group_size > 0 and weight_group_size > 0 and as_dtype != bs_dtype:
+        if (
+            input_group_size > 0
+            and weight_group_size > 0
+            and as_dtype != bs_dtype
+            and not is_fp8_gs128_mxfp4_gs32
+        ):
             return False
 
     return True
