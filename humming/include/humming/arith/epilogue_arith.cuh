@@ -60,16 +60,22 @@ public:
       (kHasChannelWeightScale && !kUseNativeChannelScale) || kHasBias;
 
   CUDA_INLINE void apply_native_f32_output_scale(float &first, float &second, uint32_t row_group, uint32_t column_group) {
+    float weight_scale = 1.0f;
+    if constexpr (kHasTensorWeightScale) {
+      weight_scale = __uint_as_float(gs);
+      if constexpr (kExpOffset.x) weight_scale *= prepare_exp_scale_factor<float, kExpOffset.x>();
+    }
     if constexpr (kHasEpilogueInputScale) {
       const float *scales = reinterpret_cast<const float *>(as);
       if constexpr (kIsTensorInputScale) {
-        first *= scales[0];
-        second *= scales[0];
+        float scale = scales[0] * weight_scale;
+        first *= scale;
+        second *= scale;
       } else {
         // The channel loader places row r's scale in lanes 4*r through 4*r+3.
         // Two-CTA TMEM loads pair adjacent rows; one-CTA loads pair rows four apart.
         constexpr bool kAdjacentRows = Ctx::kUmmaCtaGroupSize == 2;
-        float scale = scales[row_group];
+        float scale = scales[row_group] * weight_scale;
         uint32_t source_lane = (threadIdx.x % 4) * (kAdjacentRows ? 8 : 4);
         first *= __shfl_sync(0xffffffff, scale, source_lane);
         second *= __shfl_sync(0xffffffff, scale, source_lane + (kAdjacentRows ? 4 : 16));
@@ -87,11 +93,9 @@ public:
       first *= scale;
       second *= scale;
     }
-    if constexpr (kHasTensorWeightScale) {
-      float scale = *reinterpret_cast<const float *>(&gs);
-      if constexpr (kExpOffset.x) scale *= prepare_exp_scale_factor<float, kExpOffset.x>();
-      first *= scale;
-      second *= scale;
+    if constexpr (kHasTensorWeightScale && !kHasEpilogueInputScale) {
+      first *= weight_scale;
+      second *= weight_scale;
     }
   }
 

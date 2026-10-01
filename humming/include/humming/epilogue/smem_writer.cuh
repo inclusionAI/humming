@@ -220,6 +220,15 @@ public:
 
   template <class WriteChunk>
   CUDA_INLINE void write_umma(MMA &mma, uint32_t slice_id, uint32_t slice_count, WriteChunk write_chunk) {
+    // Specialize both output orders so scale-array indices stay compile-time constants.
+    if constexpr (MMA::kAccumulatorStride != 0 && MMA::kAccumulatorStride < WarpShape::M) {
+      if (mma.output_chunk_index(0) != 0) write_umma_order<true>(mma, slice_id, slice_count, write_chunk);
+      else write_umma_order<false>(mma, slice_id, slice_count, write_chunk);
+    } else write_umma_order<false>(mma, slice_id, slice_count, write_chunk);
+  }
+
+  template <bool kRotate, class WriteChunk>
+  CUDA_INLINE void write_umma_order(MMA &mma, uint32_t slice_id, uint32_t slice_count, WriteChunk write_chunk) {
     constexpr bool kChunked = Ctx::kUmmaOutputChunkRows != 0;
     constexpr uint32_t kStorageRows = kChunked ? Ctx::kUmmaOutputChunkRows : BlockShape::M;
     uint32_t lane = ctx.lane_id();
@@ -232,7 +241,7 @@ public:
 
     PRAGMA_UNROLL
     for (uint32_t step = 0; step < CEIL_DIV(WarpShape::M, 32); step++) {
-      uint32_t m = mma.output_chunk_index(step);
+      uint32_t m = kRotate ? (step + MMA::kAccumulatorStride / 32) % CEIL_DIV(WarpShape::M, 32) : step;
       uint32_t lower[16];
       uint32_t upper[16];
       uint32_t rows = MIN(32, WarpShape::M - m * 32);

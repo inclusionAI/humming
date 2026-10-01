@@ -12,6 +12,7 @@ private:
   using ElementA = typename Ctx::ElementA;
   using ElementB = typename Ctx::ElementB;
 
+  static constexpr bool kEvictInputsLast = Ctx::kUseUmmaSs && Ctx::kIsDenseGemm;
   static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
   static constexpr bool kUseTma = Ctx::kUseTmaB;
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
@@ -21,7 +22,7 @@ private:
   static constexpr uint32_t kMultiCastSizeB = Ctx::kMultiCastSizeB;
   // M-grouped traversal reuses B immediately across neighboring CTAs. Avoid
   // retaining streamed weights at the expense of A's reuse across N tiles.
-  static constexpr bool kEvictWeightsFirst = Ctx::kUseUmmaSplitLoads && Ctx::kRasterGroupM > 1;
+  static constexpr bool kEvictWeightsFirst = !kEvictInputsLast && Ctx::kUseUmmaSplitLoads && Ctx::kRasterGroupM > 1;
 
   static constexpr uint32_t kWeightSmemBits = SharedStorage::kWeightSmemBits;
   static constexpr uint32_t kSwizzleBytes = MIN(128u, SharedStorage::kWeightStageK *kWeightSmemBits / 8);
@@ -83,14 +84,14 @@ public:
           PRAGMA_UNROLL
           for (uint32_t n = 0; n < SharedStorage::kWeightStageN; n += 256) {
             uint32_t offset = (k / kSwizzleK * SharedStorage::kWeightStageN + n) * kSwizzleBytes / sizeof(int4);
-            tma_load_2d<1, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(tensor_map_ptr, smem_ptr + offset, mbar_ptr,
-                                                                                    (start_k + k) / kCoordinateBits, col_offset + n);
+            tma_load_2d<1, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1, kEvictInputsLast>(tensor_map_ptr, smem_ptr + offset, mbar_ptr,
+                                                                                                      (start_k + k) / kCoordinateBits, col_offset + n);
           }
         }
       } else if constexpr (kMultiCastSizeB == 1) {
-        tma_load_3d<1, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+        tma_load_3d<1, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1, kEvictInputsLast>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       } else if (cluster_rank == 0) {
-        tma_load_3d<kMultiCastSizeB>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
+        tma_load_3d<kMultiCastSizeB, false, 1, kEvictInputsLast>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, col_offset, row_offset);
       }
     }
   }

@@ -12,6 +12,7 @@ private:
   using PadShape = typename Ctx::PadShape;
   using ElementA = typename Ctx::ElementA;
 
+  static constexpr bool kEvictInputsLast = Ctx::kUseUmmaSs && Ctx::kIsDenseGemm;
   static constexpr bool kUseBlockScaledMma = Ctx::kUseBlockScaledMma;
   static constexpr bool kUseWarpSpec = Ctx::kUseWarpSpec;
   static constexpr bool kUseCpAsync = Ctx::kUseCpAsync;
@@ -178,14 +179,14 @@ public:
     constexpr uint32_t kLoadThread = Ctx::kUseUmmaSplitLoads && !kIsChannelScale ? 32 : 0;
     if (ctx.load_thread_id() == kLoadThread) {
       if constexpr (kIsChannelScale) tma_load_1d(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset);
-      else tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset);
+      else tma_load_2d<1, false, 1, kEvictInputsLast>(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset);
     }
   }
 
   CUDA_INLINE void load_mx_tma(void *smem_ptr, void *mbar_ptr) {
     static_assert(kMMajorInputScale && !kIsIndexedGemm);
     constexpr uint32_t kLoadThread = Ctx::kUseUmmaSplitLoads ? 32 : 0;
-    if (ctx.load_thread_id() == kLoadThread) tma_load_2d(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
+    if (ctx.load_thread_id() == kLoadThread) tma_load_2d<1, false, 1, kEvictInputsLast>(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
   }
 
   CUDA_INLINE void prefetch_tma() {
