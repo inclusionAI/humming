@@ -291,3 +291,23 @@ CUDA_INLINE void tensor_map_acquire_cta(const void *gmem_desc_ptr) {
   asm volatile("fence.proxy.tensormap::generic.acquire.cta [%0], 128;" ::"l"(gmem_int_desc)
                : "memory");
 };
+
+template <uint32_t kMultiCastSize = 1>
+CUDA_INLINE void tma_load_5d(const void *desc_ptr, void *smem_ptr, void *mbar_ptr,
+                            uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4) {
+  uint32_t smem = cast_smem_ptr_to_uint(smem_ptr);
+  uint32_t mbar = cast_smem_ptr_to_uint(mbar_ptr);
+  uint64_t desc = reinterpret_cast<uint64_t>(desc_ptr);
+  if constexpr (kMultiCastSize == 1) {
+    asm volatile("cp.async.bulk.tensor.5d.shared::cta.global.mbarrier::complete_tx::bytes"
+                 " [%0], [%1, {%3, %4, %5, %6, %7}], [%2];"
+                 :: "r"(smem), "l"(desc), "r"(mbar),
+                    "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4) : "memory");
+  } else {
+    constexpr uint16_t mask = (1 << kMultiCastSize) - 1;
+    asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster"
+                 " [%0], [%1, {%4, %5, %6, %7, %8}], [%2], %3;"
+                 :: "r"(smem), "l"(desc), "r"(mbar), "h"(mask),
+                    "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4) : "memory");
+  }
+}

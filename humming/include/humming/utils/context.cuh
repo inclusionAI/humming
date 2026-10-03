@@ -56,6 +56,14 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kUseWmma = TuningConfig::kMmaType == MmaType::MMA;
   static constexpr bool kUseUmma = TuningConfig::kMmaType == MmaType::UMMA;
   static constexpr bool kUseWgmma = TuningConfig::kMmaType == MmaType::WGMMA;
+  static constexpr bool kUseWgmmaSs = kUseWgmma && LayerConfig::kUseRawWeight;
+  static constexpr bool kUseWgmmaTmaNPermute = kUseWgmmaSs && TuningConfig::kUseTmaB;
+  static constexpr bool kUseWgmmaTmaKPack = kUseWgmmaTmaNPermute;
+  static constexpr bool kUseWgmmaTmaAPack = kUseWgmma && TuningConfig::kUseTmaA && ElementA::kBits >= 8 && !kIsIndexedGemm &&
+      (ProblemShape::K - PadShape::K) * ElementA::kBits % 1024 == 0 && BlockShape::K * ElementA::kBits > 1024;
+  static constexpr bool kUseWgmmaCpAsyncNPermute =
+      kUseWgmmaSs && !TuningConfig::kUseTmaB && TuningConfig::kUseCpAsync && WarpShape::N > 16;
+  static constexpr bool kUseWgmmaSsNLayout = kUseWgmmaSs && !kUseWgmmaTmaNPermute && !kUseWgmmaCpAsyncNPermute;
   static constexpr bool kUseMxmma = TuningConfig::kMmaType == MmaType::MXMMA;
 
   static constexpr bool kUseBlockScaledMma = LayerConfig::kUseBlockScaledMma;
@@ -121,6 +129,10 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   CUDA_INLINE uint32_t k_warp_id() { return K_WARPS == 1 ? 0 : (warp_id() / (M_WARPS * N_WARPS)); }
 
   CUDA_INLINE uint32_t m_warp_offset() { return m_warp_id() * WarpShape::M; }
+  // N16 fragment index in the contiguous SS accumulator layout.
+  CUDA_INLINE uint32_t wgmma_ss_n_tile(uint32_t fragment) {
+    return n_warp_id() / 4 * (WarpShape::N / 16 * 4) + n_warp_id() % 4 + fragment * 4;
+  }
   CUDA_INLINE uint32_t n_warp_offset() { return n_warp_id() * WarpShape::N; }
   CUDA_INLINE uint32_t k_warp_offset() { return k_warp_id() * WarpShape::K; }
 

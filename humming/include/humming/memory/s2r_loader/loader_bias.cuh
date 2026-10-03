@@ -20,7 +20,16 @@ public:
     uint32_t lane_id = ctx.lane_id();
     uint32_t bias_sh_rd = Ctx::kUseWgmma ? (lane_id / 8) : (lane_id % 4);
 
-    if constexpr (WarpShape::N == 16) {
+    if constexpr (Ctx::kUseWgmmaSsNLayout) {
+      const int2 *source = reinterpret_cast<const int2 *>(smem_ptr);
+      int2 *destination = reinterpret_cast<int2 *>(regs_ptr);
+      PRAGMA_UNROLL
+      for (uint32_t j = 0; j < WarpShape::N / 16; ++j) {
+        uint32_t tile = ctx.wgmma_ss_n_tile(j);
+        uint32_t offset = tile / 2 * 8 + bias_sh_rd * 2 + tile % 2;
+        destination[j] = pred ? source[offset] : int2();
+      }
+    } else if constexpr (WarpShape::N == 16) {
       bias_sh_rd = (n_warp_id / 2) * 8 + bias_sh_rd * 2 + warp_id % 2;
       const int2 *smem_ptr_load = reinterpret_cast<const int2 *>(smem_ptr);
       int2 *reg_ptr_load = reinterpret_cast<int2 *>(regs_ptr);

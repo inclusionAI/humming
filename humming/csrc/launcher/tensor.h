@@ -309,6 +309,21 @@ inline CUtensorMap make_tma_desc_a(Tensor tensor, KernelData &kernel_data) {
       a_dtype_num_bits < 8 ? tma_block_shape_k * a_dtype_num_bits / 8 : tma_block_shape_k;
 
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
+  if (kernel_data.mma_type == MmaType::WGMMA && a_dtype_num_bits >= 8 &&
+      tensor.size(1) * a_dtype_num_bits % 1024 == 0 && kernel_data.block_shape_k * a_dtype_num_bits > 1024) {
+    CUtensorMap descriptor{};
+    // Split physical K into complete 128-byte slabs; the last stage may be OOB.
+    uint32_t slab_elements = 1024 / a_dtype_num_bits;
+    uint64_t dimensions[] = {slab_elements, uint64_t(tensor.size(0)), uint64_t(tensor.size(1)) / slab_elements};
+    uint64_t strides[] = {uint64_t(tensor.size(1)) * a_dtype_num_bits / 8, 128};
+    uint32_t box[] = {slab_elements, tma_block_shape_m, kernel_data.block_shape_k / slab_elements};
+    uint32_t element_strides[] = {1, 1, 1};
+    CUresult status = cuTensorMapEncodeTiled(&descriptor, get_tma_dtype(tensor.scalar_type()), 3,
+        tensor.data_ptr(), dimensions, strides, box, element_strides, CU_TENSOR_MAP_INTERLEAVE_NONE,
+        get_swizzle_enum(128), CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    ASSERT_CHECK(status == CUDA_SUCCESS, "TMA Encode Failed for A K slabs: ", int(status));
+    return descriptor;
+  }
   return make_tma_desc(tensor, {tma_block_shape_k_packed, tma_block_shape_m}, swizzle_bytes, "a");
 }
 
@@ -368,6 +383,25 @@ inline CUtensorMap make_tma_desc_b(Tensor &tensor, KernelData &kernel_data) {
           dimensions, strides, box, element_strides, CU_TENSOR_MAP_INTERLEAVE_NONE,
           get_swizzle_enum(swizzle_bytes), CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
       ASSERT_CHECK(status == CUDA_SUCCESS, "TMA Encode Failed for expanded low-bit weights");
+      return descriptor;
+    }
+    if (kernel_data.mma_type == MmaType::WGMMA) {
+      CUtensorMap descriptor{};
+      uint64_t w = kernel_data.warp_shape_n;
+      uint64_t row_bytes = uint64_t(tensor.size(-1)) * 4;
+      // Fragment planes span all N warps in the CTA, leaving the fifth
+      // dimension available for K slabs even with multiple N warpgroups.
+      uint64_t dimensions[] = {swizzle_bytes / 4, 16,
+          uint64_t(kernel_data.problem_shape_n) * std::max(1u, kernel_data.num_experts) / w,
+          w / 16, row_bytes / swizzle_bytes};
+      uint64_t strides[] = {row_bytes, w * row_bytes, 16 * row_bytes, swizzle_bytes};
+      uint32_t box[] = {swizzle_bytes / 4, 16, uint32_t(block_shape_n / w), uint32_t(w / 16),
+          block_shape_k * num_bits / 8 / swizzle_bytes};
+      uint32_t element_strides[] = {1, 1, 1, 1, 1};
+      CUresult status = cuTensorMapEncodeTiled(&descriptor, CU_TENSOR_MAP_DATA_TYPE_INT32, 5,
+          tensor.data_ptr(), dimensions, strides, box, element_strides, CU_TENSOR_MAP_INTERLEAVE_NONE,
+          get_swizzle_enum(swizzle_bytes), CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+      ASSERT_CHECK(status == CUDA_SUCCESS, "TMA Encode Failed for WGMMA N permutation: ", int(status));
       return descriptor;
     }
     auto rows = torch_view_shape(tensor, {-1, tensor.size(-1)});

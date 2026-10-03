@@ -237,3 +237,49 @@ def test_grouped_contiguous_skips_unused_capacity(use_stream_k, offset_dtype, ra
             torch.testing.assert_close(output[start : start + count], reference, atol=0.01, rtol=0.01)
             start += count
         assert (output[start:] == -123).all()
+
+
+@pytest.mark.parametrize(
+    "gemm_type", (GemmType.INDEXED, GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED),
+)
+@pytest.mark.parametrize("multicast", (1, 2))
+@pytest.mark.parametrize("use_stream_k", (False, True))
+def test_raw_wgmma_tma_b_general_moe(gemm_type, multicast, use_stream_k, monkeypatch):
+    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
+    case = _case(
+        "raw-wgmma-tma-b-general", gemm_type,
+        a_dtype=dtypes.float8e4m3, b_dtype=dtypes.float8e4m3, has_bias=True,
+    )
+    tuning = dict(
+        mma_type="wgmma", block_shape=(16, 256, 128), warp_shape=(16, 32, 128),
+        num_stages=3, use_tma=True, use_warp_spec=True,
+        use_stream_k=use_stream_k, multi_cast_size_b=multicast,
+        use_tma_a=gemm_type != GemmType.INDEXED, use_tma_c=gemm_type != GemmType.INDEXED,
+    )
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    if multicast > 1:
+        with pytest.raises(AssertionError, match="B multicast requires dense GEMM"):
+            KernelTestRunner(case).run((1,))
+        return
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))
+
+
+@pytest.mark.parametrize("gemm_type", (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED))
+@pytest.mark.parametrize("a_dtype,b_dtype", (("float8e4m3", "float8e4m3"), ("bfloat16", "uint4")))
+@pytest.mark.parametrize("pad_k", (0, 128, 32))
+@pytest.mark.parametrize("use_stream_k", (False, True))
+def test_wgmma_tma_a_general_moe(gemm_type, a_dtype, b_dtype, pad_k, use_stream_k, monkeypatch):
+    skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
+    case = _case(
+        "wgmma-tma-a-general-moe", gemm_type, a_dtype=a_dtype, b_dtype=b_dtype,
+        shape_k=1024, pad_shape_k=pad_k, has_bias=True,
+    )
+    tuning = dict(
+        mma_type="wgmma", block_shape=(16, 128, 256),
+        warp_shape=(16, 32, 64 if a_dtype == "bfloat16" else 128),
+        num_stages=3, use_tma=True, use_warp_spec=True, use_stream_k=use_stream_k,
+    )
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))

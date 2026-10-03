@@ -189,9 +189,14 @@ public:
         uint32_t sub_row = (laneid % 4) * 2 + (laneid % 8) / 4;
         uint32_t row = warp_delta_row + 8 * col_8x8block + sub_row;
 
-        uint32_t count = (64 / WarpShape::N);
-        uint32_t col1 = ((n_warp_id % count * (8 / count) + row_8x8block) ^ ((sub_row + smem) % 8)) * 4 + laneid / 8;
-        uint32_t col2 = (n_warp_id / count) * (BlockShape::M / kNumWriteSplits * 64 / 2);
+        uint32_t output_warp = n_warp_id;
+        if constexpr (Ctx::kUseWgmmaSsNLayout) {
+          output_warp = ctx.wgmma_ss_n_tile(row_8x8block / 2);
+          row_8x8block %= 2;
+        }
+        constexpr uint32_t count = Ctx::kUseWgmmaSsNLayout ? 4 : (64 / WarpShape::N);
+        uint32_t col1 = ((output_warp % count * (8 / count) + row_8x8block) ^ ((sub_row + smem) % 8)) * 4 + laneid / 8;
+        uint32_t col2 = (output_warp / count) * (BlockShape::M / kNumWriteSplits * 64 / 2);
         uint32_t idx = row * 32 + col1 + col2;
         smem_half2_ptr[idx] = val_half2;
       }

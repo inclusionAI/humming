@@ -605,7 +605,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert not self.use_tma_as, "indexed GEMM does not support TMA input scale loads"
             assert not self.use_tma_as2, "indexed GEMM does not support TMA secondary input scale loads"
 
+        # The scheduler maps multicast CTAs along one axis. Across M, MoE
+        # clusters can cross expert boundaries and therefore cannot share B.
+        assert self.multi_cast_size_a == 1 or self.multi_cast_size_b == 1, (
+            "simultaneous A and B multicast is unsupported"
+        )
+        if self.multi_cast_size_b > 1:
+            assert self.gemm_type == GemmType.DENSE, "B multicast requires dense GEMM"
         if self.multi_cast_size_a * self.multi_cast_size_b > 1:
+            assert self.use_warp_spec, "multicast requires warp specialization"
             assert self.sm_version == 90 or self.sm_version // 10 in (10, 11)
 
         if self.use_tma_as:

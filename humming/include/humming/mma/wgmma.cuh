@@ -157,6 +157,10 @@ public:
         if constexpr (Ctx::kUseRawWeight) {
           constexpr uint32_t kSwizzleK = kSwizzleBytes * 8 / ElementB::kBits;
           uint32_t row = ctx.n_warp_id() / 4 * (WarpShape::N * 4) + j * MmaShape::N;
+          if constexpr (Ctx::kUseWgmmaTmaNPermute) {
+            constexpr uint32_t kFragmentPlaneRows = BlockShape::N / WarpShape::N * 16;
+            row = ctx.n_warp_id() / 4 * MmaShape::N + j * kFragmentPlaneRows;
+          }
           uint32_t col = ctx.k_warp_offset() + k_slab * kPartMmaShapeK;
           uint32_t offset = (col / kSwizzleK * BlockShape::N + row) * kSwizzleBytes;
           offset += col % kSwizzleK * ElementB::kBits / 8;

@@ -213,7 +213,7 @@ def test_raw_weight_backends(a_dtype, use_tma, block_k, monkeypatch):
             return dict(
                 mma_type=mma_type.value,
                 block_shape=(16, 128 if use_wgmma else 64, block_k),
-                warp_shape=(16, warp_n, block_k),
+                warp_shape=(16, warp_n, min(block_k, 128) if use_wgmma else block_k),
                 num_stages=3,
                 use_tma=use_tma,
                 use_stream_k=False,
@@ -308,3 +308,189 @@ def test_ordinary_repack_is_shared_with_sm90(weight_bits):
         transformed.append(transform_humming_tensors(config, tensors))
     for name in ("weight", "weight_scale"):
         torch.testing.assert_close(transformed[0][name], transformed[1][name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("a_dtype", ("float8e4m3", "int8"))
+@pytest.mark.parametrize("warp_n", (16, 32, 64))
+@pytest.mark.parametrize("transfer", ("sync", "cp_async", "ws_cp_async", "tma", "ws_tma"))
+def test_wgmma_raw_ss_layout(a_dtype, warp_n, transfer, monkeypatch):
+    """SS fragments must agree with channel scales, bias, and output layout."""
+    from humming.config import MmaType
+
+    skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
+    dtype = dtypes.DataType.from_str(a_dtype)
+    warp_k = 128
+    config = LayerConfig(
+        shape_n=256, shape_k=512, a_dtype=dtype, b_dtype=dtype,
+        c_dtype=dtypes.bfloat16, has_bias=True,
+    )
+    tuning = dict(
+        mma_type="wgmma", block_shape=(16, warp_n * 4, warp_k * 2),
+        warp_shape=(16, warp_n, warp_k), num_stages=3,
+        use_tma=transfer in ("tma", "ws_tma"),
+        use_cp_async=transfer != "sync", use_warp_spec=transfer in ("ws_cp_async", "ws_tma"),
+        use_stream_k=False,
+    )
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    case = KernelTestCase(
+        name=f"ss-{a_dtype}-{warp_n}-{transfer}", layer_config=config,
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE), seed=2026,
+    )
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert all(result.tuning_config.mma_type == MmaType.WGMMA for result in results)
+
+
+@pytest.mark.parametrize("mode", ("fp8_channel", "int8_channel", "group64", "group64_fp8", "block64"))
+@pytest.mark.parametrize("use_warp_spec", (False, True))
+@pytest.mark.parametrize(
+    "block_m,block_n,block_k,warp_n,use_stream_k",
+    ((16, 128, 256, 32, False), (16, 256, 128, 32, False),
+     (16, 512, 128, 64, False), (8, 128, 512, 32, True)),
+)
+def test_wgmma_cp_async_n_permute(
+    mode, use_warp_spec, block_m, block_n, block_k, warp_n, use_stream_k, monkeypatch,
+):
+    """Scatter N16 fragments without changing global scale or weight layouts."""
+    from humming.config import WeightScale2Type, WeightScaleType
+
+    dtype = "int8" if mode == "int8_channel" else "float8e4m3"
+    skip_if_unsupported(a_dtype=dtype, mma_type="wgmma")
+    has_group = mode in ("group64", "group64_fp8", "block64")
+    scale_values = {}
+    if mode == "group64_fp8":
+        scale_values.update(bs_dtype="float8e4m3", weight_scale_2_type=WeightScale2Type.CHANNEL)
+    elif mode == "block64":
+        scale_values.update(
+            bs_dtype="float32", weight_scale_type=WeightScaleType.BLOCK, weight_scale_group_size_n=64,
+        )
+    config = LayerConfig(
+        shape_n=1024, shape_k=2048, a_dtype=dtype, b_dtype=dtype,
+        c_dtype="bfloat16", has_bias=True,
+        input_scale_group_size=64 if has_group else 0,
+        weight_scale_group_size=64 if has_group else 0,
+        use_int_weight_scale=False, use_fused_e8m0_scale=False, **scale_values,
+    )
+    tuning = dict(
+        mma_type="wgmma", block_shape=(block_m, block_n, block_k),
+        warp_shape=(block_m, warp_n, 128), num_stages=3,
+        use_tma=False, use_cp_async=True, use_warp_spec=use_warp_spec, use_stream_k=use_stream_k,
+    )
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    case = KernelTestCase(
+        name=f"cp-async-n-permute-{mode}", layer_config=config,
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE), seed=2026,
+    )
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))
+
+
+@pytest.mark.parametrize("mode", ("fp8_channel", "int8_channel", "group64", "group64_fp8", "block64"))
+@pytest.mark.parametrize("use_warp_spec", (False, True))
+@pytest.mark.parametrize("multicast", (1, 2, 4))
+@pytest.mark.parametrize(
+    "block_m,block_n,block_k,warp_n",
+    ((16, 256, 256, 32), (16, 512, 128, 64), (8, 128, 512, 32), (16, 128, 256, 16)),
+)
+def test_wgmma_tma_b_general(
+    mode, use_warp_spec, multicast, block_m, block_n, block_k, warp_n, monkeypatch,
+):
+    """One B TMA covers all K slabs and N warpgroups, including multicast."""
+    from humming.config import WeightScale2Type, WeightScaleType
+
+    dtype = "int8" if mode == "int8_channel" else "float8e4m3"
+    skip_if_unsupported(a_dtype=dtype, mma_type="wgmma")
+    has_group = mode in ("group64", "group64_fp8", "block64")
+    scale_values = {}
+    if mode == "group64_fp8":
+        scale_values.update(bs_dtype="float8e4m3", weight_scale_2_type=WeightScale2Type.CHANNEL)
+    elif mode == "block64":
+        scale_values.update(
+            bs_dtype="float32", weight_scale_type=WeightScaleType.BLOCK, weight_scale_group_size_n=64,
+        )
+    config = LayerConfig(
+        shape_n=1024, shape_k=2048, a_dtype=dtype, b_dtype=dtype, c_dtype="bfloat16", has_bias=True,
+        input_scale_group_size=64 if has_group else 0, weight_scale_group_size=64 if has_group else 0,
+        use_int_weight_scale=False, use_fused_e8m0_scale=False, **scale_values,
+    )
+    tuning = dict(
+        mma_type="wgmma", block_shape=(block_m, block_n, block_k),
+        warp_shape=(block_m, warp_n, 128), num_stages=3, use_tma=True,
+        use_warp_spec=use_warp_spec, use_stream_k=False, multi_cast_size_b=multicast,
+    )
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    case = KernelTestCase(
+        name=f"tma-b-general-{mode}", layer_config=config,
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE), seed=2026,
+    )
+    if multicast > 1 and not use_warp_spec:
+        with pytest.raises(AssertionError, match="multicast requires warp specialization"):
+            KernelTestRunner(case).run((1,))
+        return
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))
+
+
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype",
+    (("float8e4m3", "float8e4m3"), ("int8", "int8"), ("float16", "uint4"), ("bfloat16", "uint4")),
+)
+@pytest.mark.parametrize("shape_k", (2048, 1920, 1984, 2016))
+@pytest.mark.parametrize("multicast", (1, 2, 4))
+@pytest.mark.parametrize("use_warp_spec", (False, True))
+def test_wgmma_tma_a_general(a_dtype, b_dtype, shape_k, multicast, use_warp_spec, monkeypatch):
+    """Cover 8/16-bit slabs, aligned padding and the partial-slab fallback."""
+    skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
+    is_16bit = a_dtype in ("float16", "bfloat16")
+    tuning = dict(
+        mma_type="wgmma", block_shape=(16, 128, 256),
+        warp_shape=(16, 32, 64 if is_16bit else 128), num_stages=3,
+        use_tma=True, use_warp_spec=use_warp_spec, use_stream_k=False,
+        multi_cast_size_a=multicast,
+    )
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    case = KernelTestCase(
+        name="tma-a-general", seed=2026,
+        layer_config=LayerConfig(
+            shape_n=1024, shape_k=2048, pad_shape_k=2048 - shape_k, a_dtype=a_dtype, b_dtype=b_dtype,
+            c_dtype=a_dtype if is_16bit else "bfloat16", has_bias=True,
+            use_int_weight_scale=False, use_fused_e8m0_scale=False,
+        ),
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+    )
+    if multicast > 1 and not use_warp_spec:
+        with pytest.raises(AssertionError, match="multicast requires warp specialization"):
+            KernelTestRunner(case).run((1,))
+        return
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))
+
+
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype,block_k",
+    (("float16", "uint4", 128), ("bfloat16", "uint4", 512),
+     ("float8e4m3", "uint4", 256), ("int8", "uint4", 256),
+     ("float8e4m3", "float8e4m3", 64), ("float16", "uint4", 64)),
+)
+@pytest.mark.parametrize("use_warp_spec", (False, True))
+def test_wgmma_tma_a_general_geometry(a_dtype, b_dtype, block_k, use_warp_spec, monkeypatch):
+    if block_k == 512 and use_warp_spec:
+        pytest.skip("16-bit BlockK512 already uses 1024 math threads; no room for producer warps")
+    skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
+    is_16bit = a_dtype in ("float16", "bfloat16")
+    tuning = dict(
+        mma_type="wgmma", block_shape=(16, 128, block_k),
+        warp_shape=(16, 32, min(block_k, 64 if is_16bit else 128)),
+        num_stages=3, use_tma=True, use_warp_spec=use_warp_spec, use_stream_k=False,
+    )
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    case = KernelTestCase(
+        name="tma-a-general-geometry", seed=2026,
+        layer_config=LayerConfig(
+            shape_n=512, shape_k=1024, a_dtype=a_dtype, b_dtype=b_dtype,
+            c_dtype=a_dtype if is_16bit else "bfloat16", has_bias=True,
+            weight_scale_group_size=64, use_int_weight_scale=False, use_fused_e8m0_scale=False,
+        ),
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+    )
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))

@@ -511,7 +511,8 @@ public:
     constexpr bool kApplyGroupInputScaleOnC = kIsGroupInputScale;
     if constexpr (kUseFusedE8m0Scale && !kApplyGroupInputScaleOnC) return;
 
-    may_process_as_and_bs_before_apply_on_c(m, 0, k, iter_id);
+    if constexpr (!(Ctx::kUseWgmmaSsNLayout && kIsBlockWeightScale))
+      may_process_as_and_bs_before_apply_on_c(m, 0, k, iter_id);
 
     uint32_t buffer_id = iter_id % 2;
     uint32_t k_index, is_last_iter;
@@ -537,7 +538,29 @@ public:
       uint32_t inner_n = index / 2;
       uint32_t inner_m = index % 2;
 
-      if constexpr (kIsF16Accum) {
+      if constexpr (Ctx::kUseWgmmaSsNLayout && kIsBlockWeightScale) {
+        // SS fragments can cross N scale blocks within one warp. Keep each
+        // fragment's scale separate instead of folding one scale into AS.
+        float weight_scale = reinterpret_cast<float *>(bs[buffer_id])[m];
+        float2 input_scale = {1.0f, 1.0f};
+        if constexpr (kApplyGroupInputScaleOnC)
+          input_scale = reinterpret_cast<float2 *>(as[buffer_id])[inner_n];
+        float2 scale = {input_scale.x * weight_scale, input_scale.y * weight_scale};
+        if constexpr (kIsF16Accum) {
+          scalar_t2 partial = reinterpret_cast<scalar_t2 *>(regs_c[0][m][0])[index];
+          scalar_t2 &final = reinterpret_cast<scalar_t2 *>(regs_c[1][m][0])[index];
+          final = __hfma2(partial, this->float22num2(scale), final);
+        } else {
+          float2 partial;
+          if constexpr (std::is_same<ValTypeC, int32_t>::value) {
+            int2 values = reinterpret_cast<int2 *>(regs_c[0][m][0])[index];
+            partial = {__int2float_rn(values.x), __int2float_rn(values.y)};
+          } else partial = reinterpret_cast<float2 *>(regs_c[0][m][0])[index];
+          float2 &final = reinterpret_cast<float2 *>(regs_c[1][m][0])[index];
+          final.x += partial.x * scale.x;
+          final.y += partial.y * scale.y;
+        }
+      } else if constexpr (kIsF16Accum) {
         scalar_t2 &part_regs_c0 = reinterpret_cast<scalar_t2 *>(regs_c[0][m][0])[index];
         scalar_t2 &part_regs_c1 = reinterpret_cast<scalar_t2 *>(regs_c[1][delta_m + m][0])[index];
 

@@ -291,6 +291,7 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getUint32("BLOCK_SHAPE_M"),
       reader.getUint32("BLOCK_SHAPE_N"),
       reader.getUint32("BLOCK_SHAPE_K"),
+      reader.getUint32("WARP_SHAPE_N"),
       reader.getUint32("PAD_SHAPE_N"),
       reader.getUint32("PAD_SHAPE_K"),
       reader.getUint32("NUM_EXPERTS"),

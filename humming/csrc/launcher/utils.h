@@ -126,6 +126,7 @@ struct KernelData {
   uint32_t block_shape_m;
   uint32_t block_shape_n;
   uint32_t block_shape_k;
+  uint32_t warp_shape_n;
   uint32_t pad_shape_n;
   uint32_t pad_shape_k;
   uint32_t num_experts;

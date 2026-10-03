@@ -65,7 +65,9 @@ public:
 
   CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {
-    if constexpr (Ctx::kUsePackedKLayout && kUseFusedE8m0Scale) {
+    if constexpr (Ctx::kUseWgmmaSsNLayout && !kIsBlock) {
+      load_wgmma_ss(smem_ptr, regs_ptr, iter_id);
+    } else if constexpr (Ctx::kUsePackedKLayout && kUseFusedE8m0Scale) {
       load_packed_k(smem_ptr, regs_ptr, iter_id);
     } else if constexpr (kIsBlock) {
       load_block(smem_ptr, regs_ptr, iter_id);
@@ -75,6 +77,26 @@ public:
       load_layout2(smem_ptr, regs_ptr, iter_id);
     } else {
       load_layout1(smem_ptr, regs_ptr, iter_id);
+    }
+  }
+
+  CUDA_INLINE
+  void load_wgmma_ss(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {
+    constexpr uint32_t kScalesPerFragment = kIsChannel ? 4 : 2;
+    using LoadType = typename LoadTypeChooser<kScalesPerFragment * ElementBS::kBits / 8>::Type;
+    const LoadType *source = reinterpret_cast<const LoadType *>(smem_ptr);
+    LoadType *destination = reinterpret_cast<LoadType *>(regs_ptr);
+    PRAGMA_UNROLL
+    for (uint32_t j = 0; j < WarpShape::N / 16; ++j) {
+      uint32_t tile = ctx.wgmma_ss_n_tile(j);
+      uint32_t offset;
+      if constexpr (kIsChannel)
+        offset = tile / 2 * 8 + ctx.lane_id() / 8 * 2 + tile % 2;
+      else
+        offset = tile / 4 * 32 + ctx.lane_id() / 4 * 4 + tile % 4;
+      if constexpr (!kIsChannel && kGroupSize < BlockShape::K)
+        offset += (ctx.k_warp_offset() + iter_id * kPartMmaShapeK) / kGroupSize * BlockShape::N / kScalesPerFragment;
+      destination[j] = source[offset];
     }
   }
 
@@ -102,6 +124,14 @@ public:
   void load_block(const int4 *smem_ptr, uint32_t *regs_ptr, int32_t iter_id) {
     static_assert(kGroupSizeN >= 64);
 
+    if constexpr (Ctx::kUseWgmmaSsNLayout) {
+      uint32_t group = (ctx.k_warp_offset() + iter_id * kPartMmaShapeK) / kGroupSize;
+      const uint32_t *source = reinterpret_cast<const uint32_t *>(smem_ptr);
+      PRAGMA_UNROLL
+      for (uint32_t j = 0; j < WarpShape::N / 16; ++j)
+        regs_ptr[j] = source[group * CEIL_DIV(BlockShape::N, kGroupSizeN) + ctx.wgmma_ss_n_tile(j) * 16 / kGroupSizeN];
+      return;
+    }
     uint32_t index = ctx.n_warp_offset() / kGroupSizeN;
     if constexpr (BlockShape::K >= kGroupSize) {
       uint32_t k_index = ctx.k_warp_offset() + iter_id * kPartMmaShapeK;
