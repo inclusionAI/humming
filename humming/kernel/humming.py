@@ -475,9 +475,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.gemm_type is None and self.num_experts == 0:
             self.gemm_type = GemmType.DENSE
         if self.mma_type != MmaType.UMMA:
-            assert self.umma_cta_group_size == 1 and self.umma_output_chunk_rows == 0, (
-                "UMMA cooperative execution and chunked output require mma_type=umma"
-            )
+            assert self.umma_cta_group_size == 1, "UMMA cooperative execution requires mma_type=umma"
         if self.use_umma_ss:
             assert self.use_tma_b, "SS weight operands require TMA loading"
         if self.mma_type == MmaType.UMMA:
@@ -542,14 +540,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert block_k * self.a_dtype.num_bits >= 512, (
                 "UMMA requires at least 64 bytes per activation row"
             )
-            assert self.num_write_splits == 1, "UMMA requires num_write_splits == 1"
             assert self.num_stages >= 2
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
             assert self.umma_cta_group_size in (1, 2)
-            assert self.umma_output_chunk_rows in (0, 32)
             if self.umma_cta_group_size == 2:
                 assert block_m % 16 == 0, "two-CTA UMMA requires block M divisible by 16"
-                assert self.umma_output_chunk_rows == 32
                 assert self.problem_shape[1] % (2 * block_n) == 0
                 assert self.num_ctas_per_sm == 1
 

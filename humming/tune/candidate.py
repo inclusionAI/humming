@@ -466,7 +466,7 @@ def _analyze_resources(
         smem_reuse_mode=schedule.smem_reuse_mode,
         use_mbarrier=schedule.use_mbarrier,
         use_warp_spec=schedule.use_warp_spec,
-        num_write_splits=1,
+        output_chunk_rows=0,
         mma_accum_bits=16 if problem.use_f16_accum else 32,
     )
     if smem_size > problem.device.max_smem_size:

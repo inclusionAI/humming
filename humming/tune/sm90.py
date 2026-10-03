@@ -196,7 +196,7 @@ class Sm90Heuristics(DeviceHeuristics):
                 smem_reuse_mode=config.get("smem_reuse_mode", "all_stages"),
                 use_mbarrier=config.get("use_mbarrier", False),
                 use_warp_spec=config.get("use_warp_spec", False),
-                num_write_splits=config.get("num_write_splits", 1),
+                output_chunk_rows=config.get("output_chunk_rows", 0),
                 mma_accum_bits=16 if use_f16_accum else 32,
             )
             if smem_size <= cls.max_smem_size:

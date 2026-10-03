@@ -20,7 +20,7 @@ private:
 
   static constexpr bool kIsGroupedGemm = Ctx::kIsGroupedGemm;
   static constexpr bool kHasTensorInputScale = Ctx::kIsTensorInputScale || Ctx::kIsTensorInputScale2;
-  static constexpr uint32_t kNumWriteSplits = Ctx::kNumWriteSplits;
+  static constexpr uint32_t kOutputRows = SharedStorage::kOutputRows;
 
 public:
   Ctx &ctx;
@@ -39,7 +39,7 @@ public:
       : ctx(ctx), locks(ctx.params.locks), arith(arith),
         smem_reducer(ctx), smem_writer(ctx, arith), gmem_writer(ctx, arith) {
     if constexpr (Ctx::kUseTmaC) {
-      if constexpr (kIsGroupedGemm) {
+      if constexpr (SharedStorage::kUseDynamicOutputMap) {
         gmem_writer.update_tensor_map_ptr(ctx.params.tensor_map_buffer + blockIdx.x);
       } else if constexpr (!Ctx::kUseWarpSpec) {
         if (threadIdx.x == 0) prefetch_tensor_map(ctx.params.c);
@@ -52,23 +52,25 @@ public:
   void call(uint32_t *regs_c_ptr) {
     ctx.sync_math_threads();
     if constexpr (BlockShape::K > WarpShape::K) smem_reducer.reduce(regs_c_ptr);
-    static_assert(kNumWriteSplits == 1 || kNumWriteSplits == 2);
-    if constexpr (kNumWriteSplits > 1) {
-      static_assert(BlockShape::M == WarpShape::M);
-      static_assert(BlockShape::M % 32 == 0);
-      static_assert(!Ctx::kUseTmaC);
-    }
-
     if (slice_count > 1) acquire_gmem_barrier();
     PRAGMA_UNROLL
-    for (uint32_t i = 0; i < kNumWriteSplits; i++) {
-      smem_writer.write(regs_c_ptr, slice_count, i);
+    for (uint32_t first_row = 0; first_row < BlockShape::M; first_row += kOutputRows) {
+      smem_writer.write(regs_c_ptr, slice_count, first_row);
       if constexpr (Ctx::kUseTmaC) {
         if (ctx.is_math_thread()) tma_fence_async_shared();
       }
       ctx.sync_math_threads();
-      gmem_writer.write(slice_id, slice_count, i);
+      if constexpr (Ctx::kOutputChunkRows) {
+        gmem_writer.write_chunk(slice_id, slice_count, first_row, MIN(kOutputRows, BlockShape::M - first_row), 0);
+        // This path reuses one buffer. Wait before the next chunk overwrites it.
+        if constexpr (Ctx::kUseTmaC) tma_wait_store_group<0, true>();
+      } else {
+        gmem_writer.write(slice_id, slice_count, 0);
+      }
       ctx.sync_math_threads();
+    }
+    if constexpr (Ctx::kOutputChunkRows && Ctx::kUseTmaC && Ctx::kUseStreamK) {
+      if (slice_count > 1 && slice_id != slice_count - 1) tma_wait_store_group<0>();
     }
     if (slice_count > 1) release_gmem_barrier();
   }

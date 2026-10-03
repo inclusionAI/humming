@@ -79,7 +79,7 @@ class DeviceHeuristics:
         warp_shape_m, warp_shape_n, warp_shape_k = config["warp_shape"]
         num_ctas_per_sm = config.get("num_ctas_per_sm", 1)
         num_stages = config.get("num_stages", 3 if cls.sm_version != 75 else 2)
-        num_write_splits = config.get("num_write_splits", 1)
+        output_chunk_rows = config.get("output_chunk_rows", 0)
         num_warps_m = block_shape_m // warp_shape_m
 
         # 2. block_shape_m and warp_shape_m
@@ -265,9 +265,6 @@ class DeviceHeuristics:
             factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
             num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
 
-        if num_write_splits > 1 and (block_shape_m != warp_shape_m or block_shape_m % 32):
-            num_write_splits = 1
-
         return {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
@@ -276,7 +273,7 @@ class DeviceHeuristics:
             "num_sms": num_sms,
             "num_stages": num_stages,
             "num_ctas_per_sm": num_ctas_per_sm,
-            "num_write_splits": num_write_splits,
+            "output_chunk_rows": output_chunk_rows,
             "use_pdl": cls.sm_version >= 90,
         }
 

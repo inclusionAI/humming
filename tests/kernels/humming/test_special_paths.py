@@ -333,3 +333,69 @@ def test_packed_k_geometry(
     )
     results = KernelTestRunner(case).run(shape_ms=[17, 257])
     assert_kernel_test_shape_coverage(results, [17, 257])
+
+
+@pytest.mark.parametrize(
+    "mma_type,block_m,chunk_rows,shape_n,gemm_type,use_tma,cta_group_size",
+    (
+        ("mma", 128, 96, 512, GemmType.DENSE, True, 1),
+        ("mma", 128, 96, 504, GemmType.DENSE, True, 1),
+        ("mma", 64, 32, 512, GemmType.INDEXED, False, 1),
+        ("mma", 128, 96, 512, GemmType.GROUPED_CONTIGUOUS, True, 1),
+        ("mma", 128, 96, 504, GemmType.GROUPED_MASKED, True, 1),
+        ("mma", 64, 128, 512, GemmType.DENSE, True, 1),
+        ("wgmma", 128, 96, 512, GemmType.DENSE, True, 1),
+        ("wgmma", 128, 96, 504, GemmType.GROUPED_CONTIGUOUS, True, 1),
+        ("umma", 48, 32, 512, GemmType.DENSE, True, 2),
+        ("umma", 80, 64, 504, GemmType.DENSE, True, 1),
+        ("umma", 80, 64, 512, GemmType.GROUPED_CONTIGUOUS, True, 1),
+        ("umma", 48, 32, 504, GemmType.GROUPED_MASKED, True, 2),
+        ("umma", 80, 64, 512, GemmType.INDEXED, False, 1),
+        ("umma", 24, 64, 512, GemmType.DENSE, True, 1),
+        ("umma", 48, 0, 512, GemmType.GROUPED_CONTIGUOUS, True, 2),
+        ("umma", 128, 96, 512, GemmType.DENSE, True, 2),
+    ),
+)
+def test_output_chunk_rows(
+    mma_type, block_m, chunk_rows, shape_n, gemm_type, use_tma, cta_group_size, monkeypatch
+):
+    """Cover N slab stores, descriptor bounds, buffer reuse, scatter, and K reduction."""
+    skip_if_unsupported(a_dtype=dtypes.bfloat16, mma_type=mma_type, use_tma=use_tma)
+    layer = LayerConfig(
+        shape_n=512,
+        pad_shape_n=512 - shape_n,
+        shape_k=1024,
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.uint4,
+        c_dtype=dtypes.bfloat16,
+        weight_scale_group_size=128,
+        has_bias=True,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+    )
+    if mma_type == "umma" and not layer.is_umma_supported:
+        pytest.skip("UMMA requires SM10x or SM11x")
+    is_umma = mma_type == "umma"
+    config = dict(
+        mma_type=mma_type,
+        block_shape=(block_m, 256, 128),
+        warp_shape=(block_m if is_umma else 64, 32 if is_umma else 64, 128 if is_umma else 64),
+        num_stages=3,
+        num_sms=6,
+        num_ctas_per_sm=1,
+        use_tma=use_tma,
+        use_stream_k=True,
+        smem_reuse_mode="none",
+        umma_cta_group_size=cta_group_size,
+        output_chunk_rows=chunk_rows,
+    )
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: config)
+    case = KernelTestCase(
+        name="output-chunk-rows",
+        layer_config=layer,
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        seed=2026,
+    )
+    shape_ms = (17, 13 * block_m + 1)
+    results = KernelTestRunner(case).run(shape_ms)
+    assert_kernel_test_shape_coverage(results, shape_ms)

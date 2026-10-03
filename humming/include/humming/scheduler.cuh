@@ -85,11 +85,6 @@ public:
   CUDA_INLINE
   Scheduler(Ctx &ctx) : ctx(ctx) {
 
-    if constexpr (kIsGroupedGemm && Ctx::kUseTmaC) {
-      if (threadIdx.x == 0) ctx.smem.tensor_map_buffer[0] = reinterpret_cast<const CUtensorMap *>(ctx.params.c)[0];
-      __syncwarp();
-    }
-
     current_shape_m = ctx.params.shape_m;
     expert_max_num_tokens = ctx.params.shape_m / Ctx::kNumExperts;
     calc_m_blocks();
@@ -334,7 +329,6 @@ public:
                  (m_block_id - first_block) * BlockShape::M;
       current_shape_m = ctx.smem.expert_offset[expert_id] +
                         ctx.smem.expert_tokens[expert_id];
-      if (old_expert_id != expert_id) update_tensor_map_c();
       old_expert_id = expert_id;
       return;
     }
@@ -376,7 +370,6 @@ public:
       current_shape_m = ctx.smem.expert_offset[expert_id] + current_expert_num_tokens;
     }
 
-    if (old_expert_id != expert_id) update_tensor_map_c();
     old_expert_id = expert_id;
   };
 
@@ -410,21 +403,4 @@ public:
 
     ctx.sync_load_threads();
   };
-
-  CUDA_INLINE
-  void update_tensor_map_c() {
-    if constexpr (kIsGroupedGemm && Ctx::kUseTmaC) {
-      if (ctx.math_thread_id() < 32 && ctx.is_math_thread()) {
-        tma_wait_store_group<0>();
-        __syncwarp();
-        if (ctx.math_thread_id() == 0) {
-          tensor_map_replace_global_dim<1>(ctx.smem.tensor_map_buffer, current_shape_m);
-          ctx.params.tensor_map_buffer[blockIdx.x] = ctx.smem.tensor_map_buffer[0];
-          tensor_map_release_cta();
-          tensor_map_acquire_cta(ctx.params.tensor_map_buffer + blockIdx.x);
-        }
-        __syncwarp();
-      }
-    }
-  }
 };

@@ -4,7 +4,8 @@ AlwaysBreakTemplateDeclarations: Yes
 ConstructorInitializerAllOnOneLineOrOnePerLine: false
 BreakConstructorInitializers: BeforeColon
 MaxEmptyLinesToKeep: 2
-AlignAfterOpenBracket: Align
+AlignAfterOpenBracket: DontAlign
+ContinuationIndentWidth: 4
 ExperimentalAutoDetectBinPacking: false
 IndentCaseLabels: true
 

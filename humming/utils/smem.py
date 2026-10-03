@@ -121,12 +121,12 @@ def estimate_smem_size_layer(
     smem_reuse_mode: SmemReuseMode | str | None = None,
     use_mbarrier: bool = False,
     use_warp_spec: bool = False,
+    use_tma_c: bool = False,
     raster_group_m: int = 1,
-    num_write_splits: int = 1,
     mma_accum_bits: int = 32,
     mma_type: MmaType | str = MmaType.MMA,
     umma_cta_group_size: int = 1,
-    umma_output_chunk_rows: int = 0,
+    output_chunk_rows: int = 0,
 ) -> int:
     mma_type = MmaType(mma_type)
     if smem_reuse_mode is None:
@@ -183,8 +183,9 @@ def estimate_smem_size_layer(
         m_warps = block_m // warp_shape[0]
         reduce_buffers = n_warps_k - 1 if n_warps_k <= 4 else n_warps_k // 2
         warp_reduce = m_warps * 16 * block_n * mma_accum_bits // 128 * reduce_buffers
-    output_rows = 2 * umma_output_chunk_rows if umma_output_chunk_rows else block_m
-    block_output = output_rows * block_n // 2 // 4 // max(1, num_write_splits)
+    output_rows = min(output_chunk_rows, block_m) if output_chunk_rows else block_m
+    output_buffers = 2 if mma_type == MmaType.UMMA and output_chunk_rows else 1
+    block_output = output_buffers * output_rows * block_n // 8
     reduce_bytes = max(warp_reduce, block_output) * _INT4
 
     skipped_stages = {
@@ -206,8 +207,10 @@ def estimate_smem_size_layer(
     if gemm_type == GemmType.INDEXED:
         row_index_buffers = 4 if use_warp_spec else 2
         add(block_m * 4 * row_index_buffers, 4)
-    elif gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED):
+    is_grouped = gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED)
+    if is_grouped or (use_tma_c and block_m % output_rows != 0):
         add(128, 64)  # tensor_map_buffer[1] (CUtensorMap)
+    if is_grouped:
         add(layer_config.num_experts * 4, 4)  # expert_tokens
         if gemm_type == GemmType.GROUPED_CONTIGUOUS and raster_group_m > 1:
             add((layer_config.num_experts + 1) * 4, 4)  # expert_m_block_offset
@@ -255,11 +258,11 @@ def estimate_smem_size_config(
         smem_reuse_mode=tuning_config.smem_reuse_mode,
         use_mbarrier=bool(tuning_config.use_mbarrier),
         use_warp_spec=bool(tuning_config.use_warp_spec),
+        use_tma_c=bool(tuning_config.use_tma_c),
         raster_group_m=tuning_config.raster_group_m,
-        num_write_splits=tuning_config.num_write_splits,
         mma_accum_bits=16 if compute_config.use_f16_accum else 32,
         umma_cta_group_size=tuning_config.umma_cta_group_size,
-        umma_output_chunk_rows=tuning_config.umma_output_chunk_rows,
+        output_chunk_rows=tuning_config.output_chunk_rows,
     )
 
 

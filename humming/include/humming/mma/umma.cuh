@@ -49,7 +49,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
       kAvailableGroupColumns > kAccumulatorColumn + kAccumulatorStorageColumns
           ? kAvailableGroupColumns - kAccumulatorColumn - kAccumulatorStorageColumns
           : 0;
-  static constexpr bool kCanOverlapAccumulators = Ctx::kUseUmmaSs && Ctx::kUmmaOutputChunkRows != 0 &&
+  static constexpr bool kCanOverlapAccumulators = Ctx::kUseUmmaSs && Ctx::kOutputChunkRows == 32 &&
                                                   Ctx::kSmemReuseMode == SmemReuseMode::NONE;
   static constexpr uint32_t kAccumulatorStride = kCanOverlapAccumulators
                                                      ? MIN(WarpShape::M, kSpareAccumulatorColumns) / 32 * 32

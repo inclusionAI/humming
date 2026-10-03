@@ -320,7 +320,7 @@ class Sm120Heuristics(Sm89Heuristics):
                 smem_reuse_mode=candidate.get("smem_reuse_mode", "all_stages"),
                 use_mbarrier=True,
                 use_warp_spec=candidate.get("use_warp_spec", False),
-                num_write_splits=candidate.get("num_write_splits", 1),
+                output_chunk_rows=candidate.get("output_chunk_rows", 0),
             )
             if smem <= cls.max_smem_size:
                 candidate["num_stages"] = num_stages
@@ -370,7 +370,7 @@ class Sm120Heuristics(Sm89Heuristics):
                 smem_reuse_mode=smem_reuse_mode,
                 use_mbarrier=True,
                 use_warp_spec=config["use_warp_spec"],
-                num_write_splits=config.get("num_write_splits", 1),
+                output_chunk_rows=config.get("output_chunk_rows", 0),
             )
             if smem <= cls.max_smem_size:
                 best = num_stages

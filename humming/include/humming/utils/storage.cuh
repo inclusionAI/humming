@@ -148,14 +148,16 @@ public:
   static constexpr uint32_t kNumExperts = LayerConfig::kNumExperts;
   static constexpr uint32_t kNumStages = TuningConfig::kNumStages;
   static constexpr uint32_t kNumMathMbarriers = kNumStages + 1;
-  static constexpr uint32_t kNumWriteSplits = TuningConfig::kNumWriteSplits;
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kNumWarpsDimK = BlockShape::K / WarpShape::K;
   static constexpr uint32_t kMmaCTypeBits = MmaOpClass::kCTypeBits;
   static constexpr uint32_t M_WARPS = (BlockShape::M / WarpShape::M);
   static constexpr uint32_t kWarpReduceBuffers = kNumWarpsDimK <= 4 ? kNumWarpsDimK - 1 : kNumWarpsDimK / 2;
   static constexpr uint32_t kWarpReduceSize = M_WARPS * 16 * BlockShape::N * kMmaCTypeBits / 128 * kWarpReduceBuffers;
-  static constexpr uint32_t kBlockOutputSize = (TuningConfig::kUmmaOutputChunkRows ? 2 * TuningConfig::kUmmaOutputChunkRows : BlockShape::M) * BlockShape::N / 2 / 4 / kNumWriteSplits;
+  static constexpr uint32_t kOutputRows = TuningConfig::kOutputChunkRows ? MIN(TuningConfig::kOutputChunkRows, BlockShape::M) : BlockShape::M;
+  static constexpr bool kUseDynamicOutputMap = TuningConfig::kUseTmaC && (kIsGroupedGemm || BlockShape::M % kOutputRows != 0);
+  static constexpr uint32_t kOutputBuffers = TuningConfig::kMmaType == MmaType::UMMA && TuningConfig::kOutputChunkRows ? 2 : 1;
+  static constexpr uint32_t kBlockOutputSize = kOutputBuffers * kOutputRows * BlockShape::N / 8;
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
 
   static constexpr uint32_t kSmemStrideA = BlockShape::K * ElementA::kBits / 32 / 4;
@@ -259,7 +261,9 @@ public:
   IF_IS_INDEXED_GEMM(uint32_t wr_row_index_next[BlockShape::M];)
 #endif
 
-  IF_IS_GROUPED_GEMM(CUtensorMap tensor_map_buffer[1];)
+#if HUMMING_IS_GROUPED_GEMM || (HUMMING_USE_TMA_C && HUMMING_OUTPUT_CHUNK_ROWS > 0 && HUMMING_BLOCK_SHAPE_M % HUMMING_OUTPUT_CHUNK_ROWS != 0 && HUMMING_OUTPUT_CHUNK_ROWS < HUMMING_BLOCK_SHAPE_M)
+  CUtensorMap tensor_map_buffer[1];
+#endif
   IF_IS_GROUPED_GEMM(uint32_t expert_tokens[kNumExperts];)
   IF_USE_GROUPED_RASTER(uint32_t expert_m_block_offset[kNumExperts + 1];)
   IF_IS_GROUPED_GEMM(uint32_t total_m_blocks[1];)

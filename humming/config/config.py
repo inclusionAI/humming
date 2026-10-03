@@ -519,7 +519,7 @@ class TuningConfig(BaseHummingConfig):
     num_ctas_per_sm: int = 1
     umma_num_dequant_warpgroups: int = 1
     umma_cta_group_size: int = 1
-    umma_output_chunk_rows: int = 0
+    output_chunk_rows: int = 0
 
     use_warp_spec: bool | None = None
     use_mbarrier: bool | None = None
@@ -538,7 +538,6 @@ class TuningConfig(BaseHummingConfig):
 
     smem_reuse_mode: SmemReuseMode | str | None = None
 
-    num_write_splits: int = 1
     multi_cast_size_a: int = 1
     multi_cast_size_b: int = 1
 
@@ -595,6 +594,9 @@ class TuningConfig(BaseHummingConfig):
                 self.smem_reuse_mode = SmemReuseMode.NONE
         self.smem_reuse_mode = SmemReuseMode(self.smem_reuse_mode)
         assert self.block_shape[0] <= 256
+        assert 0 <= self.output_chunk_rows <= 256 and self.output_chunk_rows % 32 == 0, (
+            "output_chunk_rows must be 0 or a multiple of 32 up to 256"
+        )
         if self.use_warp_spec is None:
             self.use_warp_spec = False
 

@@ -248,6 +248,18 @@ CUDA_INLINE void tma_reduce_add_2d(void *smem_ptr, const void *desc_ptr, uint32_
                : "memory");
 }
 
+CUDA_INLINE void tma_store_3d(void *smem_ptr, const void *desc_ptr, uint32_t crd0, uint32_t crd1, uint32_t crd2) {
+  uint64_t descriptor = reinterpret_cast<uint64_t>(desc_ptr);
+  uint32_t smem = cast_smem_ptr_to_uint(smem_ptr);
+  asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group [%0, {%2, %3, %4}], [%1];" ::"l"(descriptor), "r"(smem), "r"(crd0), "r"(crd1), "r"(crd2) : "memory");
+}
+
+CUDA_INLINE void tma_reduce_add_3d(void *smem_ptr, const void *desc_ptr, uint32_t crd0, uint32_t crd1, uint32_t crd2) {
+  uint64_t descriptor = reinterpret_cast<uint64_t>(desc_ptr);
+  uint32_t smem = cast_smem_ptr_to_uint(smem_ptr);
+  asm volatile("cp.reduce.async.bulk.tensor.3d.global.shared::cta.add.bulk_group [%0, {%2, %3, %4}], [%1];" ::"l"(descriptor), "r"(smem), "r"(crd0), "r"(crd1), "r"(crd2) : "memory");
+}
+
 CUDA_INLINE void tma_expect_tx(void *mbar_ptr, uint32_t bytes) {
   uint32_t smem_int_ptr = cast_smem_ptr_to_uint(mbar_ptr);
   asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"

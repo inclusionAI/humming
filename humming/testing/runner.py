@@ -105,7 +105,7 @@ class KernelTestRunner:
         if tuning_source == "batch_invariant":
             self.compute_config = dataclasses.replace(self.compute_config, use_batch_invariant=True)
 
-        if get_default_mma_type(self.layer_config) == MmaType.WGMMA:
+        if tuning_source != "sampled" and get_default_mma_type(self.layer_config) == MmaType.WGMMA:
             min_warp_shape_n = 32 if self.layer_config.a_dtype.num_bits == 16 else 16
             if self.layer_config.shape_n % (min_warp_shape_n * 4):
                 import pytest

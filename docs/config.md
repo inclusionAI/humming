@@ -62,12 +62,12 @@ the scale warp can prepare AS before those operands finish loading. Indexed SS
 keeps all activation-loading threads on cp.async and tracks TMA weight completion
 separately, so scale preparation can overlap B/BS loading.
 
-With chunked output, separate output storage and non-indexed scheduling, SS
+With 32-row chunked output, separate output storage and non-indexed scheduling, SS
 uses the available TMEM capacity for an overlapping accumulator pair. The
 epilogue reads overlapping rows first so the next tile can begin computing.
 Native FP4 SS stages whose K size is a multiple of 256 use K64+96+96 issues
 per 256 elements. Other stage sizes retain the standard instruction shape.
-Indexed SS also overlaps chunked output with the next accumulator tile; row-index
+Indexed SS also overlaps 32-row chunked output with the next accumulator tile; row-index
 buffers are released separately after output scatter finishes. MoE selection
 accounts for SS's single scale buffer, chunked output, and cooperative CTA pairs.
 It retains whole-tile output for small M tiles and uses sampled expert sizes and
@@ -155,8 +155,7 @@ advances. A value of 1 uses the existing forward warp scan without the prefix ta
 | `use_cp_async` | Whether to use CP Async. Requires SM80+. |
 | `num_ctas_per_sm` | Number of CTAs (Cooperative Thread Arrays / Thread Blocks) launched per SM. |
 | `umma_cta_group_size` | `1` (default) or `2`. With `2`, a cluster of two CTAs cooperatively executes UMMA for adjacent N tiles. This is independent of CTA residency and TMA multicast. |
-| `umma_output_chunk_rows` | `0` (default) writes a full output tile. `32` uses two alternating 32-row shared-memory buffers and issues TMA stores as each chunk becomes ready. |
-| `num_write_splits` | Whether to split result writes into batches. Only supports 1 or 2. Primarily used on SM75 and other devices with limited shared memory to reduce shared memory usage during the reduce phase. Requires `block_shape_m == warp_shape_m`. |
+| `output_chunk_rows` | Output rows per shared-memory chunk for every MMA backend. `0` (default) writes a full tile; positive values must be multiples of 32 up to 256 and are clamped to tile M. Partial final chunks are supported. UMMA alternates two buffers; other backends reuse one buffer. Supports TMA and regular stores, Stream-K, and MoE scatter. Replaces `num_write_splits` (use half of tile M to reproduce two splits). |
 
 ### TMA (Tensor Memory Accelerator)
 
@@ -193,15 +192,23 @@ block M is a multiple of 8 for one CTA, or 16 for two CTAs, subject to SMEM and
 TMEM capacity. The two-CTA M alignment comes from the transposed `tcgen05.mma`
 instruction's N dimension. Indexed output uses ordinary stores and preserves
 row indices until all chunks have been written. Grouped TMA output uses the
-existing per-expert descriptor and row offset.
+existing per-CTA descriptor buffer and expert row offset.
 
-Chunks contain up to 32 rows. For block M not divisible by 32, the output TMA
-box height divides block M, so the last chunk cannot overwrite the next tile.
+Positive output chunk heights are multiples of 32, clamped to block M.
+The TMA box retains that height. When it does not divide block M, the per-CTA
+descriptor's global M boundary is updated for each tile so excess tail rows are
+masked. Updates wait for outstanding stores and publish the descriptor through
+the tensor-map proxy fences. Dense tiles with evenly dividing chunks need no updates.
+When the actual output N (excluding padding) is divisible by 64, a 3D descriptor
+combines 64-column SMEM slabs into one store. UMMA chunked output combines 128
+columns per partition; other output paths combine the entire block N. Otherwise,
+2D stores retain exact N bounds and mask padded columns. Stream-K uses matching
+3D or 2D reduction stores.
 Each N partition writes only its own columns; the accumulator is released only
 after the last partition has been read. Reusing stage SMEM waits for output
 completion before loading the next tile, reducing load/epilogue overlap.
 
-Two-CTA execution still requires chunked output, N divisible by twice block N,
+Two-CTA execution requires N divisible by twice block N,
 and `num_ctas_per_sm=1`. Both TMA and cp.async stage loads are supported,
 including indexed A gathers. Each CTA loads only its own half of A; both CTAs
 publish operand readiness before the leader issues UMMA.
@@ -247,8 +254,10 @@ allocation fits. The existing Stream-K decision is preserved for CTA pairs.
 Without Stream-K, underfilled output waves retain single-CTA execution. Chunked
 output remains opt-in for single-CTA execution because it did not improve the
 measured large dense cases by itself. FP8/FP4 cooperative execution is currently
-explicitly configured with `umma_cta_group_size=2` and
-`umma_output_chunk_rows=32`; automatic cooperative selection remains limited to FP16/BF16.
+explicitly configured with `umma_cta_group_size=2`; automatic cooperative selection
+remains limited to FP16/BF16. All output chunk heights, including full-tile output,
+are supported. The heuristics use `output_chunk_rows=32`, which also enables
+overlapping accumulator reuse when the tile and scheduling support it.
 
 ### SM100 MoE tile selection
 

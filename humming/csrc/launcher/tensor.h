@@ -19,7 +19,9 @@ inline Tensor may_make_tensor_c(std::optional<Tensor> &c, const Tensor &a, Kerne
 inline Tensor make_tensor_map_buffer(const Tensor &a, KernelData &kernel_data, uint32_t num_ctas) {
   int64_t size = 0;
 
-  if (kernel_data.use_tma_c && (kernel_data.gemm_type_id == 2 || kernel_data.gemm_type_id == 3)) {
+  uint32_t rows = kernel_data.output_chunk_rows ? std::min(kernel_data.output_chunk_rows, kernel_data.block_shape_m) : kernel_data.block_shape_m;
+  bool needs_tile_boundary = kernel_data.block_shape_m % rows != 0;
+  if (kernel_data.use_tma_c && (kernel_data.gemm_type_id == 2 || kernel_data.gemm_type_id == 3 || needs_tile_boundary)) {
     size = 32; // 32 int32 = 128 bytes
   }
 
@@ -42,18 +44,18 @@ inline void check_tensor_common(
     auto &expected_shape = expected_shape_.value();
     if (expected_shape.size() == 1 && expected_shape[0] == 1) {
       ASSERT_CHECK(tensor.dim() == 0 || tensor.dim() == 1, name, ".dim() != expected_shape.size() => ",
-                   tensor.dim(), " not in [0, 1]");
+          tensor.dim(), " not in [0, 1]");
       if (tensor.dim() == 1) {
         ASSERT_CHECK(tensor.size(0) == 1, name, ".size(0) != expected_shape[0] => ",
-                     tensor.size(0), " != 1");
+            tensor.size(0), " != 1");
       }
     } else {
       ASSERT_CHECK(tensor.dim() == expected_shape.size(), name, ".dim() != expected_shape.size() => ",
-                   tensor.dim(), " != ", expected_shape.size());
+          tensor.dim(), " != ", expected_shape.size());
 
       for (int64_t i = 0; i < tensor.dim(); i++) {
         ASSERT_CHECK(tensor.size(i) == expected_shape[i], name, ".size(", i, ") != expected_shape[", i, "] => ",
-                     tensor.size(i), " != ", expected_shape[i]);
+            tensor.size(i), " != ", expected_shape[i]);
       }
     }
   }
@@ -276,7 +278,7 @@ inline void check_tensor_moe(
   if (kernel_data.gemm_type_id == 2) {
     ASSERT_CHECK(expert_layout.has_value(), "expert_layout must not be none for grouped gemm");
     ASSERT_CHECK(expert_layout.value().scalar_type() == ScalarType::Int || expert_layout.value().scalar_type() == ScalarType::Long,
-                 "expert_layout.dtype must be int32 or int64, got ", DTYPE_TO_STRING(expert_layout.value().scalar_type()));
+        "expert_layout.dtype must be int32 or int64, got ", DTYPE_TO_STRING(expert_layout.value().scalar_type()));
     std::vector<int64_t> expected_shape = {kernel_data.num_experts + 1};
     check_tensor_common(expert_layout.value(), "expert_token_offset", dev, expert_layout.value().scalar_type(), expected_shape, false);
   }
@@ -285,7 +287,7 @@ inline void check_tensor_moe(
     ASSERT_CHECK(shape_m % kernel_data.num_experts == 0, "grouped masked input rows must divide evenly by experts");
     ASSERT_CHECK(expert_layout.has_value(), "expert_layout must not be none for grouped gemm");
     ASSERT_CHECK(expert_layout.value().scalar_type() == ScalarType::Int || expert_layout.value().scalar_type() == ScalarType::Long,
-                 "expert_layout.dtype must be int32 or int64, got ", DTYPE_TO_STRING(expert_layout.value().scalar_type()));
+        "expert_layout.dtype must be int32 or int64, got ", DTYPE_TO_STRING(expert_layout.value().scalar_type()));
     std::vector<int64_t> expected_shape = {kernel_data.num_experts};
     check_tensor_common(expert_layout.value(), "expert_num_tokens", dev, expert_layout.value().scalar_type(), expected_shape, false);
   }
@@ -420,12 +422,21 @@ inline CUtensorMap make_tma_desc_b(Tensor &tensor, KernelData &kernel_data) {
 inline CUtensorMap make_tma_desc_c(Tensor tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_c) return CUtensorMap();
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  uint32_t rows = kernel_data.umma_output_chunk_rows ? kernel_data.umma_output_chunk_rows : kernel_data.block_shape_m;
-  if (kernel_data.umma_output_chunk_rows) {
-    while (kernel_data.block_shape_m % rows)
-      rows /= 2;
-  }
-  return make_tma_desc(tensor, {64, rows}, 128, "c");
+  uint32_t rows = kernel_data.output_chunk_rows ? std::min(kernel_data.output_chunk_rows, kernel_data.block_shape_m) : kernel_data.block_shape_m;
+  if (tensor.size(-1) % 64 != 0) return make_tma_desc(tensor, {64, rows}, 128, "c");
+
+  uint32_t columns = kernel_data.block_shape_n;
+  if (kernel_data.mma_type == MmaType::UMMA && kernel_data.output_chunk_rows) columns = 128;
+  CUtensorMap descriptor = {};
+  uint64_t dimensions[] = {64, uint64_t(tensor.size(0)), uint64_t(tensor.size(1) / 64)};
+  uint64_t strides[] = {uint64_t(tensor.size(1) * 2), 128};
+  uint32_t box[] = {64, rows, columns / 64};
+  uint32_t element_strides[] = {1, 1, 1};
+  CUresult status = cuTensorMapEncodeTiled(&descriptor, get_tma_dtype(tensor.scalar_type()), 3,
+      tensor.data_ptr(), dimensions, strides, box, element_strides, CU_TENSOR_MAP_INTERLEAVE_NONE,
+      get_swizzle_enum(128), CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  ASSERT_CHECK(status == CUDA_SUCCESS, "TMA Encode Failed for C N slabs: ", int(status));
+  return descriptor;
 }
 
 inline CUtensorMap make_tma_desc_bs(Tensor tensor, KernelData &kernel_data) {

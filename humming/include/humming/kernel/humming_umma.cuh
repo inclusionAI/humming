@@ -379,7 +379,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         epilogue.load_secondary_input_scale(scheduler.m_block_id, scheduler.current_shape_m, scheduler.m_offset);
         mbarrier_wait(&smem.umma_accumulator_ready, tile_index % 2);
         tcgen05_fence_after_thread_sync();
-        if constexpr (Ctx::kUseTmaC && !Ctx::kUmmaOutputChunkRows) tma_wait_store_group<0, true>();
+        if constexpr (Ctx::kUseTmaC && !Ctx::kOutputChunkRows) tma_wait_store_group<0, true>();
         ctx.sync_math_threads();
         consumer.wait_channel();
 
@@ -400,16 +400,16 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           }
 
           auto write_chunk = [&](uint32_t first_row, uint32_t rows, uint32_t buffer_offset) {
-            if constexpr (Ctx::kUmmaOutputChunkRows)
-              epilogue.gmem_writer.write_chunk(scheduler.slice_id, scheduler.slice_count, first_row, rows, buffer_offset);
+            if constexpr (Ctx::kOutputChunkRows)
+              epilogue.gmem_writer.template write_chunk<128>(scheduler.slice_id, scheduler.slice_count, first_row, rows, buffer_offset, ctx.math_group * 128);
           };
           epilogue.smem_writer.write_umma(mma, scheduler.slice_id, scheduler.slice_count, write_chunk);
         }
 
-        if constexpr (!Ctx::kUmmaOutputChunkRows && !Ctx::kIsIndexedGemm) release_accumulator();
+        if constexpr (!Ctx::kOutputChunkRows && !Ctx::kIsIndexedGemm) release_accumulator();
         if constexpr (Ctx::kUseTmaC) tma_fence_async_shared();
         ctx.sync_math_threads();
-        if constexpr (!Ctx::kUmmaOutputChunkRows)
+        if constexpr (!Ctx::kOutputChunkRows)
           epilogue.gmem_writer.write(scheduler.slice_id, scheduler.slice_count, 0);
         if constexpr (kOverlapIndexedEpilogue) {
           // Accumulators may be reused before output scatter finishes. Return

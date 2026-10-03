@@ -26,14 +26,14 @@ class Sm75Heuristics(DeviceHeuristics):
                 "block_shape": (64, 256, warp_shape_k),
                 "warp_shape": (64, 64, warp_shape_k),
                 "num_ctas_per_sm": 2,
-                "num_write_splits": 2,
+                "output_chunk_rows": 32,
             }
         elif group_size == 0 and b_dtype.num_bits <= 5:
             return {
                 "block_shape": (64, 256, 64),
                 "warp_shape": (64, 64, 64),
                 "num_ctas_per_sm": 2,
-                "num_write_splits": 2,
+                "output_chunk_rows": 32,
             }
         elif group_size == 0 and gemm_type != GemmType.DENSE:
             return {
@@ -44,7 +44,7 @@ class Sm75Heuristics(DeviceHeuristics):
             return {
                 "block_shape": (128, 256, 64),
                 "warp_shape": (128, 32, 64),
-                "num_write_splits": 2,
+                "output_chunk_rows": 64,
             }
         else:
             warp_shape_k = 128 if b_dtype.num_bits <= 5 else 64

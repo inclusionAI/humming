@@ -87,7 +87,7 @@ class Sm100MmaHeuristics(Sm80Heuristics):
             num_stages,
             mma_type=MmaType.MMA,
             warp_shape=warp_shape,
-            num_write_splits=config["num_write_splits"],
+            output_chunk_rows=config["output_chunk_rows"],
             mma_accum_bits=16 if use_f16_accum else 32,
         )
         if smem_size * 2 > cls.max_smem_size:
@@ -168,7 +168,8 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             use_mbarrier=True,
             use_warp_spec=True,
             umma_cta_group_size=cta_group_size,
-            umma_output_chunk_rows=output_chunk_rows,
+            output_chunk_rows=output_chunk_rows,
+            use_tma_c=gemm_type != GemmType.INDEXED,
         )
         return smem_size * num_ctas_per_sm <= cls.max_smem_size
 
@@ -292,13 +293,13 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             warp_shape=config["warp_shape"],
             smem_reuse_mode=SmemReuseMode.NONE,
             umma_cta_group_size=2,
-            umma_output_chunk_rows=32,
+            output_chunk_rows=32,
         )
         if smem_size > cls.max_smem_size:
             return config
         return config | {
             "umma_cta_group_size": 2,
-            "umma_output_chunk_rows": 32,
+            "output_chunk_rows": 32,
             "num_stages": num_stages,
         }
 
@@ -465,7 +466,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                                 if layer_config.use_raw_weight:
                                     config.update(
                                         umma_cta_group_size=cta_group_size,
-                                        umma_output_chunk_rows=output_chunk_rows,
+                                        output_chunk_rows=output_chunk_rows,
                                     )
                                 candidates.append(config)
                                 # Use the deepest legal pipeline for each tile.

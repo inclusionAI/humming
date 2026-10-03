@@ -300,7 +300,7 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getUint32("WEIGHT_SCALE_GROUP_SIZE_N"),
       reader.getUint32("NUM_CTAS_PER_SM"),
       reader.getUint32("UMMA_CTA_GROUP_SIZE"),
-      reader.getUint32("UMMA_OUTPUT_CHUNK_ROWS"),
+      reader.getUint32("OUTPUT_CHUNK_ROWS"),
       reader.getUint32("MULTI_CAST_SIZE_A"),
       reader.getUint32("MULTI_CAST_SIZE_B"),
       reader.getUint32("GEMM_TYPE_ID"),

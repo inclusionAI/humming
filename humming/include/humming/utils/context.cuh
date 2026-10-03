@@ -154,7 +154,6 @@ struct UmmaPipelineContext : KernelContext<ContextArgs...> {
   using TuningConfig = typename Base::TuningConfig;
   static_assert(BlockShape::M == WarpShape::M, "UMMA requires block M to equal warp M");
   static_assert(BlockShape::K == WarpShape::K, "UMMA requires block K to equal warp K");
-  static_assert(TuningConfig::kNumWriteSplits == 1, "UMMA requires num_write_splits == 1");
   static constexpr bool kHasStageWeightScale = Base::kIsGroupWeightScale || Base::kIsBlockWeightScale;
   static constexpr bool kCanSplitWeightScaleLoad = !kHasStageWeightScale || Base::kUseTmaBS;
   static constexpr bool kCanSplitZeroPointLoad =

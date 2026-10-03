@@ -8,15 +8,15 @@ import random
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
-from humming.config.mma import get_default_mma_type
 from humming.device import current_device
 from humming.tune import get_heuristics_config
 from humming.utils.math import round_up
-from humming.utils.smem import fits_device_smem
+from humming.utils.smem import estimate_smem_size_config, fits_device_smem
 
 NUM_SAMPLED_TUNING_CONFIGS = 100
 TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
 SAMPLED_TUNING_VALUES = {
+    "mma_type": tuple(mma_type.value for mma_type in MmaType),
     "num_stages": (2, 3, 4, 6, 8),
     "use_tma": (True, False, 123, 456, 789),
     "use_warp_spec": (True, False),
@@ -28,13 +28,15 @@ SAMPLED_TUNING_VALUES = {
     "num_ctas_per_sm": (1, 2, 3, 4),
     "raster_group_m": (1, 2, 5, 9),
     "smem_reuse_mode": ("none", "last_stage", "all_stages"),
-    "num_write_splits": (1, 2),
+    "output_chunk_rows": (0, 32, 64, 96, 128, 256),
     "warp_iters": (2, 4, 8),
     "k_warps": (1, 2, 4),
     "warp_shape_n": (16, 32, 64),
     "block_shape_n": (64, 128, 256, 512),
-    "m_warps": (2, 4),
-    "warp_shape_m": (8, 16, 32, 80, 102, 128, 176, 200, 256),
+    "m_warps": (1, 2, 4),
+    "warp_shape_m": (8, 16, 24, 32, 48, 64, 80, 96, 102, 128, 176, 192, 200, 256),
+    "umma_num_dequant_warpgroups": (1, 2),
+    "umma_cta_group_size": (1, 2),
 }
 TMA_FIELDS = (
     "use_tma_a",
@@ -50,15 +52,49 @@ TMA_FIELDS = (
 TUNING_FIELDS = frozenset(field.name for field in dataclasses.fields(TuningConfig))
 
 
-def _get_sample_mma_type(layer_config):
-    mma_type = get_default_mma_type(layer_config)
-    has_hidden_fp8 = dtypes.float8e3m4 in (layer_config.a_dtype, layer_config.b_dtype)
-    requires_umma = layer_config.use_block_scaled_mma or has_hidden_fp8 or (
+def _is_legal_mma_type(layer_config, compute_config, mma_type):
+    sm_version = layer_config.sm_version
+    if layer_config.use_packed_k_layout and mma_type != MmaType.WGMMA:
+        return False
+    if layer_config.use_block_scaled_mma:
+        expected_mma = MmaType.MXMMA if sm_version // 10 == 12 else MmaType.UMMA
+        if mma_type != expected_mma or compute_config.use_f16_accum:
+            return False
+    has_mixed_raw_weights = (
         layer_config.use_raw_weight and layer_config.a_dtype.num_bits != layer_config.b_dtype.num_bits
     )
-    if mma_type == MmaType.UMMA and not requires_umma:
-        return MmaType.MMA
-    return mma_type
+    if has_mixed_raw_weights and mma_type != MmaType.UMMA:
+        return False
+    if mma_type == MmaType.UMMA:
+        if not layer_config.is_umma_supported or compute_config.use_f16_accum:
+            return False
+        return layer_config.a_dtype.num_bits == 16 or not layer_config.has_zero_point
+    if mma_type == MmaType.MXMMA:
+        return sm_version // 10 == 12 and layer_config.use_block_scaled_mma
+    if mma_type == MmaType.WGMMA:
+        if sm_version != 90 or layer_config.a_dtype == dtypes.int4:
+            return False
+    min_sm = {
+        dtypes.float16: 75,
+        dtypes.bfloat16: 80,
+        dtypes.int8: 75,
+        dtypes.int4: 80,
+        dtypes.float8e4m3: 89,
+        dtypes.float8e5m2: 89,
+        dtypes.float8e3m4: 120,
+        dtypes.float4e2m1: 120,
+        dtypes.float4e0m3: 120,
+    }
+    if sm_version < min_sm.get(layer_config.a_dtype, 999):
+        return False
+    if layer_config.a_dtype.is_floating_point_type and layer_config.b_dtype.is_floating_point_type:
+        if layer_config.b_dtype.exponent_bits > layer_config.a_dtype.exponent_bits:
+            return False
+        if layer_config.b_dtype.mantissa_bits > layer_config.a_dtype.mantissa_bits:
+            return False
+        if layer_config.a_dtype.exponent_bits and not layer_config.b_dtype.exponent_bits:
+            return False
+    return True
 
 
 def create_tuning_config(values: dict) -> TuningConfig:
@@ -74,6 +110,7 @@ def _is_legal_geometry(
     layer_config: LayerConfig,
     block_shape: tuple[int, int, int],
     warp_shape: tuple[int, int, int],
+    mma_type: MmaType,
 ) -> bool:
     if block_shape[0] > 256:
         return False
@@ -85,22 +122,31 @@ def _is_legal_geometry(
         return False
     if warp_shape[0] % 8:
         return False
-    if _get_sample_mma_type(layer_config) == MmaType.MMA and warp_shape[0] % 16:
+    if mma_type == MmaType.MMA and warp_shape[0] % 16:
         return False
-    if _get_sample_mma_type(layer_config) == MmaType.MXMMA and warp_shape[0] % 16:
+    if mma_type == MmaType.MXMMA and warp_shape[0] % 16:
         return False
-    use_wgmma = _get_sample_mma_type(layer_config) == MmaType.WGMMA
+    use_wgmma = mma_type == MmaType.WGMMA
     if use_wgmma and layer_config.a_dtype.is_integer_type and warp_shape[0] % 16:
         return False
     min_warp_n = 32 if layer_config.a_dtype.num_bits == 16 else 16
     min_warp_k = {16: 32, 8: 64, 4: 128}[layer_config.a_dtype.num_bits]
     if warp_shape[1] < min_warp_n or warp_shape[2] < min_warp_k:
         return False
-    if _get_sample_mma_type(layer_config) == MmaType.WGMMA:
+    if mma_type == MmaType.WGMMA:
         if block_shape[1] // warp_shape[1] % 4:
             return False
         swizzle_bytes = 128 if layer_config.a_dtype.num_bits * block_shape[2] >= 1024 else 64
         if warp_shape[2] > swizzle_bytes * 8 // layer_config.a_dtype.num_bits:
+            return False
+    if mma_type == MmaType.UMMA:
+        if block_shape[0] != warp_shape[0] or block_shape[2] != warp_shape[2]:
+            return False
+        if block_shape[1] not in (128, 256, 512) or warp_shape[1] != 32:
+            return False
+        if block_shape[2] * layer_config.a_dtype.num_bits < 512:
+            return False
+        if layer_config.a_dtype == dtypes.int8 and block_shape[0] > 32 and block_shape[0] % 16:
             return False
     weight_group_size = 0 if layer_config.use_fused_e8m0_scale else layer_config.weight_scale_group_size
     is_warp_k_gt_groupsize = any(
@@ -116,8 +162,13 @@ def _is_legal_geometry(
 def _generate_geometry_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
+    mma_type: MmaType,
 ) -> list[tuple[dict, dict]]:
-    base = {"num_sms": current_device.sm_count, "use_f16_accum": compute_config.use_f16_accum}
+    base = {
+        "num_sms": current_device.sm_count,
+        "use_f16_accum": compute_config.use_f16_accum,
+        "mma_type": mma_type.value,
+    }
     names = (
         "warp_iters",
         "k_warps",
@@ -129,6 +180,7 @@ def _generate_geometry_candidates(
     candidates = []
     part_mma_k = 256 // layer_config.a_dtype.num_bits
     for signature in _generate_cartesian(*names):
+        signature = {"mma_type": mma_type.value} | signature
         warp_shape = (
             signature["warp_shape_m"],
             signature["warp_shape_n"],
@@ -139,7 +191,7 @@ def _generate_geometry_candidates(
             signature["block_shape_n"],
             signature["k_warps"] * warp_shape[2],
         )
-        if _is_legal_geometry(layer_config, block_shape, warp_shape):
+        if _is_legal_geometry(layer_config, block_shape, warp_shape, mma_type):
             config = base | {"block_shape": block_shape, "warp_shape": warp_shape}
             candidates.append((config, signature))
     return candidates
@@ -192,8 +244,13 @@ def _is_legal_multicast_transfer(
 def _generate_transfer_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
+    mma_type: MmaType,
 ) -> list[tuple[dict, dict]]:
-    base = {"num_sms": current_device.sm_count, "use_f16_accum": compute_config.use_f16_accum}
+    base = {
+        "num_sms": current_device.sm_count,
+        "use_f16_accum": compute_config.use_f16_accum,
+        "mma_type": mma_type.value,
+    }
     candidates = []
     names = (
         "use_tma",
@@ -206,6 +263,7 @@ def _generate_transfer_candidates(
     seed = _get_seed(layer_config, compute_config)
     sm_version = current_device.sm_version
     for signature in _generate_cartesian(*names):
+        signature = {"mma_type": mma_type.value} | signature
         use_tma, tma_values = _resolve_tma_values(signature["use_tma"], seed)
         if sm_version < 90 and (use_tma or signature["use_warp_spec"]):
             continue
@@ -225,6 +283,14 @@ def _generate_transfer_candidates(
             tma_values.update(use_tma_as2=False)
         if not _is_legal_multicast_transfer(compute_config, sm_version, signature, tma_values):
             continue
+        if mma_type == MmaType.UMMA:
+            if not signature["use_warp_spec"] or not signature["use_mbarrier"]:
+                continue
+            if signature["multi_cast_size_a"] != 1 or signature["multi_cast_size_b"] != 1:
+                continue
+            if layer_config.use_raw_weight and not tma_values["use_tma_b"]:
+                continue
+            tma_values["use_tma_as2"] = False
         config = base | signature | tma_values | {"use_tma": use_tma}
         candidates.append((config, signature | tma_values))
     return candidates
@@ -233,8 +299,13 @@ def _generate_transfer_candidates(
 def _generate_scheduling_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
+    mma_type: MmaType,
 ) -> list[tuple[dict, dict]]:
-    base = {"num_sms": current_device.sm_count, "use_f16_accum": compute_config.use_f16_accum}
+    base = {
+        "num_sms": current_device.sm_count,
+        "use_f16_accum": compute_config.use_f16_accum,
+        "mma_type": mma_type.value,
+    }
     candidates = []
     names = (
         "num_stages",
@@ -242,9 +313,24 @@ def _generate_scheduling_candidates(
         "num_ctas_per_sm",
         "raster_group_m",
         "smem_reuse_mode",
-        "num_write_splits",
+        "output_chunk_rows",
     )
+    if mma_type == MmaType.UMMA:
+        names += ("umma_num_dequant_warpgroups", "umma_cta_group_size")
     for signature in _generate_cartesian(*names):
+        signature = {"mma_type": mma_type.value} | signature
+        if mma_type == MmaType.UMMA:
+            if layer_config.use_raw_weight and signature["umma_num_dequant_warpgroups"] != 1:
+                continue
+            if signature["umma_cta_group_size"] == 2:
+                if signature["num_ctas_per_sm"] != 1:
+                    continue
+        if mma_type == MmaType.WGMMA and signature["num_stages"] < 3:
+            continue
+        if compute_config.use_batch_invariant and signature["use_stream_k"]:
+            continue
+        if mma_type == MmaType.MXMMA and layer_config.has_zero_point and signature["use_stream_k"]:
+            continue
         candidates.append((base | signature, signature))
     return candidates
 
@@ -289,6 +375,7 @@ def _fits_device_resources(
     candidate: tuple[dict, dict],
 ) -> bool:
     config = candidate[0]
+    mma_type = MmaType(config["mma_type"])
     block_shape = config["block_shape"]
     warp_shape = config["warp_shape"]
     m_warps = block_shape[0] // warp_shape[0]
@@ -296,16 +383,31 @@ def _fits_device_resources(
     k_warps = block_shape[2] // warp_shape[2]
     num_math_threads = m_warps * n_warps * k_warps * 32
     num_threads = num_math_threads + (128 if config["use_warp_spec"] else 0)
+    if mma_type == MmaType.UMMA:
+        dequant_threads = 0 if layer_config.use_raw_weight else 128 * config["umma_num_dequant_warpgroups"]
+        num_threads = 256 + dequant_threads
     num_ctas_per_sm = config["num_ctas_per_sm"]
     max_threads = current_device.max_threads_per_sm
     registers_per_sm = current_device.max_registers_per_sm
     if num_threads * num_ctas_per_sm > max_threads:
         return False
+    launch_bound_registers = registers_per_sm // (num_threads * num_ctas_per_sm) // 8 * 8
+    if mma_type == MmaType.UMMA and launch_bound_registers < 40:
+        # TMEM transfers and their address operands cannot compile at a 32-register limit.
+        return False
 
-    if _get_sample_mma_type(layer_config) == MmaType.WGMMA:
+    if config["use_warp_spec"] and mma_type != MmaType.UMMA:
+        uses_register_reallocation = num_math_threads > 128 or layer_config.shape_k > block_shape[2] * 16
+        needs_more_load_registers = num_math_threads > 256 or (
+            num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
+        )
+        load_thread_registers = 40 if needs_more_load_registers else 24
+        if uses_register_reallocation and launch_bound_registers < load_thread_registers:
+            return False
+
+    if mma_type == MmaType.WGMMA:
         register_overhead = 38
         math_thread_registers = round_up(warp_shape[0] // 2 + register_overhead, 8)
-        launch_bound_registers = registers_per_sm // (num_threads * num_ctas_per_sm) // 8 * 8
         if math_thread_registers > launch_bound_registers:
             return False
 
@@ -318,6 +420,16 @@ def _fits_device_resources(
             return False
 
     tuning_config = create_tuning_config(config)
+    if mma_type == MmaType.UMMA:
+        from humming.tune.sm100 import Sm100UmmaHeuristics
+
+        tmem_columns = Sm100UmmaHeuristics._get_tmem_columns(
+            layer_config, block_shape, config["num_stages"], num_ctas_per_sm, config["umma_cta_group_size"]
+        )
+        if tmem_columns * num_ctas_per_sm > 512:
+            return False
+        smem_size = estimate_smem_size_config(layer_config, compute_config, tuning_config)
+        return smem_size * num_ctas_per_sm <= current_device.max_smem_size
     return fits_device_smem(layer_config, compute_config, tuning_config)
 
 
@@ -331,7 +443,7 @@ def _try_combine_candidate(
     transfer_config, transfer_signature = transfer_item
     scheduling_config, scheduling_signature = scheduling_item
     config = geometry_config | transfer_config | scheduling_config
-    config["mma_type"] = _get_sample_mma_type(layer_config).value
+    mma_type = MmaType(config["mma_type"])
     block_shape = config["block_shape"]
     warp_shape = config["warp_shape"]
     m_warps = block_shape[0] // warp_shape[0]
@@ -339,20 +451,23 @@ def _try_combine_candidate(
     k_warps = block_shape[2] // warp_shape[2]
     num_math_threads = m_warps * n_warps * k_warps * 32
     num_threads = num_math_threads + (128 if config["use_warp_spec"] else 0)
+    if mma_type == MmaType.UMMA:
+        if config["umma_cta_group_size"] == 2:
+            if block_shape[0] % 16 or layer_config.shape_n % (2 * block_shape[1]):
+                return None
+        num_math_threads = 128
+        dequant_threads = 0 if layer_config.use_raw_weight else 128 * config["umma_num_dequant_warpgroups"]
+        num_threads = 256 + dequant_threads
     if num_threads > 1024:
         return None
-    use_warp_group = config["use_warp_spec"] or _get_sample_mma_type(layer_config) == MmaType.WGMMA
+    use_warp_group = config["use_warp_spec"] or mma_type == MmaType.WGMMA
     if use_warp_group and num_math_threads % 128:
         return None
-    if _get_sample_mma_type(layer_config) == MmaType.WGMMA and config["num_stages"] < 3:
+    if mma_type == MmaType.WGMMA and config["num_stages"] < 3:
         return None
     if layer_config.shape_n % (block_shape[1] * config["multi_cast_size_a"]):
         return None
     if compute_config.use_batch_invariant and (config["use_stream_k"] or block_shape[2] != warp_shape[2]):
-        return None
-    block_m = config["block_shape"][0]
-    warp_m = config["warp_shape"][0]
-    if config["num_write_splits"] > 1 and (block_m != warp_m or block_m % 32 or config["use_tma_c"]):
         return None
     if (
         layer_config.has_zero_point
@@ -367,18 +482,16 @@ def _try_combine_candidate(
     return candidate if _fits_device_resources(layer_config, compute_config, candidate) else None
 
 
-def enumerate_test_tuning_configs(
+def _enumerate_backend_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
+    mma_type: MmaType,
 ) -> list[tuple[dict, dict]]:
-    if _get_sample_mma_type(layer_config) == MmaType.MXMMA and compute_config.use_f16_accum:
-        return []
-
     rng = random.Random(_get_seed(layer_config, compute_config))
     groups = (
-        _generate_geometry_candidates(layer_config, compute_config),
-        _generate_transfer_candidates(layer_config, compute_config),
-        _generate_scheduling_candidates(layer_config, compute_config),
+        _generate_geometry_candidates(layer_config, compute_config, mma_type),
+        _generate_transfer_candidates(layer_config, compute_config, mma_type),
+        _generate_scheduling_candidates(layer_config, compute_config, mma_type),
     )
     candidates = []
     signatures = set()
@@ -411,36 +524,16 @@ def enumerate_test_tuning_configs(
     return candidates
 
 
-def _sample_umma_tuning_configs(layer_config, compute_config, sample_size):
-    from humming.tune.sm100 import Sm100UmmaHeuristics
-
-    shape_ms = (8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024, 4096)
-    bases = generate_heuristics_configs(layer_config, compute_config, shape_ms)
-    stream_k_choices = (False,) if compute_config.use_batch_invariant else (False, True)
-    candidates = {}
-    for base, stages, raster_group_m, use_stream_k in itertools.product(
-        bases, SAMPLED_TUNING_VALUES["num_stages"],
-        SAMPLED_TUNING_VALUES["raster_group_m"], stream_k_choices,
-    ):
-        fits_resources = Sm100UmmaHeuristics._fits_resources(
-            layer_config, base["block_shape"], stages, base.get("num_ctas_per_sm", 1),
-            gemm_type=compute_config.gemm_type,
-            cta_group_size=base.get("umma_cta_group_size", 1),
-            output_chunk_rows=base.get("umma_output_chunk_rows", 0),
-        )
-        if not fits_resources:
-            continue
-        candidate = base | {
-            "num_stages": stages,
-            "raster_group_m": raster_group_m,
-            "use_stream_k": use_stream_k,
-        }
-        tuning_config = create_tuning_config(candidate)
-        if fits_device_smem(layer_config, compute_config, tuning_config):
-            candidates[json.dumps(candidate, sort_keys=True)] = candidate
-    selected = list(candidates.values())
-    random.Random(_get_seed(layer_config, compute_config)).shuffle(selected)
-    return selected[:sample_size]
+def enumerate_test_tuning_configs(
+    layer_config: LayerConfig,
+    compute_config: ComputeConfig,
+) -> list[tuple[dict, dict]]:
+    candidates = []
+    for value in SAMPLED_TUNING_VALUES["mma_type"]:
+        mma_type = MmaType(value)
+        if _is_legal_mma_type(layer_config, compute_config, mma_type):
+            candidates.extend(_enumerate_backend_candidates(layer_config, compute_config, mma_type))
+    return candidates
 
 
 def sample_test_tuning_configs(
@@ -448,8 +541,6 @@ def sample_test_tuning_configs(
     compute_config: ComputeConfig,
     sample_size: int = NUM_SAMPLED_TUNING_CONFIGS,
 ) -> list[dict]:
-    if _get_sample_mma_type(layer_config) == MmaType.UMMA:
-        return _sample_umma_tuning_configs(layer_config, compute_config, sample_size)
     candidates = enumerate_test_tuning_configs(layer_config, compute_config)
     rng = random.Random(_get_seed(layer_config, compute_config))
     selected = _select_pairwise(candidates, rng)

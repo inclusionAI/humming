@@ -134,7 +134,7 @@ def test_umma_int8(use_umma_ss, cta_group_size, gemm_type, monkeypatch):
             use_stream_k=True,
             smem_reuse_mode="none",
             umma_cta_group_size=cta_group_size,
-            umma_output_chunk_rows=32 if cta_group_size == 2 else 0,
+            output_chunk_rows=32 if cta_group_size == 2 else 0,
         )
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
@@ -830,7 +830,7 @@ def test_umma_chunked_output(
             "use_stream_k": use_stream_k,
             "smem_reuse_mode": "none",
             "umma_cta_group_size": cta_group_size,
-            "umma_output_chunk_rows": 32,
+            "output_chunk_rows": 32,
         }
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
@@ -900,7 +900,7 @@ def test_umma_cooperative_channel_parameters(
             "use_stream_k": use_stream_k,
             "smem_reuse_mode": "none",
             "umma_cta_group_size": 2,
-            "umma_output_chunk_rows": 32,
+            "output_chunk_rows": 32,
         }
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
@@ -979,7 +979,7 @@ def test_umma_chunked_output_layout(
             "use_stream_k": use_stream_k,
             "smem_reuse_mode": reuse_mode,
             "umma_cta_group_size": cta_group_size,
-            "umma_output_chunk_rows": 32,
+            "output_chunk_rows": 32,
         }
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_output)
@@ -1039,7 +1039,7 @@ def test_umma_fp8_loading_and_output(
         return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
             "block_shape": (24, block_n, block_k),
             "warp_shape": (24, 32, block_k),
-            "umma_output_chunk_rows": output_chunk_rows,
+            "output_chunk_rows": output_chunk_rows,
             "num_stages": 4,
             "num_ctas_per_sm": 1,
             "num_sms": 2,
@@ -1337,7 +1337,7 @@ def test_umma_cooperative_fp8(
             "use_stream_k": stream_k,
             "smem_reuse_mode": "none",
             "umma_cta_group_size": 2,
-            "umma_output_chunk_rows": 32,
+            "output_chunk_rows": 32,
         }
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
@@ -1515,7 +1515,7 @@ def test_umma_fp4_activation(
             use_stream_k=True,
             smem_reuse_mode="none",
             umma_cta_group_size=cta_group_size,
-            umma_output_chunk_rows=32,
+            output_chunk_rows=32,
         )
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
@@ -1570,7 +1570,7 @@ def test_umma_secondary_input_scale(gemm_type, cta_group_size, quant_mode, has_c
             use_stream_k=True,
             smem_reuse_mode="none",
             umma_cta_group_size=cta_group_size,
-            umma_output_chunk_rows=32,
+            output_chunk_rows=32,
         )
 
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
@@ -1712,7 +1712,7 @@ def test_umma_optional_group_scales(
                 use_stream_k=True,
                 smem_reuse_mode="none",
                 umma_cta_group_size=2,
-                umma_output_chunk_rows=32,
+                output_chunk_rows=32,
             )
 
         monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
