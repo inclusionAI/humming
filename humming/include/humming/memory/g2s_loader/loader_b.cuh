@@ -54,7 +54,8 @@ public:
 
   template <bool kShouldAdvance = true>
   CUDA_INLINE void load(int4 *smem_ptr, void *mbar_ptr) {
-    if constexpr (kUseAiu) load_aiu(smem_ptr);
+    if constexpr (Ctx::kUseRawWeight && !kUseTma) load_raw(smem_ptr);
+    else if constexpr (kUseAiu) load_aiu(smem_ptr);
     else if constexpr (kUseTma) load_tma(smem_ptr, mbar_ptr);
     else load_legacy(smem_ptr);
     if constexpr (kShouldAdvance) advance();
@@ -75,7 +76,7 @@ public:
   CUDA_INLINE
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     if (ctx.load_thread_id() == 0) {
-      if constexpr (Ctx::kUseUmmaSs) {
+      if constexpr (Ctx::kUseRawWeight) {
         constexpr uint32_t kCoordinateBits = SharedStorage::kExpandUmmaWeight ? 1 : 32 / ElementB::kBits;
         uint32_t start_k = kCoordinateBits == 1 ? row_offset / 128 * 128 : row_offset;
         PRAGMA_UNROLL
@@ -83,8 +84,8 @@ public:
           PRAGMA_UNROLL
           for (uint32_t n = 0; n < SharedStorage::kWeightStageN; n += 256) {
             uint32_t offset = (k / kSwizzleK * SharedStorage::kWeightStageN + n) * kSwizzleBytes / sizeof(int4);
-            tma_load_2d<1, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(tensor_map_ptr, smem_ptr + offset, mbar_ptr,
-                                                                                    (start_k + k) / kCoordinateBits, col_offset + n);
+            if (cluster_rank == 0) tma_load_2d<kMultiCastSizeB, kEvictWeightsFirst, Ctx::kUseUmmaCooperativeTma ? 2 : 1>(
+              tensor_map_ptr, smem_ptr + offset, mbar_ptr, (start_k + k) / kCoordinateBits, col_offset + n);
           }
         }
       } else if constexpr (kMultiCastSizeB == 1) {
@@ -99,8 +100,27 @@ public:
   void prefetch_tma() {
     if constexpr (kUseTma && kMultiCastSizeB == 1) {
       if (ctx.load_thread_id() == 0) {
-        if constexpr (!Ctx::kUseUmmaSs) tma_prefetch_3d(tensor_map_ptr, 0, col_offset, row_offset);
+        if constexpr (!Ctx::kUseRawWeight) tma_prefetch_3d(tensor_map_ptr, 0, col_offset, row_offset);
       }
+    }
+  }
+
+  CUDA_INLINE
+  void load_raw(int4 *smem_ptr) {
+    static_assert(ElementA::kBits == ElementB::kBits);
+    constexpr uint32_t kRowInt4s = BlockShape::K * ElementB::kBits / 128;
+    constexpr uint32_t kGlobalRowInt4s = ProblemShape::K * ElementB::kBits / 128;
+    constexpr uint32_t kSwizzleInt4s = kSwizzleBytes / sizeof(int4);
+    uint32_t smem_base = cast_smem_ptr_to_uint(smem_ptr) / 128;
+    PRAGMA_UNROLL
+    for (uint32_t i = 0; i < CEIL_DIV(BlockShape::N * kRowInt4s, kNumLoadThreads); ++i) {
+      uint32_t index = i * kNumLoadThreads + ctx.load_thread_id();
+      uint32_t row = index / kRowInt4s;
+      uint32_t col = index % kRowInt4s;
+      uint32_t offset = (col / kSwizzleInt4s * BlockShape::N + row) * kSwizzleInt4s + col % kSwizzleInt4s;
+      uint32_t swizzled_offset = offset ^ ((smem_base + offset / 8) % kSwizzleInt4s);
+      legacy_load_pred<kUseCpAsync>(gmem_ptr + row * kGlobalRowInt4s + col,
+                                    smem_ptr + swizzled_offset, row < BlockShape::N);
     }
   }
 
@@ -113,15 +133,24 @@ public:
 
   CUDA_INLINE
   void advance() {
-    row_offset += Ctx::kUseUmmaSs ? BlockShape::K : BlockShape::K / kPackSizeK;
+    if constexpr (Ctx::kUseRawWeight) {
+      row_offset += BlockShape::K;
+      if constexpr (!kUseTma) gmem_ptr += BlockShape::K * ElementB::kBits / 128;
+      return;
+    }
+    row_offset += BlockShape::K / kPackSizeK;
     if constexpr (!kUseAiu) gmem_ptr += kGmemStride * BlockShape::K / kPackSizeK;
   }
 
   CUDA_INLINE
   void seek(uint32_t expert_id, uint32_t n_block_id, uint32_t k_block_id) {
-    if constexpr (Ctx::kUseUmmaSs) {
+    if constexpr (Ctx::kUseRawWeight) {
       row_offset = k_block_id * BlockShape::K;
       col_offset = expert_id * ProblemShape::N + n_block_id * BlockShape::N;
+      if constexpr (!kUseTma) {
+        uint64_t offset = uint64_t(col_offset) * ProblemShape::K + row_offset;
+        gmem_ptr = gmem_ptr_raw + offset * ElementB::kBits / 128;
+      }
       return;
     }
     row_offset = k_block_id * (BlockShape::K / kPackSizeK);

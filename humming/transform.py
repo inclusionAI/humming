@@ -1,7 +1,7 @@
 import torch
 
 from humming import dtypes, ops
-from humming.config import LayerConfig, MmaType, WeightScale2Type, WeightScaleType
+from humming.config import LayerConfig, WeightScale2Type, WeightScaleType
 from humming.device import DeviceInfo, current_device
 from humming.schema import HummingInputSchema, HummingWeightSchema
 from humming.utils.math import round_up
@@ -242,7 +242,6 @@ def transform_humming_weight(
     b_dtype: dtypes.DataType,
     a_dtype: dtypes.DataType,
     zero_point: torch.Tensor | None = None,
-    use_wgmma: bool = False,
     use_fused_e8m0_scale: bool = False,
     packed: bool = False,
     padded_shape_n: int | None = None,
@@ -250,7 +249,7 @@ def transform_humming_weight(
     interleave_mode: int = 3,
     use_packed_k_layout: bool = False,
     use_native_dequant: bool = False,
-    use_umma_ss: bool = False,
+    use_raw_weight: bool = False,
 ) -> torch.Tensor:
     is_moe = weight.ndim == 3
     weight = weight.unsqueeze(0) if not is_moe else weight
@@ -277,7 +276,17 @@ def transform_humming_weight(
         # Both TS and SS consume signed INT8 instead of offset-binary weight codes.
         weight = (weight.view(torch.int8) - 128).view(torch.int32)
 
-    if use_umma_ss:
+    if a_dtype == dtypes.int4 and b_dtype in [dtypes.int4, dtypes.uint4]:
+        if not packed:
+            weight = ops.pack_weight(weight, b_dtype.num_bits)
+            packed = True
+        weight = weight.view(torch.uint8)
+        weight1 = (weight & 0xF) - 8
+        weight1 = weight1 & 0xF
+        weight2 = (weight & 0xF0) - 8 * 16
+        weight = (weight1 | weight2).view(torch.int32)
+
+    if use_raw_weight or a_dtype.num_bits == b_dtype.num_bits:
         if a_dtype.num_bits == 8 and b_dtype.num_bits < 8:
             padded_shape_k = round_up(padded_shape_k, 128)
         # K-contiguous rows are consumed directly by the shared-memory MMA operand.
@@ -298,13 +307,6 @@ def transform_humming_weight(
         elif a_dtype == dtypes.bfloat16 and not has_zero_point:
             should_preprocess_for_int2fp = b_dtype.num_bits > 7
 
-    if a_dtype == dtypes.int4 and b_dtype in [dtypes.int4, dtypes.uint4]:
-        weight = weight.view(torch.uint8)
-        weight1 = (weight & 0xF) - 8
-        weight1 = weight1 & 0xF
-        weight2 = (weight & 0xF0) - 8 * 16
-        weight = (weight1 | weight2).view(torch.int32)
-
     if not should_preprocess_for_int2fp and has_zero_point:
         has_zero_point = False
 
@@ -320,7 +322,6 @@ def transform_humming_weight(
         group_size_zp = shape_k // zero_point.size(-1)
 
     if use_packed_k_layout:
-        assert use_wgmma, "use_packed_k_layout requires wgmma"
         assert a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit (fp8/int8) activation"
         assert b_dtype.num_bits % 2 == 0, "use_packed_k_layout requires even-bit weight"
 
@@ -345,7 +346,6 @@ def transform_humming_weight(
         is_weight_packed=packed,
         should_preprocess_for_int2fp=should_preprocess_for_int2fp,
         should_preprocess_with_zp=should_preprocess_with_zp,
-        use_wgmma=use_wgmma,
         interleave_mode=interleave_mode,
         use_fused_e8m0_scale=use_fused_e8m0_scale,
         group_size_zp=group_size_zp,
@@ -494,13 +494,12 @@ def transform_humming_tensors(
         b_dtype=config.b_dtype,
         a_dtype=config.a_dtype,
         zero_point=zero_point,
-        use_wgmma=config.mma_type == MmaType.WGMMA,
         use_fused_e8m0_scale=config.use_fused_e8m0_scale,
         packed=True,
         interleave_mode=interleave_mode,
         use_packed_k_layout=config.use_packed_k_layout,
         use_native_dequant=config.use_native_dequant,
-        use_umma_ss=config.use_umma_ss,
+        use_raw_weight=config.use_raw_weight,
     )
 
     if weight_scale is not None:
@@ -517,12 +516,13 @@ def transform_humming_tensors(
             is_blockwise=config.weight_scale_type == WeightScaleType.BLOCK,
             is_mxmma=is_mxmma,
             mxmma_scale_vec=mxmma_scale_vec,
-            is_umma=is_mxmma and config.mma_type == MmaType.UMMA,
+            is_umma=is_mxmma and config.sm_version // 10 in (10, 11),
         )
 
     if zero_point is not None:
         use_mxmma_zp_layout = (
-            config.mma_type == MmaType.MXMMA
+            config.use_block_scaled_mma
+            and config.sm_version // 10 == 12
             and config.a_dtype.num_bits == 4
             and config.weight_scale_group_size > 0
         )

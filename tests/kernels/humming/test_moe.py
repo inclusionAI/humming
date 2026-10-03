@@ -2,7 +2,8 @@ import pytest
 import torch
 
 from humming import dtypes, ops
-from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
+from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.config.mma import get_default_mma_type
 from humming.kernel.humming import HummingKernel
 from humming.testing import (
     KernelTestCase,
@@ -70,7 +71,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="static_tensor_dynamic_group",
-        mma_type=MmaType.MXMMA,
+        sm_version=120,
     ),
     _case(
         "indexed-dynamic-group-token",
@@ -79,7 +80,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        mma_type=MmaType.MXMMA,
+        sm_version=120,
     ),
     _case("indexed-partial-k-tile", GemmType.INDEXED, shape_k=96),
     _case("grouped-contiguous", GemmType.GROUPED_CONTIGUOUS),
@@ -91,7 +92,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        mma_type=MmaType.MXMMA,
+        sm_version=120,
     ),
     _case("grouped-masked", GemmType.GROUPED_MASKED),
     _case(
@@ -102,7 +103,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        mma_type=MmaType.MXMMA,
+        sm_version=120,
     ),
     _case(
         "indexed-bias-pad-k",
@@ -146,7 +147,7 @@ def test_moe(test_case):
     config = test_case.layer_config
     assert config.num_experts == NUM_EXPERTS
     assert test_case.compute_config.gemm_type != GemmType.DENSE
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
+    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
     if test_case.compute_config.gemm_type == GemmType.INDEXED:
         assert all(not result.tuning_config.use_tma_as for result in results)

@@ -77,7 +77,8 @@ public:
     uint32_t bs_iter_id = Ctx::kUsePackedKLayout && Ctx::kUseFusedE8m0Scale ? iter_id : k_iter_id;
     auto &smem = ctx.smem;
 
-    loader_b.load(smem.stages[stage_id].b, mma.regs_qb_as_ptr(buffer_id), iter_id);
+    if constexpr (!(kUseWgmma && Ctx::kUseRawWeight))
+      loader_b.load(smem.stages[stage_id].b, mma.regs_qb_as_ptr(buffer_id), iter_id);
     if constexpr (USE_PPU && !kUseMxmma && kIsGroupOrBlockWeightScale)
       loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), bs_iter_id);
     if constexpr (!kUseWgmma && !Ctx::kUseUmma)

@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from humming import dtypes
-from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
+from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.config.mma import get_default_mma_type
 from humming.schema.compressed_tensors import CompressedTensorsInputSchema
 from humming.schema.humming import HummingWeightSchema
 from humming.testing import (
@@ -42,7 +43,7 @@ def _layer_config(
         bs_dtype=dtypes.float8e8m0,
         input_scale_group_size=input_scale_group_size,
         weight_scale_group_size=WEIGHT_GROUP_SIZE,
-        mma_type=MmaType.WGMMA,
+        sm_version=90,
         use_fused_e8m0_scale=use_fused_e8m0_scale,
     )
 
@@ -163,7 +164,7 @@ def test_mxfp4(expected_fused, test_case):
     if test_case.uses_m_major_input_scale:
         assert config.use_packed_k_layout
 
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
+    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
     if test_case.uses_m_major_input_scale:
         assert all(

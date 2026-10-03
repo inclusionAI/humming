@@ -45,6 +45,23 @@ SF_DTYPE_MAP = {
 }
 
 
+def get_default_mma_type(layer_config):
+    if layer_config.sm_version // 10 == 9:
+        return MmaType.WGMMA
+    if layer_config.use_block_scaled_mma and layer_config.sm_version // 10 == 12:
+        return MmaType.MXMMA
+    prefer_umma = layer_config.a_dtype.num_bits < 16 or (
+        layer_config.a_dtype == layer_config.c_dtype == dtypes.bfloat16
+    )
+    if layer_config.is_umma_supported and prefer_umma:
+        from humming.config.config import _cuda_compiler_version
+        from humming.jit.runtime import KernelRuntime
+
+        if _cuda_compiler_version(KernelRuntime._get_compiler()) >= (12, 9):
+            return MmaType.UMMA
+    return MmaType.MMA
+
+
 def calc_reg_count(rows, cols, ptx_dtype):
     total_bits = rows * cols * DTYPE_BIT_WIDTH_MAP[ptx_dtype]
     assert total_bits % (32 * 32) == 0
@@ -239,6 +256,10 @@ class WgmmaOpClassImpl:
             f"static void fma(uint64_t &desc, uint32_t *b, {reg_cd_type} *d, bool pred = true) {{",
             *self.generate_ptx(indent=2, has_scale_d=True).strip("\n").split("\n"),
             "};",
+            "CUDA_INLINE",
+            f"static void fma(uint64_t &desc, uint64_t &b_desc, {reg_cd_type} *d, bool pred = true) {{",
+            *self.generate_ptx(indent=2, has_scale_d=True, use_ss=True).strip("\n").split("\n"),
+            "};",
         ]
 
         code = "\n".join("  " + x if x else x for x in lines)
@@ -247,7 +268,7 @@ class WgmmaOpClassImpl:
 
         return code
 
-    def generate_ptx(self, indent=2, has_scale_d=True):
+    def generate_ptx(self, indent=2, has_scale_d=True, use_ss=False):
         a_dtype = self.a_dtype
         b_dtype = self.b_dtype
         cd_dtype = self.cd_dtype
@@ -264,19 +285,21 @@ class WgmmaOpClassImpl:
         start = 0
         end = 0
         param_placeholders_list = []
-        counts = [self.reg_cd_count, self.reg_b_count]
+        counts = [self.reg_cd_count, 1 if use_ss else self.reg_b_count]
         for i in range(len(counts)):
             end += counts[i]
             placeholder_str = ", ".join(f"%{x}" for x in range(start, end))
             param_placeholders_list.append("{" + placeholder_str + "}")
             start += counts[i]
+        if use_ss:
+            param_placeholders_list[1] = f"%{self.reg_cd_count}"
         param_placeholders_list.append(f"%{sum(counts)}")
 
         other_ptx_args = ", p" if has_scale_d else ", 1"
         # The dtype-specific PTX tail args (scale/trans flags) gate on the wgmma-A
         # operand dtype, which after the swap is project's b_dtype.
         if self.b_dtype in ["f16", "bf16"]:
-            other_ptx_args += ", 1, 1, 0"
+            other_ptx_args += ", 1, 1, 0, 0" if use_ss else ", 1, 1, 0"
         elif self.b_dtype in ["e4m3", "e5m2", "e2m1"]:
             other_ptx_args += ", 1, 1"
 
@@ -287,6 +310,8 @@ class WgmmaOpClassImpl:
         cd_params = []
         for i in range(self.reg_b_count):
             b_params.append(f' "r"(b[{i}])')
+        if use_ss:
+            b_params = [' "l"(b_desc)']
         for i in range(self.reg_cd_count):
             t = "f" if cd_dtype == "f32" else "r"
             cd_params.append(f'"+{t}"(d[{i}])')

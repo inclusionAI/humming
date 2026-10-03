@@ -1,7 +1,7 @@
 import pytest
 
 from humming import dtypes
-from humming.config import GemmType, LayerConfig, MmaType
+from humming.config import GemmType, LayerConfig
 from humming.device import DeviceInfo
 from humming.tune.sm90_h20 import Sm90H20Heuristics
 
@@ -21,7 +21,7 @@ def _layer(shape_n: int, shape_k: int, num_experts: int = 0) -> LayerConfig:
         c_dtype=dtypes.bfloat16,
         bs_dtype=dtypes.bfloat16,
         weight_scale_group_size=0,
-        mma_type=MmaType.WGMMA,
+        sm_version=90,
     )
 
 

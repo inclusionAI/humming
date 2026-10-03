@@ -23,7 +23,6 @@ class RepackWeightKernel(KernelRuntime):
     is_weight_packed: bool
     should_preprocess_for_int2fp: bool = False
     should_preprocess_with_zp: bool = False
-    use_wgmma: bool = False
     use_fused_e8m0_scale: bool = False
     group_size_zp: int = 0
     use_packed_k_layout: bool = False
@@ -35,7 +34,7 @@ class RepackWeightKernel(KernelRuntime):
         if self.use_packed_k_layout:
             assert self.weight_bits % 2 == 0, "use_packed_k_layout requires even-bit weight"
 
-        should_transpose_mini_block = self.use_wgmma and not self.use_fused_e8m0_scale
+        should_transpose_mini_block = self.use_packed_k_layout and not self.use_fused_e8m0_scale
 
         self.code = CODE_TEMPLATE.render(
             weight_bits=self.weight_bits,
@@ -43,7 +42,6 @@ class RepackWeightKernel(KernelRuntime):
             is_weight_packed=int(self.is_weight_packed),
             should_preprocess_for_int2fp=int(self.should_preprocess_for_int2fp),
             should_preprocess_with_zp=int(self.should_preprocess_with_zp),
-            use_wgmma=int(should_transpose_mini_block),
             group_size_zp=self.group_size_zp,
         )
         self.kernel_expr = (

@@ -6,6 +6,7 @@ import torch
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, SmemReuseMode
 from humming.config.config import _cuda_compiler_version
+from humming.config.mma import get_default_mma_type
 from humming.jit.runtime import KernelRuntime
 from humming.kernel.humming import HummingKernel
 from humming.layer import HummingLayer
@@ -13,8 +14,7 @@ from humming.schema import HummingWeightSchema
 from humming.testing import KernelTestCase, KernelTestRunner
 from humming.testing.data import generate_moe_tensors, generate_random_tensor
 from humming.transform import transform_humming_weight
-from humming.tune import get_heuristics_config
-from humming.tune.sm100 import Sm100Heuristics, Sm100UmmaHeuristics
+from humming.tune.sm100 import Sm100Heuristics, Sm100MmaHeuristics, Sm100UmmaHeuristics
 
 WEIGHT_CONFIGS = {
     "uint4": dict(b_dtype="uint4", weight_scale_group_size=128),
@@ -85,30 +85,33 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
         **scale_config,
     )
     expected = MmaType.MMA if a_dtype == dtypes.int8 and sm_version in (103, 107) else MmaType.UMMA
-    assert config.mma_type == expected
+    assert get_default_mma_type(config) == expected
 
 
 @pytest.mark.parametrize("packed", (False, True))
 @pytest.mark.parametrize("num_experts", (0, 2))
-@pytest.mark.parametrize("b_dtype", (dtypes.int8, dtypes.uint8))
-def test_umma_int8_ss_weight_encoding(packed, num_experts, b_dtype):
+@pytest.mark.parametrize("b_dtype", (dtypes.int8, dtypes.uint8, dtypes.int4, dtypes.uint4))
+def test_raw_integer_weight_encoding(packed, num_experts, b_dtype):
+    bits = b_dtype.num_bits
+    a_dtype = dtypes.int8 if bits == 8 else dtypes.int4
     shape = (2, 65, 256) if num_experts else (65, 256)
-    codes = torch.arange(256, dtype=torch.int32, device="cuda").expand(shape).contiguous()
-    weight = ops.pack_weight(codes, 8) if packed else codes
+    codes = torch.arange(256, dtype=torch.int32, device="cuda") % (1 << bits)
+    codes = codes.expand(shape).contiguous()
+    weight = ops.pack_weight(codes, bits) if packed else codes
     transformed = transform_humming_weight(
         weight,
         b_dtype=b_dtype,
-        a_dtype=dtypes.int8,
+        a_dtype=a_dtype,
         packed=packed,
         padded_shape_n=128,
         padded_shape_k=384,
-        use_umma_ss=True,
     )
-    expected = torch.nn.functional.pad((codes - 128).to(torch.int8), (0, 128, 0, 63))
-    torch.testing.assert_close(transformed.view(torch.int8), expected, rtol=0, atol=0)
+    expected = (codes - (1 << (bits - 1))) & ((1 << bits) - 1)
+    expected = torch.nn.functional.pad(expected, (0, 128, 0, 63))
+    torch.testing.assert_close(ops.unpack_weight(transformed, bits), expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
+@pytest.mark.parametrize("use_umma_ss", (True,), ids=("ss",))
 @pytest.mark.parametrize("cta_group_size", (1, 2))
 @pytest.mark.parametrize("gemm_type", (GemmType.DENSE, GemmType.INDEXED))
 def test_umma_int8(use_umma_ss, cta_group_size, gemm_type, monkeypatch):
@@ -147,8 +150,6 @@ def test_umma_int8(use_umma_ss, cta_group_size, gemm_type, monkeypatch):
             bs_dtype=dtypes.bfloat16,
             input_quant_mode="dynamic_token",
             weight_scale_type="channel",
-            mma_type=MmaType.UMMA,
-            use_umma_ss=use_umma_ss,
         ),
         compute_config=ComputeConfig(gemm_type=gemm_type),
         top_k=2,
@@ -166,7 +167,6 @@ def _case(name, gemm_type, **weight_values):
             num_experts=0 if gemm_type == GemmType.DENSE else 4,
             a_dtype=dtypes.bfloat16,
             c_dtype=dtypes.bfloat16,
-            mma_type=MmaType.UMMA,
             **(dict(bs_dtype="bfloat16") | weight_values),
         ),
         compute_config=ComputeConfig(gemm_type=gemm_type),
@@ -632,8 +632,10 @@ def test_umma_public_layer_switches_without_repacking(weight_name, gemm_type):
         (17, MmaType.MMA),
     ):
         torch.manual_seed(2026 + shape_m)
-        config = dataclasses.replace(layer.humming_config, mma_type=mma_type)
-        get_config = Sm100Heuristics.get_umma_config if mma_type == MmaType.UMMA else get_heuristics_config
+        config = layer.humming_config
+        get_config = Sm100MmaHeuristics.get_config
+        if mma_type == MmaType.UMMA:
+            get_config = Sm100Heuristics.get_umma_config
         tuning = get_config(
             config,
             shape_m=shape_m * (2 if num_experts else 1),
@@ -1041,7 +1043,9 @@ def test_umma_fp8_loading_and_output(
             "num_stages": 4,
             "num_ctas_per_sm": 1,
             "num_sms": 2,
-            "use_tma": use_tma,
+            "use_tma": True,
+            "use_tma_b": True,
+            "use_tma_bs": use_tma,
             "use_tma_a": use_tma,
             "use_tma_c": use_tma,
             "use_stream_k": False,
@@ -1100,7 +1104,8 @@ def test_umma_fp8_public_dispatch(shape_k, activation_dtype, weight_dtype):
     ).cuda()
     layer.load_state_dict(tensors, strict=False)
     layer.transform()
-    assert layer.humming_config.mma_type == MmaType.UMMA
+    assert get_default_mma_type(layer.humming_config) == MmaType.UMMA
+    assert layer.humming_config.use_raw_weight
     runner = KernelTestRunner(
         KernelTestCase(
             name="fp8-public",
@@ -1211,7 +1216,6 @@ def test_umma_mxf8_mxf4(
             bs_dtype=dtypes.float8e8m0,
             input_scale_group_size=32,
             weight_scale_group_size=32,
-            mma_type=MmaType.UMMA,
         ),
         compute_config=ComputeConfig(gemm_type=gemm_type, use_m_major_input_scale=use_tma),
         seed=2026,
@@ -1258,7 +1262,7 @@ def test_umma_mxf8_mxf4_public_dispatch(activation_dtype, group_size, scale_dtyp
     layer.load_state_dict(tensors, strict=False)
     layer.transform()
     assert layer.humming_config.use_block_scaled_mma
-    assert layer.humming_config.mma_type == MmaType.UMMA
+    assert get_default_mma_type(layer.humming_config) == MmaType.UMMA
     runner = KernelTestRunner(
         KernelTestCase(
             name="mx-public",
@@ -1298,7 +1302,7 @@ def test_umma_mxf8_mxf4_public_dispatch(activation_dtype, group_size, scale_dtyp
         (dtypes.float8e4m3, dtypes.float4e2m1, True, GemmType.GROUPED_MASKED, 48, 128, 128, True),
     ),
 )
-@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
+@pytest.mark.parametrize("use_umma_ss", (True,), ids=("ss",))
 def test_umma_cooperative_fp8(
     a_dtype,
     b_dtype,
@@ -1352,8 +1356,6 @@ def test_umma_cooperative_fp8(
         input_quant_mode="dynamic_group" if microscale else "dynamic_token",
         weight_scale_type="group" if microscale else "channel",
         has_bias=not microscale,
-        mma_type=MmaType.UMMA,
-        use_umma_ss=use_umma_ss,
     )
     case = KernelTestCase(
         name="cooperative-fp8",
@@ -1477,7 +1479,7 @@ def test_umma_cooperative_fp8(
 @pytest.mark.parametrize(
     "block_shape", ((64, 128, 128), (48, 256, 256), (256, 128, 256), (64, 128, 512), (240, 128, 256))
 )
-@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
+@pytest.mark.parametrize("use_umma_ss", (True,), ids=("ss",))
 def test_umma_fp4_activation(
     a_dtype,
     b_dtype,
@@ -1532,8 +1534,6 @@ def test_umma_fp4_activation(
         weight_scale_type="group",
         weight_scale_2_type="tensor",
         has_bias=True,
-        mma_type=MmaType.UMMA,
-        use_umma_ss=use_umma_ss,
     )
     case = KernelTestCase(
         name="fp4-activation",
@@ -1589,7 +1589,6 @@ def test_umma_secondary_input_scale(gemm_type, cta_group_size, quant_mode, has_c
         weight_scale_type="group",
         weight_scale_2_type="channel" if has_channel_data else "tensor",
         has_bias=has_channel_data,
-        mma_type=MmaType.UMMA,
     )
     case = KernelTestCase(
         name="secondary-input-scale",
@@ -1653,8 +1652,6 @@ def test_umma_ss_small_tile(dtype, weight_dtype, block_m, gemm_type, shape_k, mo
         input_scale_group_size=16 if is_fp4 else 0,
         weight_scale_group_size=16 if is_fp4 else 0,
         weight_scale_type="group" if is_fp4 else "channel",
-        mma_type=MmaType.UMMA,
-        use_umma_ss=True,
     )
     case = KernelTestCase(
         name="ss-small-tile",
@@ -1687,7 +1684,7 @@ def test_umma_ss_small_tile(dtype, weight_dtype, block_m, gemm_type, shape_k, mo
         (dtypes.float4e2m1, dtypes.float4e2m1),
     ),
 )
-@pytest.mark.parametrize("use_umma_ss", (False, True), ids=("ts", "ss"))
+@pytest.mark.parametrize("use_umma_ss", (True,), ids=("ss",))
 def test_umma_optional_group_scales(
     input_group,
     weight_group,
@@ -1732,9 +1729,8 @@ def test_umma_optional_group_scales(
         input_scale_group_size=input_group,
         weight_scale_group_size=weight_group,
         weight_scale_type="group" if weight_group else "channel",
-        use_umma_ss=use_umma_ss,
     )
-    assert config.mma_type == MmaType.UMMA
+    assert get_default_mma_type(config) == MmaType.UMMA
     case = KernelTestCase(
         name="optional-group-scales",
         layer_config=config,

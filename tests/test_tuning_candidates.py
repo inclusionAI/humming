@@ -3,7 +3,7 @@ import dataclasses
 import pytest
 
 from humming import dtypes
-from humming.config import GemmType, LayerConfig, MmaType
+from humming.config import GemmType, LayerConfig
 from humming.tune.candidate import (
     DeviceProfile,
     ScheduleCandidate,
@@ -38,7 +38,7 @@ def _layer(
         bs_dtype=bs_dtype,
         input_scale_group_size=input_scale_group_size,
         weight_scale_group_size=weight_scale_group_size,
-        mma_type=MmaType.WGMMA,
+        sm_version=90,
     )
 
 
@@ -72,6 +72,18 @@ def _candidate(**updates) -> ScheduleCandidate:
     }
     config.update(updates)
     return ScheduleCandidate.from_config("indexed_a16", config)
+
+
+@pytest.mark.parametrize("block_n", [32, 64, 128])
+def test_mma_group_scale_packing_limits_block_n(block_n):
+    layer = dataclasses.replace(
+        _layer(a_dtype=dtypes.float8e4m3, bs_dtype=dtypes.bfloat16, weight_scale_group_size=64),
+        sm_version=89,
+        use_packed_k_layout=False,
+    )
+    reasons = get_geometry_rejection_reasons(layer, (64, block_n, 128), (64, 16, 128))
+    expected_rejection = block_n < 64 and not layer.should_apply_bs_on_c
+    assert ("MMA group scales require block_n >= 64" in reasons) == expected_rejection
 
 
 def test_schedule_candidate_is_immutable_and_updates_config():

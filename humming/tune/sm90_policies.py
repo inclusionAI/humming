@@ -7,6 +7,7 @@ import torch
 
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType
+from humming.config.mma import get_default_mma_type
 from humming.tune.candidate import (
     CandidateAnalysis,
     ScheduleCandidate,
@@ -324,7 +325,7 @@ def _w4a8_enabled(
         and layer_config.sm_version == 90
         and layer_config.shape_n % 128 == 0
         and use_m_major_input_scale
-        and layer_config.mma_type == MmaType.WGMMA
+        and get_default_mma_type(layer_config) == MmaType.WGMMA
         and layer_config.a_dtype == dtypes.float8e4m3
         and layer_config.b_dtype == dtypes.float4e2m1
         and layer_config.as_dtype == dtypes.float32

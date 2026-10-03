@@ -303,7 +303,7 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getUint32("MULTI_CAST_SIZE_A"),
       reader.getUint32("MULTI_CAST_SIZE_B"),
       reader.getUint32("GEMM_TYPE_ID"),
-      reader.getUint32("MMA_TYPE_ID"),
+      static_cast<MmaType>(reader.getUint32("MMA_TYPE_ID")),
 
       reader.getBool("USE_STREAM_K"),
       reader.getBool("IS_FP_ZERO_POINT"),
@@ -330,7 +330,9 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getBool("USE_TMA_BIAS"),
       reader.getBool("USE_PDL"),
       reader.getBool("USE_PACKED_K_LAYOUT"),
-      reader.getBool("USE_UMMA_SS")};
+      reader.getBool("USE_UMMA_SS"),
+      reader.getBool("USE_RAW_WEIGHT"),
+      reader.getBool("USE_BLOCK_SCALED_MMA")};
 
   std::unique_lock lock(g_kernel_mutex);
   auto path_it = g_path_ids.find(cubin_path);

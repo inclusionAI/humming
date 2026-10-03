@@ -3,6 +3,7 @@ import functools
 import torch
 
 from humming.config import GemmType, LayerConfig
+from humming.config.mma import get_default_mma_type
 from humming.device import DeviceInfo, get_device_index
 from humming.tune.base import DeviceHeuristics
 from humming.tune.ppu_sm80 import PPUSm80Heuristics
@@ -109,6 +110,9 @@ def _get_heuristics_config(
     if isinstance(gemm_type, str):
         gemm_type = GemmType(gemm_type)
 
+    if use_f16_accum and layer_config.use_block_scaled_mma:
+        raise ValueError("block-scaled layers require FP32 accumulation")
+
     heuristics_cls = get_heuristics_class(device=device_index)
     if isinstance(shape_m, int):
         config = heuristics_cls.get_config(
@@ -118,6 +122,7 @@ def _get_heuristics_config(
             use_batch_invariant=use_batch_invariant,
             gemm_type=gemm_type,
         )
+        config.setdefault("mma_type", get_default_mma_type(layer_config).value)
         _apply_m_major_input_scale(config, use_m_major_input_scale, layer_config, gemm_type)
         _disable_indexed_input_scale_tma(config, gemm_type)
         _apply_raster_group_m(config, layer_config, gemm_type)
@@ -131,6 +136,7 @@ def _get_heuristics_config(
             gemm_type=gemm_type,
         )
         for entry in configs:
+            entry[2].setdefault("mma_type", get_default_mma_type(layer_config).value)
             _apply_m_major_input_scale(entry[2], use_m_major_input_scale, layer_config, gemm_type)
             _disable_indexed_input_scale_tma(entry[2], gemm_type)
             _apply_raster_group_m(entry[2], layer_config, gemm_type)

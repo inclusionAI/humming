@@ -2,6 +2,7 @@ import pytest
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
+from humming.config.mma import get_default_mma_type
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -39,7 +40,7 @@ def _case(
             bs_dtype=dtypes.bfloat16,
             weight_scale_group_size=weight_scale_group_size,
             weight_scale_group_size_n=weight_scale_group_size_n,
-            mma_type=mma_type,
+            sm_version=90 if mma_type == MmaType.WGMMA else None,
         ),
         compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
         seed=2026,
@@ -158,7 +159,7 @@ SHAPE_CASES = PROBLEM_SHAPE_CASES + PAD_SHAPE_CASES
 @pytest.mark.parametrize("test_case", SHAPE_CASES, ids=str)
 def test_shape(test_case):
     config = test_case.layer_config
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
+    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)
 

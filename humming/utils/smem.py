@@ -34,6 +34,7 @@ def _stage_storage_bytes(
     is_mxmma: bool,
     scale_block_m: int,
     logical_block_m: int,
+    mma_type: MmaType,
 ) -> int:
     block_m, block_n, block_k = block_shape
     a_bits = layer_config.a_dtype.num_bits
@@ -49,12 +50,13 @@ def _stage_storage_bytes(
     fields: list[tuple[int, int]] = []
     # a[]: alignas(1024); b[]: alignas(128)
     fields.append((block_m * block_k * a_bits // 8, 1024))
-    weight_smem_bits = max(8, b_bits) if layer_config.use_umma_ss and a_bits == 8 else b_bits
-    expand_low_bit_weight = layer_config.use_umma_ss and a_bits == 8 and b_bits < 8
+    use_umma_ss = mma_type == MmaType.UMMA and layer_config.use_raw_weight
+    weight_smem_bits = max(8, b_bits) if use_umma_ss and a_bits == 8 else b_bits
+    expand_low_bit_weight = use_umma_ss and a_bits == 8 and b_bits < 8
     weight_k_alignment = math.gcd(block_k, 128)
     weight_stage_k = round_up(block_k + 128 - weight_k_alignment, 128) if expand_low_bit_weight else block_k
-    weight_alignment = 1024 if layer_config.use_umma_ss else 128
-    weight_stage_n = max(block_n, 128) if layer_config.use_umma_ss else block_n
+    weight_alignment = 1024 if layer_config.use_raw_weight else 128
+    weight_stage_n = max(block_n, 128) if use_umma_ss else block_n
     fields.append((weight_stage_n * weight_stage_k * weight_smem_bits // 8, weight_alignment))
 
     if is_group_input_scale:
@@ -72,14 +74,14 @@ def _stage_storage_bytes(
         num_groups_b = ceil_div(block_k, layer_config.weight_scale_group_size)
         scale_n = block_n
         storage_groups_b = num_groups_b
-        if is_mxmma and layer_config.mma_type == MmaType.UMMA:
+        if is_mxmma and mma_type == MmaType.UMMA:
             storage_groups_b = round_up(num_groups_b, 4)
             scale_n = max(block_n, 128)
         fields.append((storage_groups_b * scale_n * bs_bits // 8, 128))
         if has_stage_zp:
             fields.append((num_groups_b * block_n * zp_bits // 8, 128))
 
-    if layer_config.use_umma_ss and is_mxmma:
+    if use_umma_ss and is_mxmma:
         scale_group_size = layer_config.mma_scale_group_size
         scale_words = ceil_div(block_k, 4 * scale_group_size)
         use_direct_weight_scale = (
@@ -122,16 +124,18 @@ def estimate_smem_size_layer(
     raster_group_m: int = 1,
     num_write_splits: int = 1,
     mma_accum_bits: int = 32,
+    mma_type: MmaType | str = MmaType.MMA,
     umma_cta_group_size: int = 1,
     umma_output_chunk_rows: int = 0,
 ) -> int:
+    mma_type = MmaType(mma_type)
     if smem_reuse_mode is None:
         smem_reuse_mode = SmemReuseMode.ALL_STAGES
-        if layer_config.mma_type == MmaType.UMMA:
+        if mma_type == MmaType.UMMA:
             smem_reuse_mode = SmemReuseMode.NONE
 
     smem_reuse_mode = SmemReuseMode(smem_reuse_mode)
-    if layer_config.mma_type == MmaType.UMMA:
+    if mma_type == MmaType.UMMA:
         use_mbarrier = True
         use_warp_spec = True
     block_m, block_n, block_k = block_shape
@@ -142,7 +146,7 @@ def estimate_smem_size_layer(
     zp_bits = 16 if layer_config.is_fp_zero_point else max(4, _next_pow2(layer_config.b_dtype.num_bits))
 
     stage_shape = (block_m // umma_cta_group_size, block_n, block_k)
-    stage_bytes = _stage_storage_bytes(layer_config, stage_shape, is_mxmma, scale_block_m, block_m)
+    stage_bytes = _stage_storage_bytes(layer_config, stage_shape, is_mxmma, scale_block_m, block_m, mma_type)
 
     channel_zp = layer_config.has_zero_point and layer_config.is_channel_weight_scale
     channel_zp_bytes = (block_n * zp_bits // 8) if channel_zp else 0
@@ -155,7 +159,7 @@ def estimate_smem_size_layer(
         and not layer_config.is_tensor_input_scale
     )
     has_channel_input_scale |= (
-        layer_config.mma_type != MmaType.UMMA
+        mma_type != MmaType.UMMA
         and layer_config.has_input_scale_2
         and not layer_config.is_tensor_input_scale_2
     )
@@ -217,9 +221,9 @@ def estimate_smem_size_layer(
         num_math_mbarriers = num_stages + 1
         add(num_math_mbarriers * 8, 8)  # math_mbar
 
-    if layer_config.mma_type == MmaType.UMMA:
+    if mma_type == MmaType.UMMA:
         add(16, 8)  # Accumulator ready/free
-        if layer_config.use_umma_ss and gemm_type == GemmType.INDEXED:
+        if layer_config.use_raw_weight and gemm_type == GemmType.INDEXED:
             add(16, 8)  # Output row-index buffers released by the epilogue
         add(4, 4)  # TMEM allocation
         operand_barrier_bytes = 8 * (num_stages + max(num_stages, 4))
@@ -246,6 +250,7 @@ def estimate_smem_size_config(
         tuning_config.block_shape,
         gemm_type,
         tuning_config.num_stages,
+        mma_type=tuning_config.mma_type or MmaType.MMA,
         warp_shape=tuning_config.warp_shape,
         smem_reuse_mode=tuning_config.smem_reuse_mode,
         use_mbarrier=bool(tuning_config.use_mbarrier),

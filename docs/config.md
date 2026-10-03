@@ -24,23 +24,34 @@ HummingKernel configurations are divided into three categories:
 | `has_zero_point` | Whether to enable zero point. When enabled, the dequantization changes from `x * scale` to `(x - zp) * scale`. Humming supports two zero point types (see below). |
 | `is_fp_zero_point` | Whether to use FP-type zero point. See `has_zero_point` for details. |
 | `has_bias` | Whether to use fused bias addition. |
-| `use_umma_ss` | Use shared-memory operands for native UMMA FP8/FP6/FP4 instead of the default TS path. Set before transforming weights; SS uses K-contiguous packed weight rows and requires `use_tma_b=True`. |
-| `mma_type` | Can be `mma`, `wgmma`, `umma`, or `mxmma`. This selects the weight layout and preferred tensor-core backend. |
 | `use_fused_e8m0_scale` | Fuse E8M0 group scales into MXFP4-to-FP8/INT8 weight conversion. Weight preprocessing extracts a secondary scale. |
 | `use_packed_k_layout` | Pack K slabs for WGMMA with 8-bit activations and even-bit weights. Can be explicitly enabled together with `use_fused_e8m0_scale`; transformed weights must use the same setting as the kernel. |
 
-`umma` requires SM100-family GPUs and CUDA 12.9+, with FP16/BF16 outputs and FP32
-accumulation. It supports FP16/BF16, FP8 and FP4 inputs. The default TS path shares
-the `mma` weight layout where operand formats are compatible; tuning selects the
-backend per shape.
+Weight preprocessing is independent of the tuning backend. `use_block_scaled_mma`
+and `use_native_dequant` are derived from the architecture, data types, quantization
+parameters, and (for native dequantization) compiler support.
 
-`use_umma_ss=True` selects a distinct weight layout for native low-bit operands,
-so transformed SS weights cannot be passed to TS or MMA kernels. It supports
-unscaled FP8/FP6/FP4 weights and the existing microscaled combinations, including
-MXFP8, MXFP4 and NVFP4. FP4/FP6 weights paired with FP8 inputs are expanded by TMA
-in shared memory. SS uses 256 threads: loading/issuing/scales in the first warpgroup,
-and the existing epilogue in the second. Dense and MoE scheduling, secondary scales,
-Stream-K, and cooperative two-CTA execution use the same interfaces as TS.
+Equal-bit-width A/B operands retain K-contiguous packed B rows, with padding and
+integer encoding conversion where needed. MMA/MXMMA load these rows into swizzled
+shared memory and use `ldmatrix`; WGMMA and UMMA use SS operands. Native E2M1,
+E3M2, and E2M3 weights paired with FP8 inputs on SM10x/SM11x automatically use raw rows when
+the data types and quantization parameters support UMMA. These weights require
+the UMMA SS TMA expansion path. Other mixed-width operands use repacking.
+`use_umma_ss` is now derived by the kernel and is not a layer configuration option.
+UMMA SS requires `use_tma_b=True`.
+
+Ordinary mixed-width weights use the same MMA repack layout across backends,
+including SM90. WGMMA adapts the register order during dequantization, including
+integer zero points. Weight transformation no longer takes `use_wgmma`.
+Re-transform ordinary weights previously repacked with the WGMMA mini-block order.
+Packed-K weights retain their existing layout and require WGMMA. Ordinary
+per-group scales use the shared layout described below; block scales and fused
+E8M0 scales have separate storage rules. A tuning override must be compatible
+with all stored tensors, including the scales.
+
+`umma` requires SM10x/SM11x GPUs and CUDA 12.9+, with FP16/BF16 outputs and FP32
+accumulation. TS continues to handle repacked mixed-width operands. Native SS
+uses 256 threads and retains dense/MoE, Stream-K and cooperative CTA scheduling.
 SS keeps the input-scale global-memory layout unchanged. It rearranges scales
 in the existing AS shared-memory storage when the M tile is 128-row aligned,
 and uses scratch storage otherwise. Scale copies and MMA instructions share
@@ -62,7 +73,7 @@ accounts for SS's single scale buffer, chunked output, and cooperative CTA pairs
 It retains whole-tile output for small M tiles and uses sampled expert sizes and
 available work to avoid underfilled tiles and short cooperative pipelines.
 These optimizations are selected internally; TS keeps its existing schedule.
-SS remains opt-in; a smaller thread count does not guarantee a faster kernel.
+SS is selected from the fixed weight layout and the tuning backend.
 
 **`use_int_weight_scale` preprocessing:**
 
@@ -87,6 +98,23 @@ weight_scale = weight_scale.to(torch.int16).view(dtype)
 | `use_batch_invariant` | Whether to enable batch invariance support. |
 
 ## TuningConfig
+
+`mma_type` selects `mma`, `wgmma`, `umma`, or `mxmma`. Heuristics resolve it per
+shape; explicit tuning configurations can override it without changing LayerConfig
+or transforming weights again, provided the selected backend supports the fixed
+weight and scale layouts. Block-scaled layers require UMMA on SM10x/SM11x or MXMMA
+on SM12x. Move `mma_type` from old layer dictionaries into tuning dictionaries and
+re-transform weights created with the old packing convention.
+
+On NVIDIA GPUs, ordinary per-group weight scales use the WGMMA layout for both
+MMA and WGMMA. For low-bit activations, MMA loads even and odd N channels into
+separate register sequences and applies the converted values to the corresponding
+accumulators. FP32 and integer accumulation need no intermediate scale repacking;
+FP16 accumulation assembles half2 pairs when applying scales. These MMA group-scale
+configurations require block N >= 64, matching the scale packing block.
+
+Re-transform group scales previously stored in the MMA layout. Fused E8M0, native
+block-scaled, channel, tensor, and block-scale layouts are unchanged.
 
 ### Block and Warp Shapes
 

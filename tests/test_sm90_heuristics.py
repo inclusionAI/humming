@@ -3,7 +3,7 @@ import math
 import pytest
 
 from humming import dtypes
-from humming.config import GemmType, LayerConfig, MmaType
+from humming.config import GemmType, LayerConfig
 from humming.device import DeviceInfo
 from humming.tune import _get_heuristics_config
 from humming.tune.sm90 import Sm90Heuristics
@@ -37,7 +37,6 @@ def _layer(
         bs_dtype=bs_dtype,
         input_scale_group_size=input_scale_group_size,
         weight_scale_group_size=weight_scale_group_size,
-        mma_type=MmaType.WGMMA,
     )
 
 
@@ -246,7 +245,6 @@ def test_short_k_does_not_leave_warp_k_larger_than_block_k():
             b_dtype=dtypes.uint7,
             c_dtype=dtypes.bfloat16,
             bs_dtype=dtypes.bfloat16,
-            mma_type=MmaType.WGMMA,
         ),
         shape_m=64,
         gemm_type=GemmType.DENSE,

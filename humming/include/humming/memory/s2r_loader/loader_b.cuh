@@ -62,7 +62,23 @@ public:
   }
 
   CUDA_INLINE
+  void load_raw(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t iter_id) {
+    constexpr uint32_t kSwizzleInt4s = MIN(8u, BlockShape::K * ElementB::kBits / 128);
+    uint32_t smem_base = cast_smem_ptr_to_uint(smem_ptr) / 128;
+    uint32_t lane_id = ctx.lane_id();
+    PRAGMA_UNROLL
+    for (uint32_t n = 0; n < WarpShape::N / 8; ++n) {
+      uint32_t row = ctx.n_warp_offset() + n * 8 + lane_id % 8;
+      uint32_t col = (ctx.k_warp_offset() * ElementB::kBits / 256 + iter_id) * 2 + (lane_id / 8) % 2;
+      uint32_t offset = (col / kSwizzleInt4s * BlockShape::N + row) * kSwizzleInt4s + col % kSwizzleInt4s;
+      uint32_t swizzled_offset = offset ^ ((smem_base + offset / 8) % kSwizzleInt4s);
+      ld_shared<2>(smem_ptr + swizzled_offset, reinterpret_cast<int4 *>(regs_ptr + n * 2));
+    }
+  }
+
+  CUDA_INLINE
   void load(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t iter_id) {
+    if constexpr (Ctx::kUseRawWeight) return load_raw(smem_ptr, regs_ptr, iter_id);
     if constexpr (Ctx::kUsePackedKLayout) return load_packed_k(smem_ptr, regs_ptr, iter_id);
     uint32_t warp_id = ctx.warp_id();
     uint32_t n_warp_id = ctx.n_warp_id();

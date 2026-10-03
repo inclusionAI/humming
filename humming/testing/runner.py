@@ -11,6 +11,7 @@ from filelock import FileLock
 import humming.utils.jit as jit_utils
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
+from humming.config.mma import get_default_mma_type
 from humming.device import current_device
 from humming.kernel.humming import HummingKernel
 from humming.schema import HummingWeightSchema
@@ -104,7 +105,7 @@ class KernelTestRunner:
         if tuning_source == "batch_invariant":
             self.compute_config = dataclasses.replace(self.compute_config, use_batch_invariant=True)
 
-        if self.layer_config.mma_type == MmaType.WGMMA:
+        if get_default_mma_type(self.layer_config) == MmaType.WGMMA:
             min_warp_shape_n = 32 if self.layer_config.a_dtype.num_bits == 16 else 16
             if self.layer_config.shape_n % (min_warp_shape_n * 4):
                 import pytest

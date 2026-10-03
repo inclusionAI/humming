@@ -79,7 +79,7 @@ public:
 
   CUDA_INLINE
   void transform_b(uint32_t buffer_id, uint32_t iter_id) {
-    if constexpr (std::is_same<ElementA, ElementB>::value) return;
+    if constexpr (Ctx::kUseRawWeight || std::is_same<ElementA, ElementB>::value) return;
 
     if constexpr (kUseFusedE8m0Scale) {
       uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
@@ -101,8 +101,20 @@ public:
         }
         uint32_t zp_index = kUsePackedKLayout ? iter_id : i;
         uint4 zp_vals = arith.prepare_zp_for_dequant(buffer_id, zp_index);
+        if constexpr (!kUsePackedKLayout && kHasZeroPoint && !kIsFpZeroPoint) {
+          // Ordinary weights retain MMA's N-major mini-block order while
+          // dequantizing. Match the zero points before converting to RS order.
+          uint32_t tmp = zp_vals.y;
+          zp_vals.y = zp_vals.z;
+          zp_vals.z = tmp;
+        }
         uint32_t *zp_vals_ptr = reinterpret_cast<uint32_t *>(&zp_vals);
         dequant<ElementB, ElementA, kHasZeroPoint, kIsFpZeroPoint, kNumWarpShapeNSplits>(regs_qb[buffer_id], regs_b_ptr, i, zp_vals_ptr);
+        if constexpr (!kUsePackedKLayout) {
+          uint32_t tmp = regs_b_ptr[1];
+          regs_b_ptr[1] = regs_b_ptr[2];
+          regs_b_ptr[2] = tmp;
+        }
         arith.may_apply_bs_and_zp_on_b(regs_b_ptr, i, buffer_id);
       };
     }
@@ -142,7 +154,18 @@ public:
 
       PRAGMA_UNROLL
       for (uint32_t j = 0; j < kNumIters; j++) {
-        MmaOpClass::fma(desc, regs_b[buffer_id][j][k], regs_c[0][delta_j + j][0], scale_d);
+        if constexpr (Ctx::kUseRawWeight) {
+          constexpr uint32_t kSwizzleK = kSwizzleBytes * 8 / ElementB::kBits;
+          uint32_t row = ctx.n_warp_id() / 4 * (WarpShape::N * 4) + j * MmaShape::N;
+          uint32_t col = ctx.k_warp_offset() + k_slab * kPartMmaShapeK;
+          uint32_t offset = (col / kSwizzleK * BlockShape::N + row) * kSwizzleBytes;
+          offset += col % kSwizzleK * ElementB::kBits / 8;
+          uint32_t b_addr = cast_smem_ptr_to_uint(ctx.smem.stages[stage_id].b) + offset;
+          uint64_t b_desc = make_wgmma_smem_desc<kSwizzleBytes>(b_addr);
+          MmaOpClass::fma(desc, b_desc, regs_c[0][delta_j + j][0], scale_d);
+        } else {
+          MmaOpClass::fma(desc, regs_b[buffer_id][j][k], regs_c[0][delta_j + j][0], scale_d);
+        }
       }
     }
 
@@ -163,7 +186,7 @@ public:
       // the live register set during weight conversion and WGMMA.
       constexpr uint32_t kScaleBlockM = BlockShape::M + (Ctx::kIsGroupedGemm ? 4 : 0);
       const uint32_t base = ctx.k_warp_offset() / 128 * kScaleBlockM +
-          ctx.m_warp_offset() + m_scale_offset + (ctx.lane_id() % 4) * 2;
+                            ctx.m_warp_offset() + m_scale_offset + (ctx.lane_id() % 4) * 2;
       const float *scale = reinterpret_cast<const float *>(ctx.smem.stages[stage_id].as);
       float2 *partial = reinterpret_cast<float2 *>(regs_c[0][0][0]);
       float2 *final = reinterpret_cast<float2 *>(regs_c[1][0][0]);

@@ -2,6 +2,7 @@ import pytest
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.config.mma import get_default_mma_type
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -135,7 +136,7 @@ DATATYPE_CASES = _make_cases()
 def test_datatype(test_case):
     skip_if_unsupported(
         a_dtype=test_case.layer_config.a_dtype,
-        mma_type=test_case.layer_config.mma_type.value,
+        mma_type=get_default_mma_type(test_case.layer_config).value,
     )
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)
@@ -156,3 +157,154 @@ def test_datatype_case_coverage():
     for bit_width in range(1, 9):
         assert any(case.layer_config.b_dtype.num_bits == bit_width for case in DATATYPE_CASES)
     assert {signature[2] for signature in signatures} == set(C_DTYPES)
+
+
+@pytest.mark.parametrize("a_dtype", ("float8e4m3", "int8", "int4"))
+@pytest.mark.parametrize("use_tma", (False, True))
+@pytest.mark.parametrize("block_k", (64, 128, 256))
+def test_raw_weight_backends(a_dtype, use_tma, block_k, monkeypatch):
+    import dataclasses
+
+    import torch
+
+    from humming.config import MmaType
+    from humming.device import current_device
+    from humming.tune.sm100 import Sm100UmmaHeuristics
+
+    skip_if_unsupported(a_dtype=a_dtype, use_tma=use_tma)
+    dtype = dtypes.DataType.from_str(a_dtype)
+    if block_k * dtype.num_bits < 512:
+        pytest.skip("the shared-memory row must contain at least 64 bytes")
+    config = LayerConfig(
+        shape_n=256,
+        shape_k=512,
+        a_dtype=dtype,
+        b_dtype=dtype,
+        c_dtype=dtypes.bfloat16,
+    )
+    assert "mma_type" not in config.to_dict()
+    assert config.use_raw_weight
+    test_case = KernelTestCase(
+        name="raw-weight-backends",
+        layer_config=config,
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+    )
+    runner = KernelTestRunner(test_case)
+    weight = runner.kernel_tensors["weight"]
+    assert weight.shape == (256, 512 * dtype.num_bits // 32)
+    original_weight = weight.clone()
+    layer_values = config.to_dict()
+
+    mma_types = [MmaType.MMA]
+    if current_device.sm_version == 90 and dtype != dtypes.int4:
+        mma_types.append(MmaType.WGMMA)
+    if config.is_umma_supported:
+        mma_types.append(MmaType.UMMA)
+    if config.use_block_scaled_mma:
+        mma_types = [get_default_mma_type(config)]
+
+    for mma_type in mma_types:
+
+        def select_config(layer_config, shape_m, gemm_type, mma_type=mma_type, **kwargs):
+            if mma_type == MmaType.UMMA:
+                return Sm100UmmaHeuristics.get_config(layer_config, shape_m, gemm_type=gemm_type)
+            use_wgmma = mma_type == MmaType.WGMMA
+            warp_n = 16 if use_wgmma else 32
+            return dict(
+                mma_type=mma_type.value,
+                block_shape=(16, 128 if use_wgmma else 64, block_k),
+                warp_shape=(16, warp_n, block_k),
+                num_stages=3,
+                use_tma=use_tma,
+                use_stream_k=False,
+            )
+
+        monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_config)
+        results = runner.run((17, 129))
+        assert all(result.tuning_config.mma_type == mma_type for result in results)
+        assert config.to_dict() == layer_values
+        torch.testing.assert_close(weight, original_weight, rtol=0, atol=0)
+        assert "mma_type" not in {field.name for field in dataclasses.fields(config)}
+
+
+@pytest.mark.parametrize(
+    "sm_version,mma_type,a_dtype,b_dtype,block_k",
+    (
+        (80, "mma", "int4", "int4", 128),
+        (90, "mma", "float8e4m3", "float8e4m3", 64),
+        (90, "wgmma", "float8e4m3", "float8e4m3", 64),
+        (90, "wgmma", "float8e4m3", "float8e4m3", 128),
+        (90, "wgmma", "int8", "int8", 128),
+        (120, "mxmma", "float4e2m1", "float4e2m1", 128),
+        (120, "mxmma", "float8e4m3", "float8e4m3", 64),
+        (90, "mma", "float16", "uint3", 64),
+        (90, "wgmma", "float16", "uint3", 64),
+        (90, "mma", "int8", "uint4", 128),
+        (90, "wgmma", "int8", "uint4", 128),
+        (90, "mma", "float8e4m3", "uint5", 128),
+        (90, "wgmma", "float8e4m3", "uint5", 128),
+    ),
+)
+def test_weight_cross_architecture_compiles(sm_version, mma_type, a_dtype, b_dtype, block_k, monkeypatch):
+    from humming.kernel.humming import HummingKernel
+
+    def init_sm_version(kernel):
+        kernel.sm_version_str = f"{kernel.sm_version}{'a' if kernel.sm_version >= 90 else ''}"
+
+    monkeypatch.setattr(HummingKernel, "init_sm_version", init_sm_version)
+    monkeypatch.setattr(HummingKernel, "register_kernel", lambda kernel: None)
+    use_wgmma = mma_type == "wgmma"
+    activation_bits = dtypes.DataType.from_str(a_dtype).num_bits
+    warp_n = 16 if use_wgmma and activation_bits < 16 else 32
+    kernel = HummingKernel(
+        sm_version=sm_version,
+        shape_n=256,
+        shape_k=512,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=a_dtype if activation_bits == 16 else "bfloat16",
+        weight_scale_group_size=64 if a_dtype != b_dtype else 0,
+        use_packed_k_layout=False,
+        mma_type=mma_type,
+        block_shape=(16, 128 if use_wgmma else 64, block_k),
+        warp_shape=(16, warp_n, block_k),
+        num_stages=3,
+        use_tma=sm_version >= 90,
+        use_stream_k=False,
+    )
+    assert kernel.use_raw_weight == (a_dtype == b_dtype)
+    assert "kMmaType" not in kernel.to_cpp_str(LayerConfig)
+
+
+@pytest.mark.parametrize("weight_bits", (3, 4, 7))
+def test_ordinary_repack_is_shared_with_sm90(weight_bits):
+    import torch
+
+    from humming import ops
+    from humming.transform import transform_humming_tensors
+
+    torch.manual_seed(2026)
+    values = torch.randint(0, 1 << weight_bits, (128, 256), device="cuda", dtype=torch.int32)
+    scales = torch.arange(1, 513, device="cuda", dtype=torch.float32).reshape(128, 4)
+    tensors = {
+        "weight": ops.pack_weight(values, weight_bits),
+        "weight_scale": scales.to(torch.bfloat16),
+    }
+    transformed = []
+    for sm_version in (80, 90):
+        config = LayerConfig(
+            shape_n=128,
+            shape_k=256,
+            a_dtype=dtypes.int8,
+            b_dtype=dtypes.DataType.from_str(f"uint{weight_bits}"),
+            c_dtype=dtypes.bfloat16,
+            bs_dtype=dtypes.bfloat16,
+            weight_scale_group_size=64,
+            use_packed_k_layout=False,
+            use_fused_e8m0_scale=False,
+            use_int_weight_scale=False,
+            sm_version=sm_version,
+        )
+        transformed.append(transform_humming_tensors(config, tensors))
+    for name in ("weight", "weight_scale"):
+        torch.testing.assert_close(transformed[0][name], transformed[1][name], rtol=0, atol=0)

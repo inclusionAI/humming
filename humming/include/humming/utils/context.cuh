@@ -53,12 +53,14 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kIsGroupedMaskedGemm = ComputeConfig::kGemmType == GemmType::GROUPED_MASKED;
   static constexpr bool kIsGroupedGemm = kIsGroupedContiguousGemm || kIsGroupedMaskedGemm;
 
-  static constexpr bool kUseWmma = LayerConfig::kMmaType == MmaType::MMA;
-  static constexpr bool kUseUmma = LayerConfig::kMmaType == MmaType::UMMA;
-  static constexpr bool kUseWgmma = LayerConfig::kMmaType == MmaType::WGMMA;
-  static constexpr bool kUseMxmma = LayerConfig::kMmaType == MmaType::MXMMA;
+  static constexpr bool kUseWmma = TuningConfig::kMmaType == MmaType::MMA;
+  static constexpr bool kUseUmma = TuningConfig::kMmaType == MmaType::UMMA;
+  static constexpr bool kUseWgmma = TuningConfig::kMmaType == MmaType::WGMMA;
+  static constexpr bool kUseMxmma = TuningConfig::kMmaType == MmaType::MXMMA;
 
   static constexpr bool kUseBlockScaledMma = LayerConfig::kUseBlockScaledMma;
+  static constexpr bool kUseMmaGroupScaleLayout1 = !USE_PPU && kUseWmma && ElementA::kBits < 16 &&
+                                                   LayerConfig::kIsGroupWeightScale && !LayerConfig::kUseFusedE8m0Scale;
   static constexpr bool kUseUmmaSplitLoads = false;
   static constexpr bool kUseUmmaSeparateInputScale = false;
   static constexpr bool kUseUmmaAsyncActivationLoads = false;
@@ -68,8 +70,8 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static_assert(!kUsePackedKLayout || WarpShape::K == 128);
   static constexpr uint32_t kPackedKFactor = kUsePackedKLayout ? 2 : 1;
   static constexpr bool kUsePackedLateAS = kUseWgmma && kUsePackedKLayout && WarpShape::N == 16 &&
-      LayerConfig::kUseFusedE8m0Scale && ElementA::kBits == 8 && ElementA::kIsFloatingPointType && MmaOpClass::kCTypeBits == 32 &&
-      LayerConfig::kInputScaleGroupSize == 128 && ComputeConfig::kUseMMajorInputScale;
+                                           LayerConfig::kUseFusedE8m0Scale && ElementA::kBits == 8 && ElementA::kIsFloatingPointType && MmaOpClass::kCTypeBits == 32 &&
+                                           LayerConfig::kInputScaleGroupSize == 128 && ComputeConfig::kUseMMajorInputScale;
 
 
   static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;

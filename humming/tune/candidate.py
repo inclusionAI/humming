@@ -5,6 +5,7 @@ from typing import Any
 
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType, SmemReuseMode
+from humming.config.mma import get_default_mma_type
 from humming.utils.smem import estimate_smem_size_layer
 
 
@@ -59,6 +60,7 @@ class ScheduleCandidate:
     candidate_id: str
     block_shape: tuple[int, int, int]
     warp_shape: tuple[int, int, int]
+    mma_type: MmaType | None = None
     use_stream_k: bool = True
     use_f16_accum: bool = False
     num_stages: int = 2
@@ -104,6 +106,7 @@ class ScheduleCandidate:
         use_warp_spec = _config_bool(config, "use_warp_spec", False)
         return cls(
             candidate_id=candidate_id,
+            mma_type=MmaType(config["mma_type"]) if config.get("mma_type") else None,
             block_shape=_positive_shape(config["block_shape"], "block_shape"),
             warp_shape=_positive_shape(config["warp_shape"], "warp_shape"),
             use_stream_k=_config_bool(config, "use_stream_k", True),
@@ -276,6 +279,7 @@ class _ResourceAnalysis:
 # Validate only invariants exercised by the migrated SM90 WGMMA policies.
 def get_problem_rejection_reasons(
     layer_config: LayerConfig,
+    mma_type: MmaType | None = None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     input_group_size = layer_config.input_scale_group_size
@@ -283,7 +287,8 @@ def get_problem_rejection_reasons(
     if input_group_size and layer_config.shape_k != input_group_size and unpadded_shape_k % input_group_size:
         msg = f"unpadded shape_k={unpadded_shape_k} is not divisible by input scale group={input_group_size}"
         reasons.append(msg)
-    if layer_config.mma_type != MmaType.WGMMA:
+    mma_type = mma_type or get_default_mma_type(layer_config)
+    if mma_type != MmaType.WGMMA:
         return tuple(reasons)
     if layer_config.a_dtype.num_bits != 16 and layer_config.as_dtype != dtypes.float32:
         reasons.append(f"WGMMA input scales must use float32 storage, got {layer_config.as_dtype}")
@@ -310,6 +315,7 @@ def _analyze_geometry(
     layer_config: LayerConfig,
     block_shape: tuple[int, int, int],
     warp_shape: tuple[int, int, int],
+    mma_type: MmaType | None = None,
 ) -> _GeometryAnalysis:
     reasons: list[str] = []
     for name, shape in (("block_shape", block_shape), ("warp_shape", warp_shape)):
@@ -353,7 +359,13 @@ def _analyze_geometry(
     if warp_shape[2] < min_warp_k:
         reasons.append(f"warp_k={warp_shape[2]} is smaller than minimum {min_warp_k}")
 
-    if layer_config.mma_type == MmaType.WGMMA and ratios is not None:
+    mma_type = mma_type or get_default_mma_type(layer_config)
+    is_low_bit_mma = mma_type == MmaType.MMA and layer_config.a_dtype.num_bits < 16
+    has_regular_group_scales = layer_config.is_group_weight_scale and not layer_config.use_fused_e8m0_scale
+    uses_layout1 = has_regular_group_scales and not layer_config.should_apply_bs_on_c
+    if is_low_bit_mma and uses_layout1 and block_shape[1] < 64:
+        reasons.append("MMA group scales require block_n >= 64")
+    if mma_type == MmaType.WGMMA and ratios is not None:
         if ratios[1] % 4:
             reasons.append(
                 f"WGMMA requires the block-N tile to contain a multiple of four warp-N tiles: {ratios[1]}"
@@ -418,7 +430,8 @@ def _analyze_execution(
         reasons.append(f"warp specialization requires a multiple of 128 math threads, got {num_math_threads}")
     if (schedule.use_warp_spec or schedule.use_tma) and not schedule.use_mbarrier:
         reasons.append("warp specialization and TMA require mbarrier synchronization")
-    if problem.layer_config.mma_type == MmaType.WGMMA and schedule.num_stages < 3:
+    mma_type = schedule.mma_type or get_default_mma_type(problem.layer_config)
+    if mma_type == MmaType.WGMMA and schedule.num_stages < 3:
         reasons.append(f"WGMMA requires at least three stages, got {schedule.num_stages}")
 
     if schedule.multi_cast_size_a > 1:
@@ -448,6 +461,7 @@ def _analyze_resources(
         schedule.block_shape,
         problem.gemm_type,
         schedule.num_stages,
+        mma_type=schedule.mma_type or get_default_mma_type(problem.layer_config),
         warp_shape=schedule.warp_shape,
         smem_reuse_mode=schedule.smem_reuse_mode,
         use_mbarrier=schedule.use_mbarrier,
@@ -507,11 +521,12 @@ def analyze_candidate(
         problem.layer_config,
         candidate.block_shape,
         candidate.warp_shape,
+        candidate.mma_type,
     )
     execution = _analyze_execution(problem, candidate, geometry)
     resources = _analyze_resources(problem, candidate, execution)
     hard_violations = (
-        get_problem_rejection_reasons(problem.layer_config)
+        get_problem_rejection_reasons(problem.layer_config, candidate.mma_type)
         + geometry.rejection_reasons
         + _get_tile_rejection_reasons(problem, candidate)
         + execution.rejection_reasons

@@ -3,6 +3,7 @@ import torch
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
+from humming.config.mma import get_default_mma_type
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -45,7 +46,7 @@ def _case(
             input_scale_group_size=input_group_size,
             weight_scale_group_size=weight_group_size,
             has_zero_point=has_zero_point,
-            mma_type=MmaType.MXMMA,
+            sm_version=120,
         ),
         compute_config=ComputeConfig(gemm_type=gemm_type),
         top_k=1 if is_dense else TOP_K,
@@ -218,8 +219,8 @@ MXMMA_CASES = MXMMA_FORMAT_CASES + MXMMA_ZERO_POINT_CASES
 @pytest.mark.parametrize("test_case", MXMMA_CASES, ids=str)
 def test_mxmma(test_case):
     config = test_case.layer_config
-    assert config.mma_type == MmaType.MXMMA
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
+    assert get_default_mma_type(config) == MmaType.MXMMA
+    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
     for result in results:
         torch.testing.assert_close(
@@ -232,7 +233,7 @@ def test_mxmma(test_case):
 
 
 def test_mxmma_case_coverage():
-    assert all(case.layer_config.mma_type == MmaType.MXMMA for case in MXMMA_CASES)
+    assert all(get_default_mma_type(case.layer_config) == MmaType.MXMMA for case in MXMMA_CASES)
     assert {case.layer_config.a_dtype for case in MXMMA_CASES} == {
         dtypes.float4e0m3,
         dtypes.float4e2m1,

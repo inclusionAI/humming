@@ -7,6 +7,13 @@
 
 #define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
 
+enum class MmaType : uint32_t {
+  MMA = 0,
+  WGMMA = 1,
+  UMMA = 2,
+  MXMMA = 3,
+};
+
 inline void check_curesult(const CUresult res, const char *func_name) {
   if (res != CUDA_SUCCESS) {
     const char *errName;
@@ -131,7 +138,7 @@ struct KernelData {
   uint32_t multi_cast_size_a;
   uint32_t multi_cast_size_b;
   uint32_t gemm_type_id;
-  uint32_t mma_type_id;
+  MmaType mma_type;
 
   bool use_stream_k;
   bool is_fp_zero_point;
@@ -159,6 +166,8 @@ struct KernelData {
   bool use_pdl;
   bool use_packed_k_layout;
   bool use_umma_ss;
+  bool use_raw_weight;
+  bool use_block_scaled_mma;
 };
 
 struct LoadedKernel {

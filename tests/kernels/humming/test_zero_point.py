@@ -2,6 +2,7 @@ import pytest
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.config.mma import get_default_mma_type
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -90,7 +91,7 @@ ZERO_POINT_CASES = _make_cases()
 def test_zero_point(test_case):
     skip_if_unsupported(
         a_dtype=test_case.layer_config.a_dtype,
-        mma_type=test_case.layer_config.mma_type.value,
+        mma_type=get_default_mma_type(test_case.layer_config).value,
     )
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)

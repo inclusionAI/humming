@@ -8,6 +8,8 @@ from humming.config import (
     WeightScale2Type,
     WeightScaleType,
 )
+from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -113,6 +115,19 @@ SCALE_CASES = (
         bs_dtype=dtypes.bfloat16,
     ),
     *BS_DTYPE_CASES,
+    *(
+        _case(
+            f"raw-fp8-group64-bs-{bs_dtype}",
+            a_dtype=dtypes.float8e4m3,
+            b_dtype=dtypes.float8e4m3,
+            bs_dtype=bs_dtype,
+            input_scale_group_size=64,
+            weight_scale_group_size=64,
+            use_int_weight_scale=False,
+            use_fused_e8m0_scale=False,
+        )
+        for bs_dtype in (dtypes.bfloat16, dtypes.float8e4m3)
+    ),
     _case(
         "tensor-float32",
         a_dtype=dtypes.bfloat16,
@@ -144,9 +159,27 @@ SCALE_CASES = (
 @pytest.mark.parametrize("test_case", SCALE_CASES, ids=str)
 def test_scale_config(test_case):
     config = test_case.layer_config
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
+    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)
+
+
+@pytest.mark.parametrize("sm_version", [80, 90, 100])
+@pytest.mark.parametrize("a_dtype", [dtypes.bfloat16, dtypes.float8e4m3, dtypes.int8])
+def test_group_scale_layout_is_independent_of_device(sm_version, a_dtype):
+    config = LayerConfig(
+        shape_n=1024,
+        shape_k=1024,
+        a_dtype=a_dtype,
+        b_dtype=dtypes.uint3,
+        c_dtype=dtypes.bfloat16,
+        bs_dtype=dtypes.bfloat16,
+        weight_scale_group_size=64,
+        use_int_weight_scale=False,
+        use_fused_e8m0_scale=False,
+        sm_version=sm_version,
+    )
+    assert config.should_apply_bs_on_c == (current_device.is_ppu and a_dtype.num_bits != 16)
 
 
 def test_scale_config_case_coverage():

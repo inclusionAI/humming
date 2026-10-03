@@ -7,6 +7,7 @@ from torch._dynamo.testing import CompileCounterWithBackend
 import humming.testing.runner as runner_module
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, WeightScale2Type
+from humming.config.mma import get_default_mma_type
 from humming.forward import humming_forward
 from humming.testing import (
     KernelTestCase,
@@ -109,7 +110,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             weight_scale_group_size=128,
             weight_scale_group_size_n=1,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     _kernel_case(
@@ -143,7 +144,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             input_scale_group_size=GROUPED_INPUT_SIZE,
             weight_scale_group_size=128,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     _kernel_case(
@@ -155,7 +156,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             weight_scale_group_size=128,
             weight_scale_group_size_n=1,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     _kernel_case(
@@ -167,7 +168,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             weight_scale_group_size=128,
             has_zero_point=True,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     *(
@@ -184,7 +185,7 @@ SPECIAL_WEIGHT_CASES = (
                 if input_group_size == 0
                 else WeightScale2Type.TENSOR,
                 num_experts=0 if gemm_type == GemmType.DENSE else 8,
-                mma_type=MmaType.WGMMA,
+                sm_version=90,
                 use_packed_k_layout=True,
             ),
             gemm_type=gemm_type,
@@ -246,7 +247,7 @@ def test_forward_fullgraph():
 )
 def test_special_weight_path(required_features, test_case):
     config = test_case.layer_config
-    if "use_fused_e8m0_scale" in required_features and config.mma_type == MmaType.MXMMA:
+    if "use_fused_e8m0_scale" in required_features and get_default_mma_type(config) == MmaType.MXMMA:
         pytest.skip("fused E8M0 scale is not supported by MXMMA")
 
     for feature in required_features:
@@ -254,7 +255,7 @@ def test_special_weight_path(required_features, test_case):
     if "use_int_weight_scale" in required_features or "use_fused_e8m0_scale" in required_features:
         assert config.weight_scale_2_type != WeightScale2Type.NONE
 
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
+    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)
 
