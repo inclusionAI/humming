@@ -426,3 +426,91 @@ def test_output_chunk_rows_rejects_invalid_heights(output_chunk_rows):
             warp_shape=(32, 32, 64),
             output_chunk_rows=output_chunk_rows,
         )
+
+
+@pytest.mark.parametrize("sm_version", (100, 103, 107, 110))
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype",
+    (
+        (dtypes.bfloat16, dtypes.uint4),
+        (dtypes.int8, dtypes.int8),
+        (dtypes.float8e4m3, dtypes.float8e4m3),
+        (dtypes.float8e4m3, dtypes.float4e2m1),
+        (dtypes.float4e2m1, dtypes.float4e2m1),
+    ),
+)
+def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
+    from humming.config import MmaType
+    from humming.config.mma import get_default_mma_type
+
+    scale_config = {}
+    if a_dtype == dtypes.float4e2m1:
+        scale_config = dict(
+            as_dtype=dtypes.float8e4m3,
+            bs_dtype=dtypes.float8e4m3,
+            input_scale_group_size=16,
+            weight_scale_group_size=16,
+            input_quant_mode="dynamic_group",
+        )
+    config = LayerConfig(
+        sm_version=sm_version,
+        shape_n=256,
+        shape_k=256,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=dtypes.bfloat16,
+        **scale_config,
+    )
+    expected = MmaType.MMA if a_dtype == dtypes.int8 and sm_version in (103, 107) else MmaType.UMMA
+    assert get_default_mma_type(config) == expected
+
+
+@pytest.mark.parametrize(
+    "sm_version,a_dtype,shape_n,use_f16_accum,expected",
+    (
+        (103, "bfloat16", 256, False, "umma"),
+        (103, "float16", 256, False, "umma"),
+        (103, "float16", 256, True, "mma"),
+        (103, "bfloat16", 192, False, "mma"),
+        (90, "bfloat16", 256, False, "wgmma"),
+        (80, "bfloat16", 256, False, "mma"),
+    ),
+)
+def test_heuristic_tests_prefer_available_backend(
+    sm_version, a_dtype, shape_n, use_f16_accum, expected, monkeypatch
+):
+    from humming.config import ComputeConfig
+    from humming.device import DeviceInfo
+    from humming.testing import tuning
+
+    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
+    layer = LayerConfig(
+        shape_n=shape_n,
+        shape_k=1024,
+        sm_version=sm_version,
+        a_dtype=a_dtype,
+        b_dtype="uint4",
+        c_dtype=a_dtype,
+        weight_scale_group_size=128,
+    )
+    compute = ComputeConfig(gemm_type=GemmType.DENSE, use_f16_accum=use_f16_accum)
+    configs = tuning.generate_heuristics_configs(layer, compute, (1, 17, 257))
+    assert {config["mma_type"] for config in configs} == {expected}
+
+
+def test_heuristic_test_mode_has_separate_cache_entries(monkeypatch):
+    from humming.device import current_device
+    from humming.tune import get_heuristics_config
+
+    if current_device.sm_version // 10 not in (10, 11):
+        pytest.skip("requires a device with both MMA and UMMA")
+    layer = LayerConfig(
+        shape_n=256, shape_k=1024, a_dtype="bfloat16", b_dtype="uint4", c_dtype="bfloat16",
+    )
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("HUMMING_TEST_TUNING_SOURCE", raising=False)
+    assert get_heuristics_config(layer, 17)["mma_type"] == "mma"
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
+    assert get_heuristics_config(layer, 17)["mma_type"] == "umma"
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "sampled")
+    assert get_heuristics_config(layer, 17)["mma_type"] == "mma"

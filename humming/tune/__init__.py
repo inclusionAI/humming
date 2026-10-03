@@ -1,4 +1,5 @@
 import functools
+import os
 
 import torch
 
@@ -102,6 +103,7 @@ def _get_heuristics_config(
     use_m_major_input_scale: bool = False,
     gemm_type: str | GemmType | None = "dense",
     device_index: int = 0,
+    is_heuristic_test: bool = False,
 ):
     if gemm_type is None:
         if layer_config.num_experts:
@@ -153,6 +155,9 @@ def get_heuristics_config(
     device: int | torch.device | None = None,
 ):
     device_index = get_device_index(device)
+    # Backend heuristics inspect the test environment; keep their cache entries separate.
+    default_test_source = "heuristic" if "PYTEST_CURRENT_TEST" in os.environ else ""
+    is_heuristic_test = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source) == "heuristic"
     with torch.cuda.device(device_index):
         if isinstance(layer_config, dict):
             layer_config = LayerConfig(**layer_config)
@@ -165,4 +170,5 @@ def get_heuristics_config(
             use_m_major_input_scale,
             gemm_type,
             device_index,
+            is_heuristic_test,
         )

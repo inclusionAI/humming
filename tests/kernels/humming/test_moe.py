@@ -57,6 +57,53 @@ def _case(
 
 
 MOE_CASES = (
+    _case(
+        "indexed-uint8-zp",
+        GemmType.INDEXED,
+        b_dtype=dtypes.uint8,
+        weight_scale_group_size=64,
+        has_zero_point=True,
+    ),
+    _case("grouped-masked-fp6", GemmType.GROUPED_MASKED, b_dtype=dtypes.float6e3m2),
+    _case("grouped-contiguous-fp8", GemmType.GROUPED_CONTIGUOUS, b_dtype=dtypes.float8e3m4),
+    _case(
+        "grouped-contiguous-nvfp4",
+        GemmType.GROUPED_CONTIGUOUS,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e4m3,
+        weight_scale_group_size=16,
+        weight_scale_2_type="tensor",
+    ),
+    _case(
+        "indexed-mxfp4",
+        GemmType.INDEXED,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+        weight_scale_group_size=32,
+    ),
+    _case(
+        "grouped-masked-block-scale",
+        GemmType.GROUPED_MASKED,
+        bs_dtype=dtypes.float32,
+        weight_scale_type="block",
+        weight_scale_group_size=64,
+        weight_scale_group_size_n=64,
+    ),
+    _case(
+        "indexed-secondary-channel",
+        GemmType.INDEXED,
+        b_dtype=dtypes.uint3,
+        weight_scale_group_size=64,
+        weight_scale_2_type="channel",
+        has_bias=True,
+    ),
+    _case(
+        "grouped-contiguous-fp-zp",
+        GemmType.GROUPED_CONTIGUOUS,
+        weight_scale_group_size=64,
+        has_zero_point=True,
+        is_fp_zero_point=True,
+    ),
     _case("indexed", GemmType.INDEXED),
     _case(
         "indexed-static-input",

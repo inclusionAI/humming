@@ -114,6 +114,37 @@ SCALE_CASES = (
         b_dtype=dtypes.uint4,
         bs_dtype=dtypes.bfloat16,
     ),
+    _case(
+        "channel-e8m0-bias",
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.uint4,
+        bs_dtype=dtypes.float8e8m0,
+        has_bias=True,
+    ),
+    _case(
+        "channel-e4m3-bias",
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.uint4,
+        bs_dtype=dtypes.float8e4m3,
+        has_bias=True,
+    ),
+    _case(
+        "secondary-channel-bias",
+        a_dtype=dtypes.float16,
+        c_dtype=dtypes.float16,
+        b_dtype=dtypes.uint4,
+        weight_scale_group_size=128,
+        weight_scale_2_type=WeightScale2Type.CHANNEL,
+        has_bias=True,
+    ),
+    _case(
+        "secondary-tensor-bias",
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.uint4,
+        weight_scale_group_size=128,
+        weight_scale_2_type=WeightScale2Type.TENSOR,
+        has_bias=True,
+    ),
     *BS_DTYPE_CASES,
     *(
         _case(
@@ -246,5 +277,41 @@ def test_raw_wgmma_ss_block_scale_layout(warp_n, input_group, monkeypatch):
         use_tma=True, use_warp_spec=True, use_stream_k=False,
     )
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))
+
+
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype,input_group,weight_group,quant_mode",
+    (
+        ("float8e4m3", "float8e4m3", 0, 32, "dynamic_token"),
+        ("float8e4m3", "float4e2m1", 32, 0, "dynamic_group"),
+        ("float4e2m1", "float4e2m1", 0, 0, "dynamic_token"),
+        ("float8e4m3", "float8e4m3", 0, 0, "static_tensor"),
+        ("float8e4m3", "float4e2m1", 0, 32, "dynamic_token"),
+        ("float4e2m1", "float4e2m1", 32, 0, "dynamic_group"),
+    ),
+)
+def test_optional_native_group_scales(a_dtype, b_dtype, input_group, weight_group, quant_mode):
+    layer = LayerConfig(
+        shape_n=256,
+        shape_k=512,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=dtypes.bfloat16,
+        as_dtype=dtypes.float8e8m0 if input_group else None,
+        bs_dtype=dtypes.float8e8m0 if weight_group else dtypes.bfloat16,
+        input_quant_mode=quant_mode,
+        input_scale_group_size=input_group,
+        weight_scale_group_size=weight_group,
+        weight_scale_type="group" if weight_group else "channel",
+    )
+    skip_if_unsupported(a_dtype=layer.a_dtype, mma_type=get_default_mma_type(layer).value)
+    case = KernelTestCase(
+        name="optional-native-group-scales",
+        layer_config=layer,
+        compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+        seed=2026,
+    )
     results = KernelTestRunner(case).run((1, 17, 129))
     assert_kernel_test_shape_coverage(results, (1, 17, 129))

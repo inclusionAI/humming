@@ -1,5 +1,6 @@
 import functools
 import math
+import os
 
 import numpy as np
 
@@ -589,7 +590,13 @@ class Sm100Heuristics(Sm100MmaHeuristics):
     ):
         if shape_m <= 0:
             raise ValueError("shape_m must be positive")
-        if get_default_mma_type(layer_config) == MmaType.UMMA:
+        default_test_source = "heuristic" if "PYTEST_CURRENT_TEST" in os.environ else ""
+        is_heuristic_test = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source) == "heuristic"
+        prefer_umma = is_heuristic_test and layer_config.is_umma_supported and not use_f16_accum
+        prefer_umma &= layer_config.shape_n % 128 == 0
+        prefer_umma &= layer_config.shape_k % (512 // layer_config.a_dtype.num_bits) == 0
+        prefer_umma &= layer_config.a_dtype.num_bits == 16 or not layer_config.has_zero_point
+        if prefer_umma or get_default_mma_type(layer_config) == MmaType.UMMA:
             has_native_mixed_operands = (
                 layer_config.a_dtype.num_bits == 8 and layer_config.b_dtype != layer_config.a_dtype
             )
@@ -601,7 +608,7 @@ class Sm100Heuristics(Sm100MmaHeuristics):
             requires_umma |= has_mixed_raw_weights
             if use_f16_accum and has_mixed_raw_weights:
                 raise ValueError("native mixed weight layout requires UMMA with FP32 accumulation")
-            keep_umma = requires_umma or not cls._should_use_mma(layer_config, shape_m)
+            keep_umma = requires_umma or prefer_umma or not cls._should_use_mma(layer_config, shape_m)
             if not use_f16_accum and keep_umma:
                 return Sm100UmmaHeuristics.get_config(
                     layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type

@@ -43,6 +43,7 @@ B_DTYPES = (
     "float5e2m2",
     "float5e4m0",
     "float6e2m3",
+    "float6e3m2",
     "float6e4m1",
     "float7e0m6",
     "float7e2m4",
@@ -51,6 +52,7 @@ B_DTYPES = (
     "float8e1m6",
     "float8e4m3",
     "float8e5m2",
+    "float8e3m4",
 )
 
 C_DTYPES = ("float16", "bfloat16")
@@ -494,3 +496,34 @@ def test_wgmma_tma_a_general_geometry(a_dtype, b_dtype, block_k, use_warp_spec, 
     )
     results = KernelTestRunner(case).run((1, 17, 129))
     assert_kernel_test_shape_coverage(results, (1, 17, 129))
+
+
+@pytest.mark.parametrize("packed", (False, True))
+@pytest.mark.parametrize("num_experts", (0, 2))
+@pytest.mark.parametrize("b_dtype", (dtypes.int8, dtypes.uint8, dtypes.int4, dtypes.uint4))
+def test_raw_integer_weight_encoding(packed, num_experts, b_dtype):
+    import torch
+
+    from humming import ops
+    from humming.transform import transform_humming_weight
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    bits = b_dtype.num_bits
+    a_dtype = dtypes.int8 if bits == 8 else dtypes.int4
+    shape = (2, 65, 256) if num_experts else (65, 256)
+    codes = torch.arange(256, dtype=torch.int32, device="cuda") % (1 << bits)
+    codes = codes.expand(shape).contiguous()
+    weight = ops.pack_weight(codes, bits) if packed else codes
+    transformed = transform_humming_weight(
+        weight,
+        b_dtype=b_dtype,
+        a_dtype=a_dtype,
+        packed=packed,
+        padded_shape_n=128,
+        padded_shape_k=384,
+    )
+    expected = (codes - (1 << (bits - 1))) & ((1 << bits) - 1)
+    expected = torch.nn.functional.pad(expected, (0, 128, 0, 63))
+    torch.testing.assert_close(ops.unpack_weight(transformed, bits), expected, rtol=0, atol=0)

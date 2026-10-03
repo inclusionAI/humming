@@ -205,3 +205,52 @@ def test_mxfp4_input_schema_compatibility(checkpoint_format, group_size):
     ).to_humming_schema(torch.bfloat16)
     assert inputs.input_scale_dtype is None
     assert inputs.is_compatible_with(weight, torch.bfloat16) == (group_size == INPUT_GROUP_SIZE)
+
+
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype,group_size,scale_dtype,quant_mode,gemm_type",
+    (
+        ("float4e2m1", "float4e2m1", 32, "float8e8m0", "dynamic_group", GemmType.DENSE),
+        ("float4e2m1", "float4e2m1", 16, "float8e4m3", "dynamic_group_token", GemmType.INDEXED),
+        ("float4e2m1", "float4e2m1", 16, "float8e8m0", "static_tensor_dynamic_group", GemmType.DENSE),
+        ("float4e0m3", "float4e0m3", 16, "float8e4m3", "dynamic_group_token", GemmType.DENSE),
+        ("float4e0m3", "float4e2m1", 16, "float8e4m3", "dynamic_group_token", GemmType.INDEXED),
+        ("float4e2m1", "float4e0m3", 16, "float8e8m0", "dynamic_group", GemmType.GROUPED_CONTIGUOUS),
+        ("float8e4m3", "float4e2m1", 32, "float8e8m0", "dynamic_group", GemmType.DENSE),
+        ("float8e5m2", "float6e3m2", 32, "float8e8m0", "dynamic_group", GemmType.INDEXED),
+        ("float8e3m4", "float8e3m4", 32, "float8e8m0", "dynamic_group", GemmType.DENSE),
+        ("float8e4m3", "float6e2m3", 32, "float8e8m0", "dynamic_group", GemmType.GROUPED_MASKED),
+    ),
+)
+def test_native_block_scaled(a_dtype, b_dtype, group_size, scale_dtype, quant_mode, gemm_type):
+    """Numerical contracts shared by native block-scaled backends and sampled tuning."""
+    layer = LayerConfig(
+        shape_n=512,
+        shape_k=1024,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=dtypes.bfloat16,
+        as_dtype=scale_dtype,
+        bs_dtype=scale_dtype,
+        input_scale_group_size=group_size,
+        weight_scale_group_size=group_size,
+        input_quant_mode=quant_mode,
+        weight_scale_2_type="tensor",
+        has_bias=True,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+    )
+    backend = get_default_mma_type(layer)
+    skip_if_unsupported(a_dtype=layer.a_dtype, mma_type=backend.value)
+    if not layer.use_block_scaled_mma:
+        pytest.skip("the device does not support this native block-scaled format")
+    case = KernelTestCase(
+        name="native-block-scaled",
+        layer_config=layer,
+        compute_config=ComputeConfig(
+            gemm_type=gemm_type,
+            use_m_major_input_scale=gemm_type != GemmType.INDEXED,
+        ),
+        seed=2026,
+    )
+    results = KernelTestRunner(case).run((1, 17, 129))
+    assert_kernel_test_shape_coverage(results, (1, 17, 129))
