@@ -50,15 +50,11 @@ def get_default_mma_type(layer_config):
         return MmaType.WGMMA
     if layer_config.use_block_scaled_mma and layer_config.sm_version // 10 == 12:
         return MmaType.MXMMA
-    prefer_umma = layer_config.a_dtype.num_bits < 16 or (
-        layer_config.a_dtype == layer_config.c_dtype == dtypes.bfloat16
-    )
+    has_low_bit_activation = layer_config.a_dtype.num_bits < 16
+    has_bfloat16_input_output = layer_config.a_dtype == layer_config.c_dtype == dtypes.bfloat16
+    prefer_umma = has_low_bit_activation or has_bfloat16_input_output
     if layer_config.is_umma_supported and prefer_umma:
-        from humming.config.config import _cuda_compiler_version
-        from humming.jit.runtime import KernelRuntime
-
-        if _cuda_compiler_version(KernelRuntime._get_compiler()) >= (12, 9):
-            return MmaType.UMMA
+        return MmaType.UMMA
     return MmaType.MMA
 
 
