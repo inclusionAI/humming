@@ -19,6 +19,8 @@ from humming.config import (
 from humming.config.config import _cuda_compiler_version
 from humming.config.mma import (
     get_default_mma_type,
+    get_mxmma_compiler_error,
+    get_mxmma_scale_config,
     get_register_budget_error,
 )
 from humming.device import current_device, get_device_index
@@ -244,23 +246,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.warp_shape[0] % mma_shape_m == 0
             assert self.warp_shape[1] % mma_shape_n == 0
             assert self.warp_shape[2] % mma_shape_k == 0
-            group = (
-                self.weight_scale_group_size
-                or self.input_scale_group_size
-                or (32 if self.a_dtype.num_bits == 4 else mma_shape_k)
-            )
-            assert mma_shape_k % group == 0
-            scale_vec = mma_shape_k // group
-
+            scale_vec, sf_dtype = get_mxmma_scale_config(self)
             use_native_weight = self.use_raw_weight or self.mxmma_native_mixed
             self.mma_b_dtype = self.b_dtype if use_native_weight else self.a_dtype
-            sf_dtype = (
-                self.bs_dtype
-                if self.is_group_weight_scale or self.is_block_weight_scale
-                else self.as_dtype
-                if self.input_scale_group_size > 0
-                else dtypes.float8e8m0
-            )
             return MmaOpClass.from_config(
                 self.mma_type,
                 mma_shape_m,
@@ -419,10 +407,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         }
         assert self.a_dtype in dtype_map
         assert self.sm_version >= dtype_map[self.a_dtype]
-        has_e0m3_operand = dtypes.float4e0m3 in (self.a_dtype, self.b_dtype)
-        if self.sm_version == 121 and self.mma_type == MmaType.MXMMA and has_e0m3_operand:
-            err_msg = "E0M3 MXMMA on SM121 requires CUDA 13.1 or newer (PTX ISA 9.1)"
-            assert _cuda_compiler_version(self._get_compiler()) >= (13, 1), err_msg
         assert self.b_dtype.num_bits <= 8
         assert self.b_dtype.num_bits <= self.a_dtype.num_bits
         if self.b_dtype.is_integer_type and self.a_dtype.is_integer_type:
@@ -477,6 +461,10 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.mma_type == MmaType.UMMA:
             assert self.is_umma_supported, "UMMA does not support these layer parameters"
             assert _cuda_compiler_version(self._get_compiler()) >= (12, 9)
+        if self.mma_type == MmaType.MXMMA:
+            compiler_version = _cuda_compiler_version(self._get_compiler())
+            compiler_error = get_mxmma_compiler_error(self, compiler_version)
+            assert compiler_error is None, compiler_error
         if self.mma_type == MmaType.WGMMA:
             assert self.sm_version == 90, "WGMMA requires SM90"
         if self.use_raw_weight and self.a_dtype.num_bits != self.b_dtype.num_bits:

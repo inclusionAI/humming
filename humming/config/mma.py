@@ -58,6 +58,36 @@ def get_default_mma_type(layer_config):
     return MmaType.MMA
 
 
+def get_mxmma_scale_config(layer_config):
+    """Return the scale vector size and dtype used by the generated MXMMA instruction."""
+    mma_shape_k = 256 // layer_config.a_dtype.num_bits
+    group_size = (
+        layer_config.weight_scale_group_size
+        or layer_config.input_scale_group_size
+        or (32 if layer_config.a_dtype.num_bits == 4 else mma_shape_k)
+    )
+    assert mma_shape_k % group_size == 0
+    scale_dtype = (
+        layer_config.bs_dtype
+        if layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
+        else layer_config.as_dtype
+        if layer_config.input_scale_group_size > 0
+        else dtypes.float8e8m0
+    )
+    return mma_shape_k // group_size, scale_dtype
+
+
+def get_mxmma_compiler_error(layer_config, compiler_version):
+    scale_vec, scale_dtype = get_mxmma_scale_config(layer_config)
+    uses_fp4_4x = layer_config.a_dtype.num_bits == 4 and scale_vec == 4
+    if uses_fp4_4x and scale_dtype == dtypes.float8e8m0 and compiler_version < (13, 1):
+        return (
+            "MXMMA kind::mxf4nvf4 with scale_vec::4X and UE8M0 scales "
+            "requires CUDA 13.1 or newer (PTX ISA 9.1)"
+        )
+    return None
+
+
 def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, registers_per_sm=64 * 1024):
     """Return a diagnostic when accumulators and one operand buffer exhaust the budget."""
     mma_type = tuning_config.mma_type or get_default_mma_type(layer_config)
