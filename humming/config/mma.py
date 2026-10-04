@@ -88,21 +88,27 @@ def get_mxmma_compiler_error(layer_config, compiler_version):
     return None
 
 
-def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, registers_per_sm=64 * 1024):
+def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, registers_per_sm=None):
     """Return a diagnostic when accumulators and one operand buffer exhaust the budget."""
     mma_type = tuning_config.mma_type or get_default_mma_type(layer_config)
     if mma_type == MmaType.UMMA:
         return None  # UMMA accumulators use TMEM and have separate resource checks.
+    if registers_per_sm is None:
+        registers_per_sm = current_device.max_registers_per_sm
     warp_m, warp_n, warp_k = tuning_config.warp_shape
     num_math_threads = math.prod(tuning_config.block_shape) // math.prod(tuning_config.warp_shape) * 32
     num_threads = num_math_threads + (128 if tuning_config.use_warp_spec else 0)
     launch_budget = registers_per_sm // (num_threads * tuning_config.num_ctas_per_sm) // 8 * 8
     accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
-    has_group_accumulator = mma_type != MmaType.MXMMA and layer_config.a_dtype.num_bits < 16 and (
-        layer_config.input_scale_group_size > 0
-        or (
-            not layer_config.use_fused_e8m0_scale
-            and (layer_config.is_group_weight_scale or layer_config.is_block_weight_scale)
+    has_group_accumulator = (
+        mma_type != MmaType.MXMMA
+        and layer_config.a_dtype.num_bits < 16
+        and (
+            layer_config.input_scale_group_size > 0
+            or (
+                not layer_config.use_fused_e8m0_scale
+                and (layer_config.is_group_weight_scale or layer_config.is_block_weight_scale)
+            )
         )
     )
     math_budget = min(255, launch_budget)

@@ -8,6 +8,7 @@ import humming.testing.runner as runner_module
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, WeightScale2Type
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.forward import humming_forward
 from humming.testing import (
     KernelTestCase,
@@ -20,6 +21,50 @@ from humming.testing.data import generate_random_tensor
 SHAPE_N = 1024
 SHAPE_K = 1024
 GROUPED_INPUT_SIZE = 128
+
+
+@pytest.mark.parametrize("use_cp_async", (False, True))
+@pytest.mark.parametrize("block_k", (64, 128, 1024))
+@pytest.mark.parametrize("gemm_type", (GemmType.DENSE, GemmType.INDEXED))
+def test_ppu_raw_weight_loading(use_cp_async, block_k, gemm_type, monkeypatch):
+    skip_if_unsupported(a_dtype=dtypes.int8, use_cp_async=use_cp_async)
+    if not current_device.is_ppu:
+        pytest.skip("PPU operand layout and AIU regression")
+    # K=1024 needs eight slabs with four load warps, exercising the AIU slab loops.
+    config = dict(
+        mma_type="mma",
+        block_shape=(32, 64, block_k),
+        warp_shape=(32, 16, block_k),
+        num_stages=2,
+        num_ctas_per_sm=1,
+        use_stream_k=False,
+        use_cp_async=use_cp_async,
+        use_tma=False,
+        use_mbarrier=False,
+    )
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: config)
+    case = KernelTestCase(
+        name="ppu-raw-weight-loading",
+        layer_config=LayerConfig(
+            shape_n=256,
+            shape_k=2048,
+            pad_shape_n=24,
+            pad_shape_k=32,
+            a_dtype=dtypes.int8,
+            b_dtype=dtypes.int8,
+            c_dtype=dtypes.float16,
+            num_experts=0 if gemm_type == GemmType.DENSE else 4,
+            has_bias=True,
+        ),
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        top_k=1 if gemm_type == GemmType.DENSE else 2,
+        seed=2026,
+    )
+    shape_ms = (1, 17, 64)
+    results = KernelTestRunner(case).run(shape_ms)
+    assert_kernel_test_shape_coverage(results, shape_ms)
+
 
 SPECIAL_FEATURES = {
     "use_int_weight_scale",

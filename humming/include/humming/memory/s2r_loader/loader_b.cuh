@@ -63,16 +63,32 @@ public:
 
   CUDA_INLINE
   void load_raw(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t iter_id) {
+    if constexpr (USE_PPU && Ctx::kUseCpAsync && !Ctx::kUseTmaB)
+      return load_raw_aiu(smem_ptr, regs_ptr, iter_id);
     constexpr uint32_t kSwizzleInt4s = MIN(8u, BlockShape::K * ElementB::kBits / 128);
     uint32_t smem_base = cast_smem_ptr_to_uint(smem_ptr) / 128;
     uint32_t lane_id = ctx.lane_id();
+    constexpr uint32_t kRowsPerLoad = USE_PPU ? 16 : 8;
     PRAGMA_UNROLL
-    for (uint32_t n = 0; n < WarpShape::N / 8; ++n) {
-      uint32_t row = ctx.n_warp_offset() + n * 8 + lane_id % 8;
+    for (uint32_t n = 0; n < WarpShape::N / kRowsPerLoad; ++n) {
+      uint32_t row = ctx.n_warp_offset() + n * kRowsPerLoad + lane_id % 8;
+      if constexpr (USE_PPU) row += lane_id / 16 * 8;
       uint32_t col = (ctx.k_warp_offset() * ElementB::kBits / 256 + iter_id) * 2 + (lane_id / 8) % 2;
       uint32_t offset = (col / kSwizzleInt4s * BlockShape::N + row) * kSwizzleInt4s + col % kSwizzleInt4s;
       uint32_t swizzled_offset = offset ^ ((smem_base + offset / 8) % kSwizzleInt4s);
-      ld_shared<2>(smem_ptr + swizzled_offset, reinterpret_cast<int4 *>(regs_ptr + n * 2));
+      ld_shared<kRowsPerLoad / 4>(smem_ptr + swizzled_offset, reinterpret_cast<int4 *>(regs_ptr + n * kRowsPerLoad / 4));
+    }
+  }
+
+  CUDA_INLINE
+  void load_raw_aiu(const int4 *smem_ptr, uint32_t *regs_ptr, uint32_t iter_id) {
+    constexpr uint32_t kSwizzleInt4s = MIN(8u, BlockShape::K * ElementB::kBits / 128);
+    uint32_t col = (ctx.k_warp_offset() * ElementB::kBits / 256 + iter_id) * 2;
+    const int4 *slab_ptr = smem_ptr + col / kSwizzleInt4s * BlockShape::N * kSwizzleInt4s;
+    PRAGMA_UNROLL
+    for (uint32_t n = 0; n < WarpShape::N / 16; ++n) {
+      aiu_ld_shared<4>(slab_ptr, regs_ptr + n * 4, BlockShape::N,
+                       ctx.n_warp_offset() + n * 16, col % kSwizzleInt4s * sizeof(int4));
     }
   }
 

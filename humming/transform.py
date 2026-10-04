@@ -295,6 +295,11 @@ def transform_humming_weight(
         weight = torch.nn.functional.pad(
             weight, (0, (padded_shape_k - shape_k) * b_dtype.num_bits // 32, 0, padded_shape_n - shape_n)
         )
+        if current_device.is_ppu:
+            # Match the even-then-odd channel order of PPU MMA's B operand.
+            weight = weight.view(-1, padded_shape_n // 8, 8, weight.size(-1))
+            weight = weight[:, :, [0, 2, 4, 6, 1, 3, 5, 7], :]
+            weight = weight.reshape(-1, padded_shape_n, weight.size(-1))
         return weight if is_moe else weight.squeeze(0)
 
     should_preprocess_for_int2fp = False

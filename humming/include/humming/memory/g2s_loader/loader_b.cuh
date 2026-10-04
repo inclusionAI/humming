@@ -121,6 +121,7 @@ public:
 
   CUDA_INLINE
   void load_raw(int4 *smem_ptr) {
+    if constexpr (kUseAiu) return load_raw_aiu(smem_ptr);
     static_assert(ElementA::kBits == ElementB::kBits);
     constexpr uint32_t kRowInt4s = BlockShape::K * ElementB::kBits / 128;
     constexpr uint32_t kGlobalRowInt4s = ProblemShape::K * ElementB::kBits / 128;
@@ -156,6 +157,19 @@ public:
     }
     // WGMMA SS reads through the async proxy after ordinary shared stores.
     if constexpr (Ctx::kUseWgmma && !kUseCpAsync) tma_fence_async_shared();
+  }
+
+  CUDA_INLINE
+  void load_raw_aiu(int4 *smem_ptr) {
+    const uint32_t warp_id = ctx.load_thread_id() / 32;
+    PRAGMA_UNROLL
+    for (uint32_t slab = warp_id; slab < CEIL_DIV(BlockShape::K, kSwizzleK); slab += kNumLoadThreads / 32) {
+      aiu_load_gmem<ElementB::kBits>(
+          gmem_ptr_raw, smem_ptr + slab * BlockShape::N * kSwizzleBytes / sizeof(int4),
+          ProblemShape::N * MAX(1u, Ctx::kNumExperts), ProblemShape::K,
+          col_offset, row_offset + slab * kSwizzleK,
+          BlockShape::N, kSwizzleK);
+    }
   }
 
   CUDA_INLINE

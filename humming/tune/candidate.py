@@ -20,11 +20,12 @@ class DeviceProfile:
     max_smem_size: int
     max_smem_per_sm: int | None = None
     max_threads_per_sm: int = 2048
+    max_registers_per_sm: int = 64 * 1024
 
     def __post_init__(self) -> None:
         if self.num_sms is not None and self.num_sms <= 0:
             raise ValueError("num_sms must be positive")
-        for name in ("max_smem_size", "max_threads_per_sm"):
+        for name in ("max_smem_size", "max_threads_per_sm", "max_registers_per_sm"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.max_smem_per_sm is not None and self.max_smem_per_sm <= 0:
@@ -436,7 +437,10 @@ def _analyze_execution(
     mma_type = schedule.mma_type or get_default_mma_type(problem.layer_config)
     if num_math_threads:
         register_error = get_register_budget_error(
-            problem.layer_config, schedule, problem.use_f16_accum or schedule.use_f16_accum
+            problem.layer_config,
+            schedule,
+            problem.use_f16_accum or schedule.use_f16_accum,
+            problem.device.max_registers_per_sm,
         )
         if register_error is not None:
             reasons.append(register_error)

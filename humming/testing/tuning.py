@@ -405,9 +405,10 @@ def _fits_device_resources(
             return False
 
     tuning_config = create_tuning_config(config)
-    if get_register_budget_error(
-        layer_config, tuning_config, compute_config.use_f16_accum, registers_per_sm
-    ) is not None:
+    if (
+        get_register_budget_error(layer_config, tuning_config, compute_config.use_f16_accum, registers_per_sm)
+        is not None
+    ):
         return False
     if mma_type == MmaType.UMMA:
         from humming.tune.sm100 import Sm100UmmaHeuristics

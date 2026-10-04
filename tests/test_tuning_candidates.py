@@ -360,6 +360,8 @@ def test_sampled_backends_match_fixed_layout(
 
     monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
     monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: 132))
+    monkeypatch.setattr(DeviceInfo, "is_ppu", property(lambda self: False))
+    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
     monkeypatch.setattr(HummingKernel, "_instances", {})
     monkeypatch.setattr(HummingKernel, "prepare", lambda self: None)
     monkeypatch.setattr(HummingKernel, "register_kernel", lambda self: None)
@@ -484,6 +486,7 @@ def test_heuristic_tests_prefer_available_backend(
     from humming.testing import tuning
 
     monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
+    monkeypatch.setattr(DeviceInfo, "is_ppu", property(lambda self: False))
     layer = LayerConfig(
         shape_n=shape_n,
         shape_k=1024,
@@ -536,8 +539,11 @@ def test_heuristic_test_mode_has_separate_cache_entries(monkeypatch):
 def test_warp_specialization_register_budget(warp_m, num_ctas, expected, monkeypatch):
     from humming.config import ComputeConfig, TuningConfig
     from humming.config.mma import get_register_budget_error
+    from humming.device import DeviceInfo
     from humming.kernel.humming import HummingKernel
     from humming.testing import tuning
+
+    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
 
     layer = dataclasses.replace(_layer(), sm_version=103)
     compute = ComputeConfig(gemm_type=GemmType.INDEXED)
@@ -579,16 +585,19 @@ def test_sm90_default_backend_supports_activation(a_dtype, expected):
     from humming.config.mma import get_default_mma_type
 
     layer = LayerConfig(
-        sm_version=90, shape_n=256, shape_k=256,
-        a_dtype=a_dtype, b_dtype="uint4", c_dtype="bfloat16",
+        sm_version=90,
+        shape_n=256,
+        shape_k=256,
+        a_dtype=a_dtype,
+        b_dtype="uint4",
+        c_dtype="bfloat16",
     )
     assert get_default_mma_type(layer).value == expected
 
 
 @pytest.mark.parametrize(
     "warp_m,warp_n,group_size,num_ctas,expected",
-    [(176, 16, 128, 4, False), (80, 64, 128, 3, False),
-     (128, 64, 0, 3, False), (32, 16, 128, 2, True)],
+    [(176, 16, 128, 4, False), (80, 64, 128, 3, False), (128, 64, 0, 3, False), (32, 16, 128, 2, True)],
 )
 def test_sampled_wgmma_accounts_for_all_accumulators(
     warp_m, warp_n, group_size, num_ctas, expected, monkeypatch
@@ -601,15 +610,24 @@ def test_sampled_wgmma_accounts_for_all_accumulators(
     monkeypatch.setattr(DeviceInfo, "max_threads_per_sm", property(lambda self: 2048))
     monkeypatch.setattr(tuning, "fits_device_smem", lambda *args: True)
     layer = LayerConfig(
-        sm_version=90, shape_n=1024, shape_k=1024,
-        a_dtype="float8e4m3", b_dtype="uint4", c_dtype="bfloat16",
-        input_scale_group_size=group_size, weight_scale_group_size=group_size,
+        sm_version=90,
+        shape_n=1024,
+        shape_k=1024,
+        a_dtype="float8e4m3",
+        b_dtype="uint4",
+        c_dtype="bfloat16",
+        input_scale_group_size=group_size,
+        weight_scale_group_size=group_size,
         use_fused_e8m0_scale=False,
     )
     config = dict(
-        mma_type="wgmma", block_shape=(warp_m, warp_n * 4, 128),
-        warp_shape=(warp_m, warp_n, 128), num_ctas_per_sm=num_ctas,
-        use_warp_spec=False, num_stages=2, use_tma=False,
+        mma_type="wgmma",
+        block_shape=(warp_m, warp_n * 4, 128),
+        warp_shape=(warp_m, warp_n, 128),
+        num_ctas_per_sm=num_ctas,
+        use_warp_spec=False,
+        num_stages=2,
+        use_tma=False,
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE)
     assert tuning._fits_device_resources(layer, compute, (config, {})) == expected
@@ -644,19 +662,72 @@ def test_sampled_operand_register_budget(
 
     a_dtype = "float8e4m3" if group_size else "float16"
     layer = LayerConfig(
-        sm_version=90, shape_n=1024, shape_k=1024,
-        a_dtype=a_dtype, b_dtype=a_dtype if raw_weight else "uint4", c_dtype="float16",
+        sm_version=90,
+        shape_n=1024,
+        shape_k=1024,
+        a_dtype=a_dtype,
+        b_dtype=a_dtype if raw_weight else "uint4",
+        c_dtype="float16",
         use_packed_k_layout=packed,
-        input_scale_group_size=group_size, weight_scale_group_size=group_size,
+        input_scale_group_size=group_size,
+        weight_scale_group_size=group_size,
         use_fused_e8m0_scale=False,
     )
     config = TuningConfig(
-        mma_type=mma_type, warp_shape=warp_shape,
+        mma_type=mma_type,
+        warp_shape=warp_shape,
         block_shape=(warp_shape[0], warp_shape[1] * 4, warp_shape[2]),
-        use_warp_spec=False, num_ctas_per_sm=1,
+        use_warp_spec=False,
+        num_ctas_per_sm=1,
     )
     error = get_register_budget_error(layer, config, registers_per_sm=budget * 128)
     assert (error is None) == expected
+
+
+@pytest.mark.parametrize("registers_per_sm,expected", [(65536, False), (131072, True)])
+def test_device_register_budget(registers_per_sm, expected, monkeypatch):
+    from humming.config import ComputeConfig, TuningConfig
+    from humming.config.mma import get_register_budget_error
+    from humming.device import DeviceInfo
+    from humming.testing import tuning
+
+    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: registers_per_sm))
+    monkeypatch.setattr(DeviceInfo, "max_threads_per_sm", property(lambda self: 2048))
+    monkeypatch.setattr(tuning, "fits_device_smem", lambda *args: True)
+    layer = LayerConfig(
+        sm_version=80,
+        shape_n=1024,
+        shape_k=1024,
+        a_dtype="int8",
+        b_dtype="int8",
+        c_dtype="float16",
+    )
+    config = TuningConfig(
+        mma_type="mma",
+        block_shape=(64, 128, 128),
+        warp_shape=(64, 32, 64),
+        num_ctas_per_sm=4,
+        use_warp_spec=False,
+        use_tma=False,
+    )
+    assert (get_register_budget_error(layer, config) is None) == expected
+    assert tuning._fits_device_resources(layer, ComputeConfig(), (config.to_dict(), {})) == expected
+    problem = _problem(layer_config=layer)
+    problem = dataclasses.replace(
+        problem,
+        device=dataclasses.replace(problem.device, max_registers_per_sm=registers_per_sm),
+    )
+    schedule = _candidate(
+        mma_type="mma",
+        block_shape=config.block_shape,
+        warp_shape=config.warp_shape,
+        num_ctas_per_sm=config.num_ctas_per_sm,
+    )
+    analysis = analyze_candidate(problem, schedule)
+    has_register_error = any(
+        reason.startswith("register budget exceeded:") for reason in analysis.rejection_reasons
+    )
+    assert has_register_error == (not expected)
 
 
 @pytest.mark.parametrize("sm_version", (120, 121))

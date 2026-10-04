@@ -65,11 +65,12 @@ public:
   CUDA_INLINE
   void load_aiu(int4 *smem_ptr) {
     const uint32_t warp_id = ctx.load_thread_id() / 32;
-    if (warp_id < CEIL_DIV(BlockShape::K, 1024 / ElementA::kBits)) {
+    PRAGMA_UNROLL
+    for (uint32_t slab = warp_id; slab < CEIL_DIV(BlockShape::K, 1024 / ElementA::kBits); slab += kNumLoadThreads / 32) {
       aiu_load_gmem<ElementA::kBits>(
-          gmem_ptr_raw, smem_ptr + BlockShape::M * 1024 / 128 * warp_id,
+          gmem_ptr_raw, smem_ptr + BlockShape::M * 1024 / 128 * slab,
           shape_m, ProblemShape::K - PadShape::K,
-          row_offset, col_offset + warp_id * 1024 / ElementA::kBits,
+          row_offset, col_offset + slab * 1024 / ElementA::kBits,
           BlockShape::M, MIN(1024 / ElementA::kBits, BlockShape::K));
     }
   }
