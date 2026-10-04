@@ -110,6 +110,19 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
     if mma_type == MmaType.UMMA:
         return None  # UMMA accumulators use TMEM and have separate resource checks.
 
+    if mma_type == MmaType.WGMMA:
+        # One instruction spans project N=64 across four warps. ptxas needs
+        # 26 extra registers for SS, or 30 for RS, beyond its accumulator tuple.
+        # setmaxnreg can raise the runtime math budget, but not this compile limit.
+        instruction_accumulators = warp_m // (4 if use_f16_accum else 2)
+        instruction_overhead = 26 if layer_config.use_raw_weight else 30
+        instruction_registers = instruction_accumulators + instruction_overhead
+        if instruction_registers > launch_budget:
+            return (
+                "register budget exceeded: WGMMA instruction requires at least "
+                f"{instruction_registers} registers per thread; launch budget {launch_budget:g}"
+            )
+
     accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
     has_group_accumulator = False
     if mma_type != MmaType.MXMMA and layer_config.a_dtype.num_bits < 16:
