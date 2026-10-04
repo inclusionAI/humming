@@ -1,5 +1,6 @@
 steps:
-  - label: "Humming Tests (B200)"
+  - &b200_tests
+    label: "Common Tests (B200)"
     key: humming-b200-ci
     agents:
       queue: b200-k8s
@@ -27,7 +28,8 @@ steps:
                 emptyDir:
                   medium: Memory
 
-  - label: "Humming Tests (DGX Spark)"
+  - &dgx_spark_tests
+    label: "Common Tests (DGX Spark)"
     key: humming-dgx-spark-ci
     agents:
       queue: dgx-spark
@@ -47,3 +49,13 @@ steps:
           gpus: all
           volumes:
             - /dev/shm:/dev/shm
+
+  - <<: *b200_tests
+    label: "Batch Invariant Tests (B200)"
+    key: humming-b200-batch-invariant-ci
+    command: HUMMING_TEST_TUNING_SOURCE=batch_invariant bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - <<: *dgx_spark_tests
+    label: "Batch Invariant Tests (DGX Spark)"
+    key: humming-dgx-spark-batch-invariant-ci
+    command: HUMMING_TEST_TUNING_SOURCE=batch_invariant bash .buildkite/run-tests.sh tests/kernels/humming/

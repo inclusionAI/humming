@@ -28,4 +28,7 @@ uv pip install --python .venv/bin/python --no-deps -e .
 
 echo "--- Run tests"
 mkdir -p test-results
-.venv/bin/python -m pytest tests -v --junitxml=test-results/pytest.xml
+if [[ $# -eq 0 ]]; then
+  set -- tests
+fi
+.venv/bin/python -m pytest "$@" -v --junitxml=test-results/pytest.xml
