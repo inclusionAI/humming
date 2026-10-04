@@ -211,3 +211,33 @@ def test_nvrtc_signature_uses_subprocess_library(monkeypatch):
     monkeypatch.setattr(compiler_module.ctypes, "CDLL", load_library)
     assert compiler_module.NVRTCCompiler.signature() == "nvrtc+13.2"
     assert loaded_paths == ["/toolkit/libnvrtc.so"]
+
+
+@pytest.mark.parametrize("limit", (1, 3, 32))
+def test_compile_many_obeys_worker_limit(monkeypatch, limit):
+    from contextlib import nullcontext
+
+    from humming.jit import runtime
+
+    worker_counts = []
+
+    class RecordingExecutor:
+        def __init__(self, max_workers):
+            worker_counts.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def map(self, function, specs):
+            return map(function, specs)
+
+    monkeypatch.setattr(runtime, "get_parallel_build_workers", lambda: limit)
+    monkeypatch.setattr(runtime, "ThreadPoolExecutor", RecordingExecutor)
+    monkeypatch.setattr(runtime.torch.cuda, "device", lambda device: nullcontext())
+    specs = [(lambda value: value, {"value": value}) for value in range(5)]
+    assert runtime.KernelRuntime.compile_many(specs, device=0) == list(range(5))
+    assert worker_counts == ([] if limit == 1 else [min(limit, len(specs))])
+    assert runtime.KernelRuntime.compile_many([], device=0) == []

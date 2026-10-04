@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+echo "--- CPU and compilation limits"
+python3 humming/utils/cpu.py
+
 echo "--- :nvidia: GPU Info"
 nvidia-smi
 
