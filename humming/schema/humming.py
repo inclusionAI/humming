@@ -8,7 +8,7 @@ from humming.config import InputQuantizationMode
 from humming.config.enum import WeightScale2Type, WeightScaleType
 from humming.device import current_device
 from humming.schema.base import BaseInputSchema, BaseWeightSchema
-from humming.utils.weight import dequantize_weight, quantize_weight
+from humming.utils.weight import decode_e5m3_scale, dequantize_weight, quantize_weight
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -57,8 +57,13 @@ class HummingWeightSchema(BaseWeightSchema):
         if self.weight_scale_2_type is None:
             self.weight_scale_2_type = WeightScale2Type.NONE
         if self.weight_scale_2_type != WeightScale2Type.NONE:
-            assert self.weight_scale_type == WeightScaleType.GROUP, (
-                "weight_scale_2_type requires weight_scale_type='group'"
+            has_group_scale = self.weight_scale_type == WeightScaleType.GROUP
+            has_channel_and_tensor_scale = (
+                self.weight_scale_type == WeightScaleType.CHANNEL
+                and self.weight_scale_2_type == WeightScale2Type.TENSOR
+            )
+            assert has_group_scale or has_channel_and_tensor_scale, (
+                "secondary scales require group scales or channel scales with a tensor secondary scale"
             )
 
         if self.weight_scale_type == WeightScaleType.BLOCK:
@@ -90,6 +95,8 @@ class HummingWeightSchema(BaseWeightSchema):
             scale_torch_dtype = torch.float8_e4m3fn
         elif self.bs_dtype == dtypes.float8e5m2:
             scale_torch_dtype = torch.float8_e5m2
+        elif self.bs_dtype == dtypes.float8e5m3:
+            scale_torch_dtype = torch.uint8
 
         tensor_meta: dict[str, Any] = {
             "weight": {
@@ -249,6 +256,8 @@ class HummingWeightSchema(BaseWeightSchema):
             weight_scale_2 = tensors["weight_scale"]
         else:
             weight_scale = tensors["weight_scale"]
+            if self.bs_dtype == dtypes.float8e5m3:
+                weight_scale = decode_e5m3_scale(weight_scale)
             weight_scale_2 = tensors.get("weight_scale_2")
         tensor = dequantize_weight(
             tensors["weight"],
@@ -310,7 +319,10 @@ class HummingWeightSchema(BaseWeightSchema):
                 tensors["weight_scale"] = tensor_scale.to(param_dtype)
             else:
                 schema.weight_scale_2_type = WeightScale2Type.NONE
-                weight_scale = tensors["weight_scale"].float() * tensor_scale.float()
+                weight_scale = tensors["weight_scale"]
+                if self.bs_dtype == dtypes.float8e5m3:
+                    weight_scale = decode_e5m3_scale(weight_scale)
+                weight_scale = weight_scale.float() * tensor_scale.float()
                 tensors["weight_scale"] = weight_scale.to(param_dtype)
                 schema.bs_dtype = dtypes.DataType.from_torch_dtype(param_dtype)
                 del tensors["weight_scale_2"]

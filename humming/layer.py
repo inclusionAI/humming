@@ -14,6 +14,7 @@ from humming.schema import BaseInputSchema, BaseWeightSchema, HummingInputSchema
 from humming.schema.quark import QuarkWeightSchema, parse_quark_tensor_config
 from humming.transform import (
     check_and_pad_tensors,
+    prepare_fp16_e8m0_scale,
     prepare_layer_config,
     process_fused_e8m0_scale,
     process_int_weight_scale,
@@ -178,6 +179,8 @@ class HummingLayerMethod:
             if key.startswith(prefix)
         }
 
+        meta, tensors = prepare_fp16_e8m0_scale(meta, tensors)
+        layer.humming_metas[sublayer_name] = meta
         outputs = transform_humming_tensors(
             meta,
             tensors,
@@ -640,6 +643,7 @@ class HummingLayer(torch.nn.Module):
             for name in ["weight", "weight_scale", "zero_point", "bias", "weight_scale_2"]
             if (tensor := getattr(self, name, None)) is not None
         }
+        self.humming_config, tensors = prepare_fp16_e8m0_scale(self.humming_config, tensors)
         tensors = transform_humming_tensors(self.humming_config, tensors)
         for name, tensor in tensors.items():
             setattr(self, name, torch.nn.Parameter(tensor, requires_grad=False))

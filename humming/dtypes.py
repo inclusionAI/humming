@@ -203,6 +203,7 @@ float6e3m2 = FloatingPointType.from_str("float6e3m2")
 float8e3m4 = FloatingPointType.from_str("float8e3m4")
 float8e4m3 = FloatingPointType.from_str("float8e4m3")
 float8e5m2 = FloatingPointType.from_str("float8e5m2")
+float8e5m3 = FloatingPointType.from_str("float8e5m3")
 float8e8m0 = FloatingPointType.from_str("float8e8m0")
 
 float16 = FloatingPointType.from_str("float16")

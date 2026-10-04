@@ -1,3 +1,5 @@
+import dataclasses
+
 import torch
 
 from humming import dtypes, ops
@@ -5,6 +7,7 @@ from humming.config import LayerConfig, WeightScale2Type, WeightScaleType
 from humming.device import DeviceInfo, current_device
 from humming.schema import HummingInputSchema, HummingWeightSchema
 from humming.utils.math import round_up
+from humming.utils.weight import decode_e5m3_scale
 
 
 def prepare_layer_config(
@@ -85,7 +88,10 @@ def check_and_pad_tensors(config: LayerConfig, tensors: dict[str, torch.Tensor])
 
     if config.use_int_weight_scale:
         dtype = dtypes.torch_dtype_map[config.bs_dtype]
-        tensors["weight_scale"] = tensors["weight_scale"].to(dtype)
+        scale = tensors["weight_scale"]
+        if scale.dtype == torch.uint8:
+            scale = decode_e5m3_scale(scale)
+        tensors["weight_scale"] = scale.to(dtype)
 
     if config.use_int_weight_scale or config.use_fused_e8m0_scale:
         if (
@@ -360,6 +366,55 @@ def transform_humming_weight(
     return repacked_weight if is_moe else repacked_weight.squeeze(0)
 
 
+def prepare_fp16_e8m0_scale(
+    config: LayerConfig, tensors: dict[str, torch.Tensor]
+) -> tuple[LayerConfig, dict[str, torch.Tensor]]:
+    """Extract a tensor scale only when E8M0 exceeds the padded E5M0 range."""
+    use_e5m0 = config.bs_dtype == dtypes.float8e8m0 and config.c_dtype == dtypes.float16
+    use_e5m0 &= not config.use_fused_e8m0_scale and not config.use_block_scaled_mma
+    if not use_e5m0 or config.is_tensor_weight_scale:
+        return config, tensors
+
+    scales = tensors["weight_scale"]
+    exponents = scales.view(torch.uint8).to(torch.int16).reshape(config.num_experts or 1, -1) - 127
+    valid_exponents = exponents
+    if config.pad_shape_n or config.pad_shape_k:
+        shape_n = config.shape_n - config.pad_shape_n
+        shape_k = config.shape_k - config.pad_shape_k
+        group_size = config.weight_scale_group_size or shape_k
+        num_groups = (shape_k + group_size - 1) // group_size
+        shaped_exponents = exponents.reshape(config.num_experts or 1, *scales.shape[-2:])
+        valid_exponents = shaped_exponents[:, :shape_n, :num_groups].flatten(1)
+    minimum = valid_exponents.amin(-1)
+    maximum = valid_exponents.amax(-1)
+    if bool(((minimum >= -14) & (maximum <= 15)).all()):
+        return config, tensors
+
+    # If both ends cannot fit, anchor the largest scale and underflow the low end.
+    lower_shift = maximum - 15
+    upper_shift = minimum + 14
+    shift = torch.where(maximum > 15, lower_shift, torch.maximum(upper_shift, lower_shift).clamp_max(0))
+    factor = torch.exp2(shift.float())
+    adjusted = (exponents - shift[:, None] + 127).clamp(112, 142).to(torch.uint8)
+    tensors = tensors.copy()
+    tensors["weight_scale"] = adjusted.reshape(scales.shape).view(scales.dtype)
+    secondary = tensors.get("weight_scale_2")
+    if config.is_channel_weight_scale_2:
+        assert secondary is not None
+        factor = factor.reshape(-1, 1) if config.num_experts else factor.reshape(())
+        tensors["weight_scale_2"] = (secondary.float() * factor).to(config.param_dtype)
+    else:
+        tensors["weight_scale_2"] = factor if secondary is None else secondary.float() * factor
+        config = dataclasses.replace(config, weight_scale_2_type=WeightScale2Type.TENSOR)
+    return config, tensors
+
+
+def pack_e8m0_scale_for_fp16(weight_scale: torch.Tensor) -> torch.Tensor:
+    """Rebias E8M0 to padded E5M0; saturate to 2^15 and flush values below 2^-14."""
+    exponent = weight_scale.view(torch.uint8).to(torch.int16) - (127 - 15)
+    return (exponent.clamp(0, 30) << 3).to(torch.uint8).view(weight_scale.dtype)
+
+
 def transform_humming_weight_scale(
     weight_scale: torch.Tensor,
     to_apply_on_c: bool = False,
@@ -506,6 +561,11 @@ def transform_humming_tensors(
         use_native_dequant=config.use_native_dequant,
         use_raw_weight=config.use_raw_weight,
     )
+
+    if weight_scale is not None and config.bs_dtype == dtypes.float8e8m0:
+        uses_software_scale = not config.use_fused_e8m0_scale and not config.use_block_scaled_mma
+        if config.c_dtype == dtypes.float16 and uses_software_scale:
+            weight_scale = pack_e8m0_scale_for_fp16(weight_scale)
 
     if weight_scale is not None:
         is_mxmma = config.use_block_scaled_mma and (

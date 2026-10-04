@@ -65,6 +65,7 @@ using Float6E2M3 = FloatingPointType<6, 2, 3>;
 using Float8E3M4 = FloatingPointType<8, 3, 4>;
 using Float8E4M3 = FloatingPointType<8, 4, 3>;
 using Float8E5M2 = FloatingPointType<8, 5, 2>;
+using Float8E5M3 = FloatingPointType<8, 5, 3>;
 using Float16 = FloatingPointType<16, 5, 10>;
 using BFloat16 = FloatingPointType<16, 8, 7>;
 using Float32 = FloatingPointType<32, 8, 23>;

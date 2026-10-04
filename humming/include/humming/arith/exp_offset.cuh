@@ -1,13 +1,14 @@
 #pragma once
 
 #include <humming/datatype/base_conversion.cuh>
+#include <humming/datatype/dequant.cuh>
 #include <humming/datatype/dtypes.cuh>
 #include <humming/utils/all.cuh>
 
 
 template <class ElementA, class ElementB, bool kHasZeroPoint = false>
 CUDA_INLINE constexpr uint32_t get_dtype_dequant_exp_offset() {
-  // E8M0 to FP16 converts numerically through BF16 rather than shifting exponent bits.
+  // E8M0 scales for FP16 are prepacked with the FP16 exponent bias.
   if constexpr (std::is_same<ElementA, Float16>::value && std::is_same<ElementB, Float8E8M0>::value) return 0;
   if constexpr (ElementA::kIsFloatingPointType) {
     if constexpr (ElementA::kExponentBits >= 1 && ElementA::kBits > ElementB::kBits) {
@@ -135,7 +136,12 @@ CUDA_INLINE constexpr uint2 get_epilogue_exp_offset() {
 
   uint2 offset = {0, 0};
   if constexpr (ElementBS::kBits == 8 && !kIsGroupWeightScale) {
-    offset.y = get_dtype_dequant_exp_offset<ElementC, ElementBS>();
+    if constexpr (kNativeScaleDequantSupported<ElementBS, ElementC>) {
+      if constexpr (ElementA::kBits == 16)
+        total_offset -= get_dtype_dequant_exp_offset<ElementA, ElementBS>();
+    } else {
+      offset.y = get_dtype_dequant_exp_offset<ElementC, ElementBS>();
+    }
   }
 
   uint2 mainloop_offset = get_mainloop_exp_offset<

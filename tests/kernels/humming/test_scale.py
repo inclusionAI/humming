@@ -38,6 +38,7 @@ GROUP_SCALE_DTYPES = (
     dtypes.bfloat16,
     dtypes.float8e4m3,
     dtypes.float8e5m2,
+    dtypes.float8e5m3,
     dtypes.float8e8m0,
 )
 
@@ -60,8 +61,6 @@ SECONDARY_SCALE_TYPES = (
 def _output_dtype(a_dtype, bs_dtype):
     if a_dtype.num_bits == 16:
         if bs_dtype.num_bits == 16 and bs_dtype != a_dtype:
-            return None
-        if a_dtype == dtypes.float16 and bs_dtype == dtypes.float8e8m0:
             return None
         return a_dtype
     if bs_dtype in (dtypes.float16, dtypes.bfloat16):
@@ -144,6 +143,17 @@ SCALE_CASES = (
         weight_scale_group_size=128,
         weight_scale_2_type=WeightScale2Type.TENSOR,
         has_bias=True,
+    ),
+    *(
+        _case(
+            f"channel-{a_dtype}-bs-{bs_dtype}",
+            a_dtype=a_dtype,
+            c_dtype=a_dtype,
+            b_dtype=dtypes.uint4,
+            bs_dtype=bs_dtype,
+        )
+        for a_dtype in (dtypes.float16, dtypes.bfloat16)
+        for bs_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e5m3, dtypes.float8e8m0)
     ),
     *BS_DTYPE_CASES,
     *(

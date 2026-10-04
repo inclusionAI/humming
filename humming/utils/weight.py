@@ -5,6 +5,23 @@ import torch
 from humming import dtypes, ops
 
 
+def encode_e5m3_scale(values: torch.Tensor) -> torch.Tensor:
+    """Round nonnegative scales to unsigned E5M3, saturating finite overflow."""
+    values = values.float().clamp_min(0).contiguous()
+    bits = values.view(torch.int32)
+    rounded_bits = bits + (1 << 19) - 1 + ((bits >> 20) & 1)
+    normal = (rounded_bits >> 20) - (112 << 3)
+    subnormal = torch.round(values * (2**17)).to(torch.int32)
+    encoded = torch.where(values < 2**-14, subnormal, normal).clamp(0, 255)
+    encoded = torch.where(torch.isposinf(values), 255, encoded)
+    return encoded.masked_fill(values.isnan(), 255).to(torch.uint8)
+
+
+def decode_e5m3_scale(values: torch.Tensor) -> torch.Tensor:
+    """Decode unsigned E5M3 bytes using the weight dequantization operator."""
+    return ops.dequant_weight(values.to(torch.int32).contiguous(), 5, 3, False)
+
+
 def quantize_weight(
     weight: torch.Tensor,
     dtype: dtypes.DataType,
@@ -60,7 +77,7 @@ def quantize_weight(
         has_scale=scale_dtype is not None or has_tensor_scale,
         has_zero_point=has_zero_point,
         is_fp_zero_point=is_fp_zero_point,
-        allow_negative_scale=allow_negative_scale,
+        allow_negative_scale=allow_negative_scale and scale_dtype != dtypes.float8e5m3,
     )
 
     if zero_point.dtype == torch.float32:
@@ -109,6 +126,12 @@ def quantize_weight(
             tensor_scale = tensor_scale1 if use_scale1 else tensor_scale2
             weight_scale = weight_scale / tensor_scale.view(-1, 1, 1)
         weight_scale = weight_scale.to(torch_dtype)
+
+    elif scale_dtype == dtypes.float8e5m3:
+        if has_tensor_scale:
+            tensor_scale = weight_scale.view(e, -1).abs().mean(1)
+            weight_scale = weight_scale / tensor_scale.view(-1, 1, 1)
+        weight_scale = encode_e5m3_scale(weight_scale)
 
     if group_size_n is not None:
         group_size = group_size // group_size_n

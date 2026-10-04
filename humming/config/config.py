@@ -273,8 +273,13 @@ class LayerConfig(BaseHummingConfig):
         if self.weight_scale_2_type is None:
             self.weight_scale_2_type = WeightScale2Type.NONE
         if self.weight_scale_2_type != WeightScale2Type.NONE:
-            assert self.weight_scale_type == WeightScaleType.GROUP, (
-                "weight_scale_2_type requires weight_scale_type='group'"
+            has_group_scale = self.weight_scale_type == WeightScaleType.GROUP
+            has_channel_and_tensor_scale = (
+                self.weight_scale_type == WeightScaleType.CHANNEL
+                and self.weight_scale_2_type == WeightScale2Type.TENSOR
+            )
+            assert has_group_scale or has_channel_and_tensor_scale, (
+                "secondary scales require group scales or channel scales with a tensor secondary scale"
             )
 
         if self.weight_scale_type in [WeightScaleType.CHANNEL, WeightScaleType.TENSOR]:

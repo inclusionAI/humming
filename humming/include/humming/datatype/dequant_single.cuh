@@ -88,13 +88,13 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   static_assert(TargetType::kIsFloatingPointType);
   static_assert(SourceType::kBits < TargetType::kBits);
   static_assert(!SourceType::kIsSigned || TargetType::kIsSigned);
-  static_assert(TargetType::kBits == 16 || TargetType::kBits == 8 || TargetType::kBits == 4);
+  static_assert(TargetType::kBits == 32 || TargetType::kBits == 16 || TargetType::kBits == 8 || TargetType::kBits == 4);
   static_assert(SourceType::kExponentBits <= TargetType::kExponentBits);
   static_assert(SourceType::kMantissaBits <= TargetType::kMantissaBits);
-  static_assert(SourceType::kIsSigned || (std::is_same<SourceType, Float8E8M0>::value && std::is_same<TargetType, BFloat16>::value));
+  static_assert(SourceType::kIsSigned || std::is_same<SourceType, Float8E8M0>::value || std::is_same<SourceType, Float8E5M3>::value);
 
-  constexpr uint32_t repeated_one = TargetType::kBits == 16 ? 0x00010001 : (TargetType::kBits == 8 ? 0x01010101 : 0x11111111);
-  constexpr uint32_t target_signbit_mask = TargetType::kBits == 16 ? 0x80008000 : (TargetType::kBits == 8 ? 0x80808080 : 0x88888888);
+  constexpr uint32_t repeated_one = 0xFFFFFFFFu / ((1ull << TargetType::kBits) - 1);
+  constexpr uint32_t target_signbit_mask = repeated_one << (TargetType::kBits - 1);
   constexpr uint32_t signbit_mask = SourceType::kIsSigned ? target_signbit_mask : 0;
   constexpr uint32_t nonsign_bits = SourceType::kExponentBits + SourceType::kMantissaBits;
   constexpr uint32_t shifted_mask = (repeated_one << nonsign_bits) - repeated_one;
@@ -111,10 +111,9 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
 
 template <>
 CUDA_INLINE uint32_t fp_to_fp<Float8E8M0, Float16>(uint32_t val) {
-  uint32_t converted = fp_to_fp<Float8E8M0, BFloat16>(val);
-  float2 values = F16Conversion<BFloat16>::num22float2(*reinterpret_cast<nv_bfloat162 *>(&converted));
-  half2 packed = F16Conversion<Float16>::float22num2(values);
-  return *reinterpret_cast<uint32_t *>(&packed);
+  // FP16 scales are prepacked as E5M0: high five bits are the biased exponent.
+  // The low three bits are padding and must not affect the result.
+  return (val >> 1) & 0x7C007C00u;
 }
 
 

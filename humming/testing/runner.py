@@ -26,7 +26,7 @@ from humming.testing.tuning import (
     generate_heuristics_configs,
     sample_test_tuning_configs,
 )
-from humming.transform import transform_humming_tensors
+from humming.transform import prepare_fp16_e8m0_scale, transform_humming_tensors
 
 _DEFAULT_SHAPE_MS = (1, 17, 64, 257, 1024, 4096)
 TEST_TUNING_SOURCE_ENV = "HUMMING_TEST_TUNING_SOURCE"
@@ -194,7 +194,8 @@ class KernelTestRunner:
                 device=self.device,
             )
             tensors["bias"] = self.bias_ref
-        self.kernel_tensors = transform_humming_tensors(config, tensors)
+        self.layer_config, tensors = prepare_fp16_e8m0_scale(config, tensors)
+        self.kernel_tensors = transform_humming_tensors(self.layer_config, tensors)
 
     def prepare_inputs(
         self,

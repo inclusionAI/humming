@@ -42,8 +42,8 @@ private:
   static constexpr bool kUseNativeDequantB =
       Ctx::kUseNativeDequant && kUseNativeWeightDequant<ElementB, ElementA>;
   static constexpr bool kUseNativeDequantBS =
-      Ctx::kUseNativeDequant && kIsGroupWeightScale && !kUseFusedE8m0Scale &&
-      kNativeDequantSupported<ElementBS, ElementA>;
+      kIsGroupWeightScale && !kUseFusedE8m0Scale &&
+      kNativeScaleDequantSupported<ElementBS, ElementA>;
 
   static constexpr uint32_t kInputScaleGroupSize = kIsGroupInputScale ? Ctx::kInputScaleGroupSize : 1;
   static constexpr uint32_t kWeightScaleGroupSize = kIsGroupOrBlockWeightScale ? Ctx::kWeightScaleGroupSize : 1;
@@ -70,8 +70,8 @@ public:
   uint32_t as[2][kNumASPerGroup];
   uint32_t q_as[kNumASPerGroup];
   static constexpr uint32_t kNumLoadedBS = kUsePackedKLayout && kUseFusedE8m0Scale ? 2 * kNumKSlabs : kNumBSPerGroup;
-  alignas(16) uint32_t bs[2][MAX(kNumLoadedBS, 8) * ElementBS::kBits / 32];
-  uint32_t dq_bs[MAX(kNumBSPerGroup, 8) * kDequantBSBits / 32];
+  alignas(16) uint32_t bs[2][CEIL_DIV(kNumLoadedBS, 8) * 8 * ElementBS::kBits / 32];
+  uint32_t dq_bs[CEIL_DIV(kNumBSPerGroup, 8) * 8 * kDequantBSBits / 32];
   uint32_t zp[2][(kIsFpZeroPoint ? 4 : CEIL_DIV(ElementB::kBits, 4)) * kNumZPGroupsPerMma];
 
   uint32_t _dummy;
@@ -126,22 +126,7 @@ public:
 
     if (j % 2 == 0) {
       if constexpr (ElementA::kBits == 16 && ElementBS::kBits == 8 && kIsGroupWeightScale && !kUseFusedE8m0Scale) {
-        if constexpr (kUseNativeDequantBS) {
-          dequant_native<ElementBS, ElementA>(bs[buffer_id], dq_bs, 0);
-        } else {
-          dequant<ElementBS, ElementA>(bs[buffer_id], dq_bs, 0);
-        }
-
-        scalar_t *dq_bs_scalar_ptr = reinterpret_cast<scalar_t *>(dq_bs);
-
-        if constexpr (!kUseNativeDequantBS) {
-          PRAGMA_UNROLL
-          for (uint32_t j = 0; j < 2; j++) {
-            scalar_t tmp = dq_bs_scalar_ptr[2 + 4 * j];
-            dq_bs_scalar_ptr[2 + 4 * j] = dq_bs_scalar_ptr[1 + 4 * j];
-            dq_bs_scalar_ptr[1 + 4 * j] = tmp;
-          }
-        }
+        dequant_scale<ElementBS, ElementA>(bs[buffer_id], dq_bs, 0);
 
         if constexpr (kExpOffset.y) {
           // A bf16 factor holds at most 2^127, so a larger offset takes a second factor.
@@ -318,19 +303,13 @@ public:
       } else if constexpr (kIsF16Accum && ElementBS::kBits == 8 && kIsGroupWeightScale) {
         PRAGMA_UNROLL
         for (uint32_t i = 0; i < CEIL_DIV(kNumBSPerGroup, 8); i++) {
-          dequant<ElementBS, ElementC>(bs[buffer_id], dq_bs, i);
-
-          scalar_t *dq_bs_scalar_ptr = reinterpret_cast<scalar_t *>(dq_bs);
-          PRAGMA_UNROLL
-          for (uint32_t j = 0; j < 2; j++) {
-            scalar_t tmp = dq_bs_scalar_ptr[2 + 4 * j];
-            dq_bs_scalar_ptr[2 + 4 * j] = dq_bs_scalar_ptr[1 + 4 * j];
-            dq_bs_scalar_ptr[1 + 4 * j] = tmp;
-          }
+          dequant_scale<ElementBS, ElementC>(bs[buffer_id], dq_bs + i * 4, i);
         }
 
         scalar_t2 *dq_bs_scalar2_ptr = reinterpret_cast<scalar_t2 *>(dq_bs);
-        constexpr uint32_t exp_offset = get_dtype_dequant_exp_offset<ElementC, ElementBS>();
+        constexpr uint32_t exp_offset = kNativeScaleDequantSupported<ElementBS, ElementC>
+                                            ? 0
+                                            : get_dtype_dequant_exp_offset<ElementC, ElementBS>();
         scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, exp_offset>();
         PRAGMA_UNROLL
         for (uint32_t i = 0; i < kNumBSPerGroup / 2; i++)
@@ -344,28 +323,12 @@ public:
         }
 
       } else if constexpr (!kIsF16Accum && ElementBS::kBits == 8) {
-        using F8x4 = typename F8Conversion<ElementBS>::scalar_t4;
-        F8x4 *bs_vals = reinterpret_cast<F8x4 *>(bs[buffer_id]);
-        float4 *dq_bs_vals = reinterpret_cast<float4 *>(dq_bs);
-
-        constexpr uint32_t kFullPackets = kNumBSPerGroup / 4;
-        constexpr uint32_t kTailScales = kNumBSPerGroup % 4;
-
+        using ScaleType = std::conditional_t<
+            std::is_same<ElementBS, Float8E8M0>::value && std::is_same<ElementC, Float16>::value,
+            Float8E5M3, ElementBS>;
         PRAGMA_UNROLL
-        for (uint32_t i = 0; i < kFullPackets; i++)
-          dq_bs_vals[i] = F8Conversion<ElementBS>::num42float4(bs_vals[i]);
-
-        if constexpr (kTailScales != 0) {
-          uint32_t packed = 0;
-          const uint8_t *src = reinterpret_cast<const uint8_t *>(bs[buffer_id]);
-          uint8_t *dst = reinterpret_cast<uint8_t *>(&packed);
-
-          PRAGMA_UNROLL
-          for (uint32_t i = 0; i < kTailScales; i++)
-            dst[i] = src[kFullPackets * 4 + i];
-
-          dq_bs_vals[kFullPackets] =
-              F8Conversion<ElementBS>::num42float4(*reinterpret_cast<F8x4 *>(&packed));
+        for (uint32_t i = 0; i < CEIL_DIV(kNumBSPerGroup, 4); i++) {
+          reinterpret_cast<float4 *>(dq_bs)[i] = dequant_scale_float4<ScaleType>(bs[buffer_id][i]);
         }
       } else if constexpr (!kIsF16Accum && ElementBS::kBits == 16) {
         using F16x2 = typename F16Conversion<ElementBS>::scalar_t2;

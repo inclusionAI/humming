@@ -12,7 +12,7 @@ HummingKernel configurations are divided into three categories:
 |-----------|-------------|
 | `a_dtype`, `b_dtype` | Activation and weight data types. See the project README for supported combinations. |
 | `c_dtype` | Output matrix data type. Only `float16` and `bfloat16` are supported. |
-| `bs_dtype` | Weight scale data type. Supports `float16` / `bfloat16` / `float8e8m0` / `float8e4m3` / `float8e5m2`. |
+| `bs_dtype` | Weight scale data type. Supports `float16` / `bfloat16` / `float8e8m0` / `float8e4m3` / `float8e5m2` / `float8e5m3`. |
 | `shape_n`, `shape_k` | The N and K dimensions of the GEMM after padding. |
 | `pad_shape_n`, `pad_shape_k` | Humming pads the weight matrix to a suitable shape (e.g., `shape_n` is typically padded to a multiple of 256, `shape_k` to a multiple of 128). These parameters specify the size of the padded portion, i.e., the actual effective weight shape is `shape_n - pad_shape_n` and `shape_k - pad_shape_k`. Note that the last dimension of input and output matrices should match the unpadded shape. |
 | `num_experts` | Number of experts for MoE. Set to `0` or `None` for non-MoE. |
@@ -26,6 +26,20 @@ HummingKernel configurations are divided into three categories:
 | `has_bias` | Whether to use fused bias addition. |
 | `use_fused_e8m0_scale` | Fuse E8M0 group scales into MXFP4-to-FP8/INT8 weight conversion. Weight preprocessing extracts a secondary scale. |
 | `use_packed_k_layout` | Pack K slabs for WGMMA with 8-bit activations and even-bit weights. Can be explicitly enabled together with `use_fused_e8m0_scale`; transformed weights must use the same setting as the kernel. |
+
+Ordinary E4M3/E5M2 scales use the software dequantization path before SM89 and
+native `cvt` conversions on SM89 and newer (via FP16 when needed).
+Unsigned E5M3 scales are stored as `torch.uint8` and use software dequantization.
+Their exponent bits retain the existing conversion semantics: exponent 31 is
+finite in BF16/FP32 and maps to Inf/NaN in FP16.
+
+For ordinary FP16 layers, E8M0 scales are rebased from bias 127 to bias 15 and
+packed as E5M0 in the high five bits of a byte; the low three bits are zero and
+ignored. Scales within `[2^-14, 2^15]` need no extra secondary scale. Weight
+preprocessing extracts a tensorwise `weight_scale_2` only when this range is
+exceeded, merging it with an existing secondary scale. When both ends cannot
+fit, it preserves the largest scales and lets the smallest scales underflow.
+Native block-scaled MMA and fused E8M0 weight paths retain their own formats.
 
 Weight preprocessing is independent of the tuning backend. `use_block_scaled_mma`
 and `use_native_dequant` are derived from the architecture, data types, quantization

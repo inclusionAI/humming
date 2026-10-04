@@ -8,6 +8,7 @@ from humming.config import InputQuantizationMode
 from humming.config.enum import WeightScale2Type, WeightScaleType
 from humming.schema.base import BaseInputSchema, BaseWeightSchema
 from humming.schema.humming import HummingInputSchema, HummingWeightSchema
+from humming.utils.weight import encode_e5m3_scale
 
 _FLOAT_DTYPES = {
     "fp4": dtypes.float4e2m1,
@@ -322,10 +323,15 @@ class QuarkWeightSchema(BaseWeightSchema):
         scale_dtype = None
         if self.scale_format == "e8m0":
             scale_dtype = dtypes.float8e8m0
-        has_native_scale = self.scale_dtype in ("fp8_e4m3", "fp8_e5m2")
+        elif self.scale_format == "e5m3":
+            scale_dtype = dtypes.float8e5m3
+        has_native_scale = self.scale_dtype in ("fp8_e4m3", "fp8_e5m2", "fp8_e5m3")
         if self.scale_stage == 1 and has_native_scale and self.group_size:
             assert self.scale_dtype is not None
-            scale_dtype = _FLOAT_DTYPES[self.scale_dtype]
+            if self.scale_dtype == "fp8_e5m3":
+                scale_dtype = dtypes.float8e5m3
+            else:
+                scale_dtype = _FLOAT_DTYPES[self.scale_dtype]
         is_block = self.qscheme == "per_block"
         block_size_n, block_size_k = self.block_size or (0, 0)
         return HummingWeightSchema(
@@ -463,6 +469,8 @@ class QuarkWeightSchema(BaseWeightSchema):
             scale = scale.view(torch.float8_e8m0fnu)
         elif schema.bs_dtype in (dtypes.float8e4m3, dtypes.float8e5m2):
             scale = scale.to(dtypes.torch_dtype_map[schema.bs_dtype])
+        elif schema.bs_dtype == dtypes.float8e5m3:
+            scale = encode_e5m3_scale(scale)
         else:
             scale = scale.to(param_dtype)
         result.update(weight=weight.contiguous(), weight_scale=scale.contiguous())

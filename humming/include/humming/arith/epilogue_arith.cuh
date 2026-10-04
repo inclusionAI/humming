@@ -40,8 +40,8 @@ private:
   static constexpr bool kUseNativeDequantB =
       Ctx::kUseNativeDequant && kUseNativeWeightDequant<ElementB, ElementA>;
   static constexpr bool kUseNativeDequantBS =
-      Ctx::kUseNativeDequant && kIsGroupWeightScale && !Ctx::kUseFusedE8m0Scale &&
-      kNativeDequantSupported<ElementBS, ElementA>;
+      kIsGroupWeightScale && !Ctx::kUseFusedE8m0Scale &&
+      kNativeScaleDequantSupported<ElementBS, ElementA>;
 
   static constexpr uint2 kExpOffset = get_epilogue_exp_offset<
       ElementA, ElementB, ElementC, ElementBS, kHasZeroPoint,
@@ -177,15 +177,7 @@ public:
       if (row == 0 && col == 0) {
         PRAGMA_UNROLL
         for (uint32_t i = 0; i < CEIL_DIV(WarpShape::N, 32); i++) {
-          dequant<ElementBS, ElementC>(bs, dq_bs + i * 4, i);
-          scalar_t *dq_bs_scalar_ptr = reinterpret_cast<scalar_t *>(dq_bs + i * 4);
-
-          PRAGMA_UNROLL
-          for (uint32_t j = 0; j < 2; j++) {
-            scalar_t tmp = dq_bs_scalar_ptr[2 + 4 * j];
-            dq_bs_scalar_ptr[2 + 4 * j] = dq_bs_scalar_ptr[1 + 4 * j];
-            dq_bs_scalar_ptr[1 + 4 * j] = tmp;
-          }
+          dequant_scale<ElementBS, ElementC>(bs, dq_bs + i * 4, i);
         }
 
         const scalar_t2 scale_factor = prepare_exp_scale_factor<scalar_t2, kExpOffset.y>();
