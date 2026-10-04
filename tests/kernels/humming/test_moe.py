@@ -18,6 +18,9 @@ SHAPE_N = 1024
 SHAPE_K = 1024
 NUM_EXPERTS = 8
 TOP_K = 2
+BLOCK_SCALED_SM_VERSION = (
+    current_device.sm_version if current_device.sm_version // 10 in (10, 11, 12) else 120
+)
 
 
 def _case(
@@ -117,18 +120,20 @@ MOE_CASES = (
         GemmType.INDEXED,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="static_tensor_dynamic_group",
-        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case(
         "indexed-dynamic-group-token",
         GemmType.INDEXED,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case("indexed-partial-k-tile", GemmType.INDEXED, shape_k=96),
     _case("grouped-contiguous", GemmType.GROUPED_CONTIGUOUS),
@@ -145,9 +150,10 @@ MOE_CASES = (
         use_m_major_input_scale=True,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case("grouped-masked", GemmType.GROUPED_MASKED),
     _case(
@@ -156,9 +162,10 @@ MOE_CASES = (
         use_m_major_input_scale=True,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case(
         "indexed-bias-pad-k",
