@@ -41,14 +41,6 @@ def skip_if_unsupported(
     if mma_type == "wgmma" and a_dtype == dtypes.int4:
         pytest.skip("wgmma does not support int4 activation")
 
-    if sm == 121 and mma_type == "mxmma" and a_dtype == dtypes.float4e0m3:
-        from humming.config.config import _cuda_compiler_version
-        from humming.jit.runtime import KernelRuntime
-
-        compiler_version = _cuda_compiler_version(KernelRuntime._get_compiler())
-        if compiler_version < (13, 1):
-            pytest.skip("E0M3 MXMMA on SM121 requires CUDA 13.1 or newer (PTX ISA 9.1)")
-
     if a_dtype is not None and a_dtype in _A_DTYPE_MIN_SM:
         min_sm = _A_DTYPE_MIN_SM[a_dtype]
         if mma_type == "umma" and a_dtype in (dtypes.float4e2m1, dtypes.float4e0m3, dtypes.float8e3m4):

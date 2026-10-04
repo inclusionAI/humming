@@ -11,7 +11,8 @@ from filelock import FileLock
 import humming.utils.jit as jit_utils
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
-from humming.config.mma import get_default_mma_type
+from humming.config.config import _cuda_compiler_version
+from humming.config.mma import get_default_mma_type, get_mxmma_compiler_error
 from humming.device import current_device
 from humming.kernel.humming import HummingKernel
 from humming.schema import HummingWeightSchema
@@ -101,6 +102,14 @@ class KernelTestRunner:
         self.prepare_weight()
 
     def prepare_kernels(self, shape_ms: tuple[int, ...]) -> dict[int, list[tuple[torch.Tensor, dict, int]]]:
+        if self.layer_config.mxmma_supported:
+            compiler_version = _cuda_compiler_version(HummingKernel._get_compiler())
+            compiler_error = get_mxmma_compiler_error(self.layer_config, compiler_version)
+            if compiler_error is not None:
+                import pytest
+
+                pytest.skip(compiler_error)
+
         tuning_source = os.environ.get(TEST_TUNING_SOURCE_ENV, "heuristic")
         if tuning_source == "batch_invariant":
             self.compute_config = dataclasses.replace(self.compute_config, use_batch_invariant=True)

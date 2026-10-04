@@ -375,16 +375,19 @@ def test_output_chunk_rows(
     if mma_type == "umma" and not layer.is_umma_supported:
         pytest.skip("UMMA requires SM10x or SM11x")
     is_umma = mma_type == "umma"
+    is_mma = mma_type == "mma"
+    # Keep N=256 slab coverage without exhausting registers or SM120 shared memory.
+    block_k = 128 if is_umma else 64
     config = dict(
         mma_type=mma_type,
-        block_shape=(block_m, 256, 128),
+        block_shape=(block_m, 256, block_k),
         warp_shape=(block_m if is_umma else 64, 32 if is_umma else 64, 128 if is_umma else 64),
-        num_stages=3,
+        num_stages=2 if is_mma else 3,
         num_sms=6,
         num_ctas_per_sm=1,
         use_tma=use_tma,
         use_stream_k=True,
-        smem_reuse_mode="none",
+        smem_reuse_mode="last_stage" if is_mma else "none",
         umma_cta_group_size=cta_group_size,
         output_chunk_rows=chunk_rows,
     )

@@ -635,3 +635,98 @@ def test_sampled_operand_register_budget(
     )
     error = get_register_budget_error(layer, config, registers_per_sm=budget * 128)
     assert (error is None) == expected
+
+
+@pytest.mark.parametrize("sm_version", (120, 121))
+@pytest.mark.parametrize("compiler_version", ((13, 0), (13, 1)))
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype,input_group,weight_group,scale_dtype,requires_13_1",
+    (
+        ("float4e2m1", "float4e2m1", 16, 16, "float8e8m0", True),
+        ("float4e0m3", "float4e0m3", 16, 16, "float8e8m0", True),
+        ("float4e2m1", "float4e0m3", 16, 16, "float8e8m0", True),
+        ("float4e0m3", "float4e2m1", 16, 16, "float8e4m3", False),
+        ("float4e2m1", "float4e0m3", 16, 16, "float8e4m3", False),
+        ("float4e2m1", "float4e2m1", 32, 32, "float8e8m0", False),
+        ("float8e4m3", "float4e2m1", 32, 32, "float8e8m0", False),
+        ("float4e0m3", "float4e0m3", 16, 0, "float8e8m0", True),
+        ("float4e0m3", "float4e0m3", 0, 16, "float8e4m3", False),
+        ("float4e2m1", "float4e2m1", 0, 0, "float8e8m0", False),
+    ),
+)
+def test_mxmma_compiler_version_matches_scale_format(
+    sm_version,
+    compiler_version,
+    a_dtype,
+    b_dtype,
+    input_group,
+    weight_group,
+    scale_dtype,
+    requires_13_1,
+    monkeypatch,
+):
+    import humming.kernel.humming as kernel_module
+    import humming.testing.runner as runner_module
+    from humming.config import ComputeConfig, TuningConfig
+    from humming.device import DeviceInfo
+    from humming.kernel.humming import HummingKernel
+    from humming.testing import KernelTestCase, KernelTestRunner, skip_if_unsupported
+
+    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
+    monkeypatch.setattr(kernel_module, "_cuda_compiler_version", lambda _: compiler_version)
+    monkeypatch.setattr(runner_module, "_cuda_compiler_version", lambda _: compiler_version)
+    monkeypatch.setattr(HummingKernel, "_instances", {})
+    prepared = []
+    monkeypatch.setattr(HummingKernel, "prepare", lambda self: prepared.append(self))
+    monkeypatch.setattr(HummingKernel, "register_kernel", lambda self: None)
+    layer = LayerConfig(
+        sm_version=sm_version,
+        shape_n=256,
+        shape_k=256,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype="bfloat16",
+        as_dtype=scale_dtype if input_group else None,
+        bs_dtype=scale_dtype if weight_group else "bfloat16",
+        input_scale_group_size=input_group,
+        weight_scale_group_size=weight_group,
+    )
+    compute = ComputeConfig(gemm_type=GemmType.DENSE)
+    tuning = TuningConfig(
+        mma_type="mxmma",
+        block_shape=(32, 64, 128),
+        warp_shape=(32, 32, 128),
+        num_stages=2,
+        use_stream_k=False,
+    )
+    kernel_args = layer.to_dict() | compute.to_dict() | tuning.to_dict()
+    should_reject = requires_13_1 and compiler_version < (13, 1)
+    message = "scale_vec::4X and UE8M0 scales requires CUDA 13.1"
+    if should_reject:
+        with pytest.raises(AssertionError, match=message):
+            HummingKernel(**kernel_args)
+        assert not prepared
+    else:
+        kernel = HummingKernel(**kernel_args)
+        assert prepared == [kernel]
+        if requires_13_1:
+            assert "kind::mxf4nvf4.block_scale.scale_vec::4X" in kernel.code
+            assert ".f32.e2m1.e2m1.f32.ue8m0" in kernel.code
+
+    # Hardware-only checks must not reject every E0M3 configuration on SM121.
+    skip_if_unsupported(a_dtype=layer.a_dtype, mma_type="mxmma")
+    monkeypatch.setattr(KernelTestRunner, "prepare_weight", lambda self: None)
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "sampled")
+
+    def stop_before_sampling(*args):
+        raise RuntimeError("reached tuning generation")
+
+    monkeypatch.setattr(runner_module, "sample_test_tuning_configs", stop_before_sampling)
+    case = KernelTestCase(name="mxmma-version", layer_config=layer, compute_config=compute)
+    runner = KernelTestRunner(case)
+    if should_reject:
+        with pytest.raises(pytest.skip.Exception, match=message):
+            runner.prepare_kernels((1,))
+    else:
+        with pytest.raises(RuntimeError, match="reached tuning generation"):
+            runner.prepare_kernels((1,))
