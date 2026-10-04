@@ -494,7 +494,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 block_m = self.block_shape[0]
                 assert block_m <= 32 or block_m % 16 == 0, "INT8 UMMA requires M divisible by 16 above M=32"
             elif self.a_dtype.num_bits == 8:
-                assert not self.is_block_weight_scale and not self.has_zero_point
+                assert not self.is_block_weight_scale
                 if self.use_block_scaled_mma:
                     for group_size, scale_dtype in (
                         (self.input_scale_group_size, self.as_dtype),
@@ -505,7 +505,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                                 "mxf8f6f4 requires E8M0 scales with group size 32"
                             )
             if self.a_dtype.num_bits == 4:
-                assert not self.is_block_weight_scale and not self.has_zero_point
+                assert not self.is_block_weight_scale
                 assert self.b_dtype.is_integer_type or self.b_dtype in (dtypes.float4e2m1, dtypes.float4e0m3)
                 assert self.use_block_scaled_mma
                 for group_size, scale_dtype in (

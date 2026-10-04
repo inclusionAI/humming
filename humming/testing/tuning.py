@@ -66,9 +66,7 @@ def _is_legal_mma_type(layer_config, compute_config, mma_type):
     if has_mixed_raw_weights and mma_type != MmaType.UMMA:
         return False
     if mma_type == MmaType.UMMA:
-        if not layer_config.is_umma_supported or compute_config.use_f16_accum:
-            return False
-        return layer_config.a_dtype.num_bits == 16 or not layer_config.has_zero_point
+        return layer_config.is_umma_supported and not compute_config.use_f16_accum
     if mma_type == MmaType.MXMMA:
         return sm_version // 10 == 12 and layer_config.use_block_scaled_mma
     if mma_type == MmaType.WGMMA:

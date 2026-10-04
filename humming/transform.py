@@ -525,14 +525,13 @@ def transform_humming_tensors(
         )
 
     if zero_point is not None:
-        use_mxmma_zp_layout = (
+        use_grouped_fp4_zp_layout = (
             config.use_block_scaled_mma
-            and config.sm_version // 10 == 12
             and config.a_dtype.num_bits == 4
             and config.weight_scale_group_size > 0
         )
         num_groups_per_mma = 1
-        if use_mxmma_zp_layout:
+        if use_grouped_fp4_zp_layout:
             num_groups_per_mma = 256 // config.a_dtype.num_bits // config.weight_scale_group_size
         zero_point = transform_humming_zero_point(
             zero_point,

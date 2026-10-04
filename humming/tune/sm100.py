@@ -596,7 +596,6 @@ class Sm100Heuristics(Sm100MmaHeuristics):
         prefer_umma = is_heuristic_test and layer_config.is_umma_supported and not use_f16_accum
         prefer_umma &= layer_config.shape_n % 128 == 0
         prefer_umma &= layer_config.shape_k % (512 // layer_config.a_dtype.num_bits) == 0
-        prefer_umma &= layer_config.a_dtype.num_bits == 16 or not layer_config.has_zero_point
         if prefer_umma or get_default_mma_type(layer_config) == MmaType.UMMA:
             has_native_mixed_operands = layer_config.a_dtype.num_bits == 8
             has_native_mixed_operands &= layer_config.b_dtype.is_floating_point_type

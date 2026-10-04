@@ -39,7 +39,7 @@ def _case(
         layer_values.setdefault("as_dtype", scale_dtype)
     is_dense = gemm_type == GemmType.DENSE
     sm_version = current_device.sm_version
-    if sm_version // 10 not in (10, 11, 12) or has_zero_point and sm_version // 10 != 12:
+    if sm_version // 10 not in (10, 11, 12):
         sm_version = 120
     return KernelTestCase(
         name=name,
@@ -170,7 +170,16 @@ FORMAT_CASES = (
     ),
 )
 
-MXMMA_ZERO_POINT_CASES = (
+ZERO_POINT_CASES = (
+    _case(
+        "e4m3-uint4-channel-zp",
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.uint4,
+        bs_dtype=dtypes.bfloat16,
+        group_size=0,
+        has_zero_point=True,
+        input_quant_mode="static_tensor",
+    ),
     _case(
         "e3m4-uint5-e8m0-g32-zp",
         a_dtype=dtypes.float8e3m4,
@@ -219,6 +228,15 @@ MXMMA_ZERO_POINT_CASES = (
         bs_dtype=dtypes.float8e4m3,
         group_size=16,
         has_zero_point=True,
+    ),
+    _case(
+        "e2m1-uint2-e8m0-g16-zp-indexed",
+        a_dtype=dtypes.float4e2m1,
+        b_dtype=dtypes.uint2,
+        bs_dtype=dtypes.float8e8m0,
+        group_size=16,
+        has_zero_point=True,
+        gemm_type=GemmType.INDEXED,
     ),
 )
 
@@ -276,7 +294,7 @@ OPTIONAL_SCALE_CASES = tuple(
     )
 )
 
-BLOCK_SCALED_CASES = FORMAT_CASES + MXMMA_ZERO_POINT_CASES + NATIVE_QUANTIZATION_CASES + OPTIONAL_SCALE_CASES
+BLOCK_SCALED_CASES = FORMAT_CASES + ZERO_POINT_CASES + NATIVE_QUANTIZATION_CASES + OPTIONAL_SCALE_CASES
 
 
 @pytest.mark.parametrize("test_case", BLOCK_SCALED_CASES, ids=str)
@@ -324,9 +342,9 @@ def test_block_scaled_case_coverage():
         for case in BLOCK_SCALED_CASES
     )
 
-    assert len(MXMMA_ZERO_POINT_CASES) == 6
-    assert all(case.layer_config.has_zero_point for case in MXMMA_ZERO_POINT_CASES)
-    assert {case.layer_config.a_dtype for case in MXMMA_ZERO_POINT_CASES} == {
+    assert len(ZERO_POINT_CASES) == 8
+    assert all(case.layer_config.has_zero_point for case in ZERO_POINT_CASES)
+    assert {case.layer_config.a_dtype for case in ZERO_POINT_CASES} == {
         dtypes.float4e0m3,
         dtypes.float4e2m1,
         dtypes.float8e3m4,

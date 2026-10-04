@@ -47,7 +47,7 @@ private:
 
   static constexpr uint32_t kInputScaleGroupSize = kIsGroupInputScale ? Ctx::kInputScaleGroupSize : 1;
   static constexpr uint32_t kWeightScaleGroupSize = kIsGroupOrBlockWeightScale ? Ctx::kWeightScaleGroupSize : 1;
-  static constexpr uint32_t kNumZPGroupsPerMma = kUseMxmma && ElementA::kBits == 4 && kIsGroupWeightScale ? kPartMmaShapeK / kWeightScaleGroupSize : 1;
+  static constexpr uint32_t kNumZPGroupsPerMma = Ctx::kUseBlockScaledMma && ElementA::kBits == 4 && kIsGroupWeightScale ? kPartMmaShapeK / kWeightScaleGroupSize : 1;
 
   static constexpr bool kUsePackedKLayout = Ctx::kUsePackedKLayout;
   static constexpr uint32_t kPackedKFactor = Ctx::kPackedKFactor;

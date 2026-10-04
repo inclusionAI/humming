@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from humming import dtypes
@@ -85,6 +87,19 @@ def _make_cases() -> list[KernelTestCase]:
 
 
 ZERO_POINT_CASES = _make_cases()
+ZERO_POINT_CASES += [
+    dataclasses.replace(
+        case,
+        name=f"{case.name}-channel",
+        layer_config=dataclasses.replace(
+            case.layer_config, weight_scale_group_size=0, weight_scale_type="channel"
+        ),
+    )
+    for case in ZERO_POINT_CASES
+    if case.layer_config.a_dtype == dtypes.int8
+    and case.layer_config.b_dtype in (dtypes.uint4, dtypes.uint7)
+    and case.layer_config.c_dtype == dtypes.bfloat16
+]
 
 
 @pytest.mark.parametrize("test_case", ZERO_POINT_CASES, ids=str)
@@ -107,4 +122,4 @@ def test_zero_point_case_coverage():
     assert {str(case.layer_config.a_dtype) for case in floating_cases} == {"float16", "bfloat16"}
     assert {case.layer_config.b_dtype.num_bits for case in floating_cases} == set(range(1, 9))
     assert all(case.layer_config.has_zero_point for case in ZERO_POINT_CASES)
-    assert all(case.layer_config.weight_scale_group_size == 64 for case in ZERO_POINT_CASES)
+    assert {case.layer_config.weight_scale_group_size for case in ZERO_POINT_CASES} == {0, 64}

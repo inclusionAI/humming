@@ -336,25 +336,43 @@ def test_decision_rejects_an_illegal_selection():
 
 
 @pytest.mark.parametrize(
-    "sm_version,a_dtype,b_dtype,group_size,scale_dtype,packed_k,use_f16_accum,expected",
+    "sm_version,a_dtype,b_dtype,group_size,scale_dtype,packed_k,use_f16_accum,has_zero_point,expected",
     (
-        (90, "bfloat16", "uint4", 128, "bfloat16", False, False, {"mma", "wgmma"}),
-        (90, "float8e4m3", "uint4", 128, "bfloat16", True, False, {"wgmma"}),
-        (90, "int4", "int4", 0, "bfloat16", False, False, {"mma"}),
-        (103, "bfloat16", "uint4", 128, "bfloat16", False, False, {"mma", "umma"}),
-        (103, "float8e4m3", "float8e4m3", 0, "bfloat16", False, False, {"mma", "umma"}),
-        (103, "float8e4m3", "float4e2m1", 32, "float8e8m0", False, False, {"umma"}),
-        (100, "float8e3m4", "float3e1m1", 0, "bfloat16", False, False, {"umma"}),
-        (103, "float8e3m4", "float3e2m0", 0, "bfloat16", False, False, {"umma"}),
-        (103, "float8e4m3", "float3e1m1", 0, "bfloat16", False, False, {"mma", "umma"}),
-        (100, "int8", "uint4", 0, "bfloat16", False, False, {"mma", "umma"}),
-        (103, "int8", "uint4", 0, "bfloat16", False, False, {"mma"}),
-        (103, "float16", "uint4", 128, "float16", False, True, {"mma"}),
-        (120, "float4e2m1", "float4e2m1", 32, "float8e8m0", False, False, {"mxmma"}),
+        (90, "bfloat16", "uint4", 128, "bfloat16", False, False, False, {"mma", "wgmma"}),
+        (90, "float8e4m3", "uint4", 128, "bfloat16", True, False, False, {"wgmma"}),
+        (90, "int4", "int4", 0, "bfloat16", False, False, False, {"mma"}),
+        (103, "bfloat16", "uint4", 128, "bfloat16", False, False, False, {"mma", "umma"}),
+        (103, "float8e4m3", "float8e4m3", 0, "bfloat16", False, False, False, {"mma", "umma"}),
+        (103, "float8e4m3", "float4e2m1", 32, "float8e8m0", False, False, False, {"umma"}),
+        (100, "float8e3m4", "float3e1m1", 0, "bfloat16", False, False, False, {"umma"}),
+        (103, "float8e3m4", "float3e2m0", 0, "bfloat16", False, False, False, {"umma"}),
+        (103, "float8e4m3", "float3e1m1", 0, "bfloat16", False, False, False, {"mma", "umma"}),
+        (100, "int8", "uint4", 0, "bfloat16", False, False, False, {"mma", "umma"}),
+        (100, "int8", "uint4", 0, "bfloat16", False, False, True, {"mma", "umma"}),
+        (110, "int8", "uint7", 0, "bfloat16", False, False, True, {"mma", "umma"}),
+        (103, "int8", "uint4", 0, "bfloat16", False, False, False, {"mma"}),
+        (103, "float16", "uint4", 128, "float16", False, True, False, {"mma"}),
+        (120, "float4e2m1", "float4e2m1", 32, "float8e8m0", False, False, False, {"mxmma"}),
+        (100, "float8e3m4", "uint5", 32, "float8e8m0", False, False, True, {"umma"}),
+        (103, "float8e4m3", "uint4", 32, "float8e8m0", False, False, True, {"umma"}),
+        (103, "float8e5m2", "uint3", 32, "float8e8m0", False, False, True, {"umma"}),
+        (103, "float8e4m3", "uint4", 0, "bfloat16", False, False, True, {"mma", "umma"}),
+        (100, "float4e2m1", "uint2", 16, "float8e4m3", False, False, True, {"umma"}),
+        (103, "float4e2m1", "uint2", 32, "float8e8m0", False, False, True, {"umma"}),
+        (120, "float4e0m3", "uint3", 16, "float8e4m3", False, False, True, {"mxmma"}),
     ),
 )
 def test_sampled_backends_match_fixed_layout(
-    sm_version, a_dtype, b_dtype, group_size, scale_dtype, packed_k, use_f16_accum, expected, monkeypatch
+    sm_version,
+    a_dtype,
+    b_dtype,
+    group_size,
+    scale_dtype,
+    packed_k,
+    use_f16_accum,
+    has_zero_point,
+    expected,
+    monkeypatch,
 ):
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo
@@ -379,6 +397,7 @@ def test_sampled_backends_match_fixed_layout(
         bs_dtype=scale_dtype,
         weight_scale_group_size=group_size,
         use_packed_k_layout=packed_k,
+        has_zero_point=has_zero_point,
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE, use_f16_accum=use_f16_accum)
     configs = tuning.sample_test_tuning_configs(layer, compute, sample_size=20)
