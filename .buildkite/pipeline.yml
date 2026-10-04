@@ -126,6 +126,7 @@ steps:
   - <<: *b200_tests
     label: "Humming Full Sampled Tests (B200)"
     key: humming-b200-sampled-ci
+    concurrency_group: humming/b200-sampled
     depends_on: approve-b200-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
@@ -135,6 +136,7 @@ steps:
   - <<: *dgx_spark_tests
     label: "Humming Full Sampled Tests (DGX Spark)"
     key: humming-dgx-spark-sampled-ci
+    concurrency_group: humming/dgx-spark-sampled
     depends_on: approve-dgx-spark-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
@@ -144,6 +146,7 @@ steps:
   - <<: *l4_tests
     label: "Humming Full Sampled Tests (L4)"
     key: humming-l4-sampled-ci
+    concurrency_group: humming/l4-sampled
     depends_on: approve-l4-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
@@ -153,5 +156,6 @@ steps:
   - <<: *h200_tests
     label: "Humming Full Sampled Tests (H200)"
     key: humming-h200-sampled-ci
+    concurrency_group: humming/h200-sampled
     depends_on: approve-h200-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
