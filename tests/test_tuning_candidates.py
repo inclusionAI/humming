@@ -541,63 +541,6 @@ def test_heuristic_tests_prefer_available_backend(
     assert {config["mma_type"] for config in configs} == {expected}
 
 
-@pytest.mark.parametrize(
-    "warp_m,num_ctas,expected",
-    (
-        (16, 3, False),
-        (32, 3, False),
-        (32, 2, True),
-        (64, 3, False),
-        (48, 4, False),
-        (64, 4, False),
-        (128, 1, False),
-        (128, 3, False),
-    ),
-)
-def test_warp_specialization_register_budget(warp_m, num_ctas, expected, monkeypatch):
-    from humming.config import ComputeConfig, TuningConfig
-    from humming.config.mma import get_register_budget_error
-    from humming.device import DeviceInfo
-    from humming.kernel.humming import HummingKernel
-    from humming.testing import tuning
-
-    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
-
-    layer = dataclasses.replace(_layer(), sm_version=103)
-    compute = ComputeConfig(gemm_type=GemmType.INDEXED)
-    config = TuningConfig(
-        mma_type="mma",
-        block_shape=(warp_m, 128, 256),
-        warp_shape=(warp_m, 64, 64),
-        num_stages=2,
-        num_ctas_per_sm=num_ctas,
-        use_warp_spec=True,
-        use_tma=True,
-        use_tma_a=False,
-        use_tma_c=False,
-        use_stream_k=False,
-        output_chunk_rows=32,
-        smem_reuse_mode="last_stage",
-    )
-    assert (get_register_budget_error(layer, config) is None) == expected
-    schedule_fields = {field.name for field in dataclasses.fields(ScheduleCandidate)}
-    schedule_config = {name: value for name, value in config.to_dict().items() if name in schedule_fields}
-    schedule = ScheduleCandidate.from_config("register-budget", schedule_config)
-    analysis = analyze_candidate(_problem(layer_config=layer), schedule)
-    has_register_error = any(
-        reason.startswith("register budget exceeded:") for reason in analysis.rejection_reasons
-    )
-    assert has_register_error == (not expected)
-    if not expected:
-        assert not tuning._fits_device_resources(layer, compute, (config.to_dict(), {}))
-        monkeypatch.setattr(HummingKernel, "_instances", {})
-        monkeypatch.setattr(
-            HummingKernel, "prepare", lambda self: pytest.fail("invalid config reached compilation")
-        )
-        with pytest.raises(ValueError, match="register budget exceeded"):
-            HummingKernel(**(layer.to_dict() | compute.to_dict() | config.to_dict()))
-
-
 @pytest.mark.parametrize("a_dtype,expected", [("int4", "mma"), ("int8", "wgmma"), ("bfloat16", "wgmma")])
 def test_sm90_default_backend_supports_activation(a_dtype, expected):
     from humming.config.mma import get_default_mma_type

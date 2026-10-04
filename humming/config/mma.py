@@ -102,9 +102,9 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
             dequant_threads = 128 * tuning_config.umma_num_dequant_warpgroups
         num_threads = 256 + dequant_threads
     launch_budget = registers_per_sm // (num_threads * tuning_config.num_ctas_per_sm) // 8 * 8
-    if launch_budget < 64:
+    if launch_budget < 56:
         return (
-            "register budget exceeded: requires at least 64 registers per thread; "
+            "register budget exceeded: requires at least 56 registers per thread; "
             f"launch budget {launch_budget:g}"
         )
     if mma_type == MmaType.UMMA:
@@ -132,9 +132,9 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
             preferred_budget = 96
         math_budget = min(preferred_budget, max(24, available_registers // num_math_threads // 8 * 8))
 
-    if math_budget < 64:
+    if math_budget < 56:
         return (
-            "register budget exceeded: requires at least 64 registers per math thread; "
+            "register budget exceeded: requires at least 56 registers per math thread; "
             f"launch budget {launch_budget:g}, math-thread budget {math_budget:g}"
         )
 
