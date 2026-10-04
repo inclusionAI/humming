@@ -4,11 +4,9 @@ from pathlib import Path
 import pytest
 import torch
 
-os.environ.setdefault("HUMMING_DISABLE_PARALLEL_BUILD", "1")
-
-import humming.jit.compiler as compiler_module  # noqa: E402
-import humming.utils.jit as jit_utils  # noqa: E402
-from humming.jit.compiler import Compiler  # noqa: E402
+import humming.jit.compiler as compiler_module
+import humming.utils.jit as jit_utils
+from humming.jit.compiler import Compiler
 
 
 class _FakeCompiler(Compiler):
