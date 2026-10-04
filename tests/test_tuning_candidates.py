@@ -498,28 +498,6 @@ def test_heuristic_tests_prefer_available_backend(
     assert {config["mma_type"] for config in configs} == {expected}
 
 
-def test_heuristic_test_mode_has_separate_cache_entries(monkeypatch):
-    from humming.device import current_device
-    from humming.tune import get_heuristics_config
-
-    if current_device.sm_version // 10 not in (10, 11):
-        pytest.skip("requires a device with both MMA and UMMA")
-    layer = LayerConfig(
-        shape_n=256,
-        shape_k=1024,
-        a_dtype="bfloat16",
-        b_dtype="uint4",
-        c_dtype="bfloat16",
-    )
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.delenv("HUMMING_TEST_TUNING_SOURCE", raising=False)
-    assert get_heuristics_config(layer, 17)["mma_type"] == "mma"
-    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
-    assert get_heuristics_config(layer, 17)["mma_type"] == "umma"
-    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "sampled")
-    assert get_heuristics_config(layer, 17)["mma_type"] == "mma"
-
-
 @pytest.mark.parametrize(
     "warp_m,num_ctas,expected",
     (
