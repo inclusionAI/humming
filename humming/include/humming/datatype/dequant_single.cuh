@@ -88,7 +88,7 @@ CUDA_INLINE uint32_t fp_to_fp(uint32_t val) {
   static_assert(TargetType::kIsFloatingPointType);
   static_assert(SourceType::kBits < TargetType::kBits);
   static_assert(!SourceType::kIsSigned || TargetType::kIsSigned);
-  static_assert(TargetType::kBits == 32 || TargetType::kBits == 16 || TargetType::kBits == 8 || TargetType::kBits == 4);
+  static_assert(TargetType::kBits == 16 || TargetType::kBits == 8 || TargetType::kBits == 4);
   static_assert(SourceType::kExponentBits <= TargetType::kExponentBits);
   static_assert(SourceType::kMantissaBits <= TargetType::kMantissaBits);
   static_assert(SourceType::kIsSigned || std::is_same<SourceType, Float8E8M0>::value || std::is_same<SourceType, Float8E5M3>::value);

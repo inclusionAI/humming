@@ -151,80 +151,41 @@ CUDA_INLINE void dequant_scale(const uint32_t *src, uint32_t *dst, uint32_t inde
     }
   } else {
     dequant<SourceType, TargetType>(src, dst, index);
-    using scalar_t = typename F16Conversion<TargetType>::scalar_t;
-    scalar_t *values = reinterpret_cast<scalar_t *>(dst);
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < 2; i++) {
-      scalar_t tmp = values[4 * i + 1];
-      values[4 * i + 1] = values[4 * i + 2];
-      values[4 * i + 2] = tmp;
-    }
-    // The software weight path leaves exponent fields biased. Preserve special
-    // scale encodings before callers apply the normal exponent compensation.
-    if constexpr (std::is_same<SourceType, Float8E4M3>::value || std::is_same<SourceType, Float8E5M2>::value) {
-      constexpr uint16_t kInfinity = ((1u << TargetType::kExponentBits) - 1) << TargetType::kMantissaBits;
-      uint16_t *bits = reinterpret_cast<uint16_t *>(dst);
-      PRAGMA_UNROLL
-      for (uint32_t i = 0; i < 8; i++) {
-        uint32_t byte = (src[index * 2 + i / 4] >> (8 * (i % 4))) & 0xFFu;
-        if constexpr (std::is_same<SourceType, Float8E4M3>::value) {
-          if ((byte & 0x7Fu) == 0x7Fu) bits[i] = kInfinity | 1u;
-        } else {
-          constexpr uint32_t kMantissaMask = (1u << SourceType::kMantissaBits) - 1;
-          if (((byte >> SourceType::kMantissaBits) & 31u) == 31u) {
-            uint16_t sign = SourceType::kIsSigned ? (byte & 0x80u) << 8 : 0;
-            bits[i] = sign | kInfinity | (byte & kMantissaMask);
-          }
-        }
-      }
+      uint32_t even = dst[2 * i];
+      uint32_t odd = dst[2 * i + 1];
+      dst[2 * i] = __byte_perm(even, odd, 0x5410);
+      dst[2 * i + 1] = __byte_perm(even, odd, 0x7632);
     }
   }
 }
 
 
 template <class SourceType>
-CUDA_INLINE float4 dequant_scale_float4(uint32_t packed) {
-  float4 result;
-  float *values = reinterpret_cast<float *>(&result);
+CUDA_INLINE void dequant_scale_float32(const uint32_t *src, uint32_t *dst, uint32_t index) {
+  uint32_t pairs[4];
   if constexpr (kNativeDequantSupported<SourceType, Float16>) {
-    PRAGMA_UNROLL
-    for (uint32_t i = 0; i < 2; i++) {
-      uint32_t converted = dequant_native_x2<SourceType, Float16>(packed >> (16 * i));
-      reinterpret_cast<float2 *>(values)[i] = __half22float2(*reinterpret_cast<half2 *>(&converted));
-    }
-  } else {
+    dequant_native<SourceType, Float16>(src, pairs, index);
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < 4; i++) {
-      uint32_t byte = (packed >> (8 * i)) & 0xFFu;
-      uint32_t bits = dequant_single<SourceType, Float32, false, false>(byte << 24, 0);
-      if constexpr (std::is_same<SourceType, Float8E8M0>::value) {
-        // E8M0 has no zero/subnormal encoding; byte zero represents 2^-127.
-        values[i] = byte == 0 ? 0x1p-127f : *reinterpret_cast<float *>(&bits);
-        if (byte == 255) values[i] = __int_as_float(0x7FC00000);
-      } else {
-        constexpr uint32_t kExponentMask = (1u << SourceType::kExponentBits) - 1;
-        constexpr uint32_t kMantissaMask = (1u << SourceType::kMantissaBits) - 1;
-        constexpr int32_t kBias = (1 << (SourceType::kExponentBits - 1)) - 1;
-        uint32_t exponent = (byte >> SourceType::kMantissaBits) & kExponentMask;
-        if (exponent == 0) {
-          // Normalize source subnormals without multiplying an FP32 subnormal under FTZ.
-          uint32_t factor_bits = (127 + 1 - kBias - SourceType::kMantissaBits) << 23;
-          float value = float(byte & kMantissaMask) * __uint_as_float(factor_bits);
-          values[i] = SourceType::kIsSigned && (byte & 0x80u) ? -value : value;
-        } else {
-          bits += (127 - kBias) << 23;
-          values[i] = *reinterpret_cast<float *>(&bits);
-        }
-        if constexpr (std::is_same<SourceType, Float8E5M2>::value) {
-          if (exponent == 31) {
-            uint32_t mantissa = (byte & kMantissaMask) << (23 - SourceType::kMantissaBits);
-            values[i] = __uint_as_float((bits & 0x80000000u) | 0x7F800000u | mantissa);
-          }
-        } else if constexpr (std::is_same<SourceType, Float8E4M3>::value) {
-          if ((byte & 0x7Fu) == 0x7Fu) values[i] = __int_as_float(0x7FC00000);
-        }
+      reinterpret_cast<float2 *>(dst)[i] = __half22float2(*reinterpret_cast<half2 *>(&pairs[i]));
+    }
+  } else {
+    // Expand eight scale bytes into four packed BF16 pairs before widening to FP32.
+    dequant_scale<SourceType, BFloat16>(src, pairs, index);
+    PRAGMA_UNROLL
+    for (uint32_t i = 0; i < 4; i++) {
+      float2 values = __bfloat1622float2(*reinterpret_cast<nv_bfloat162 *>(&pairs[i]));
+      constexpr uint32_t kExponentOffset = 128 - (1u << (SourceType::kExponentBits - 1));
+      if constexpr (kExponentOffset != 0) {
+        constexpr uint32_t kFactorBits = (127 + kExponentOffset) << 23;
+        float factor = __uint_as_float(kFactorBits);
+        // Preserve the bit-expanded subnormals even when the kernel uses fast math.
+        asm("mul.rn.f32 %0, %0, %1;" : "+f"(values.x) : "f"(factor));
+        asm("mul.rn.f32 %0, %0, %1;" : "+f"(values.y) : "f"(factor));
       }
+      reinterpret_cast<float2 *>(dst)[i] = values;
     }
   }
-  return result;
 }

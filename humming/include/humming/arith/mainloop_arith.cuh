@@ -327,8 +327,8 @@ public:
             std::is_same<ElementBS, Float8E8M0>::value && std::is_same<ElementC, Float16>::value,
             Float8E5M3, ElementBS>;
         PRAGMA_UNROLL
-        for (uint32_t i = 0; i < CEIL_DIV(kNumBSPerGroup, 4); i++) {
-          reinterpret_cast<float4 *>(dq_bs)[i] = dequant_scale_float4<ScaleType>(bs[buffer_id][i]);
+        for (uint32_t i = 0; i < CEIL_DIV(kNumBSPerGroup, 8); i++) {
+          dequant_scale_float32<ScaleType>(bs[buffer_id], dq_bs + i * 8, i);
         }
       } else if constexpr (!kIsF16Accum && ElementBS::kBits == 16) {
         using F16x2 = typename F16Conversion<ElementBS>::scalar_t2;
