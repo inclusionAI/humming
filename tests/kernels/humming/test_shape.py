@@ -3,6 +3,7 @@ import pytest
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -12,6 +13,9 @@ from humming.testing import (
 
 MIN_SHAPE_N = 64
 MIN_SHAPE_K = 32
+BLOCK_SCALED_SM_VERSION = (
+    current_device.sm_version if current_device.sm_version // 10 in (10, 11, 12) else 120
+)
 
 
 def _case(
@@ -31,6 +35,7 @@ def _case(
     weight_scale_group_size: int = 0,
     weight_scale_group_size_n: int = 0,
     mma_type: MmaType | None = None,
+    sm_version: int | None = None,
 ) -> KernelTestCase:
     return KernelTestCase(
         name=name,
@@ -49,7 +54,7 @@ def _case(
             weight_scale_type=weight_scale_type,
             weight_scale_group_size=weight_scale_group_size,
             weight_scale_group_size_n=weight_scale_group_size_n,
-            sm_version=90 if mma_type == MmaType.WGMMA else None,
+            sm_version=90 if mma_type == MmaType.WGMMA else sm_version,
         ),
         compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
         seed=2026,
@@ -172,6 +177,7 @@ PAD_SHAPE_CASES = (
 NATIVE_SHAPE_CASES = tuple(
     _case(
         f"mxfp8-mxfp4-n{shape_n}-k{shape_k}",
+        sm_version=BLOCK_SCALED_SM_VERSION,
         shape_n=shape_n,
         shape_k=shape_k,
         a_dtype=dtypes.float8e4m3,
