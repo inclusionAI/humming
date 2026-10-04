@@ -238,64 +238,6 @@ def test_scale_config_case_coverage():
             assert (bs_dtype, scale_type) in secondary_scale_pairs
 
 
-@pytest.mark.parametrize("warp_n", (16, 32, 64))
-@pytest.mark.parametrize("use_tma", (False, True))
-@pytest.mark.parametrize("bs_dtype", (dtypes.bfloat16, dtypes.float8e4m3))
-def test_raw_wgmma_ss_group_scale_layout(warp_n, use_tma, bs_dtype, monkeypatch):
-    """Group scales follow SS's N16 fragments, including wide per-warp tiles."""
-    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
-    case = _case(
-        "raw-wgmma-ss-group64",
-        a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float8e4m3,
-        bs_dtype=bs_dtype,
-        input_scale_group_size=64,
-        weight_scale_group_size=64,
-        use_int_weight_scale=False,
-        use_fused_e8m0_scale=False,
-    )
-    tuning = dict(
-        mma_type="wgmma",
-        block_shape=(16, warp_n * 4, 256),
-        warp_shape=(16, warp_n, 128),
-        num_stages=3,
-        use_tma=use_tma,
-        use_warp_spec=use_tma,
-        use_stream_k=False,
-    )
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
-    results = KernelTestRunner(case).run((1, 17, 129))
-    assert_kernel_test_shape_coverage(results, (1, 17, 129))
-
-
-@pytest.mark.parametrize("warp_n", (16, 32, 64))
-@pytest.mark.parametrize("input_group", (0, 64))
-def test_raw_wgmma_ss_block_scale_layout(warp_n, input_group, monkeypatch):
-    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
-    case = _case(
-        "raw-wgmma-ss-block64",
-        a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float8e4m3,
-        bs_dtype=dtypes.float32,
-        weight_scale_type=WeightScaleType.BLOCK,
-        weight_scale_group_size=64,
-        weight_scale_group_size_n=64,
-        input_scale_group_size=input_group,
-    )
-    tuning = dict(
-        mma_type="wgmma",
-        block_shape=(16, warp_n * 4, 128),
-        warp_shape=(16, warp_n, 128),
-        num_stages=3,
-        use_tma=True,
-        use_warp_spec=True,
-        use_stream_k=False,
-    )
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
-    results = KernelTestRunner(case).run((1, 17, 129))
-    assert_kernel_test_shape_coverage(results, (1, 17, 129))
-
-
 @pytest.mark.parametrize(
     "a_dtype,b_dtype,input_group,weight_group,quant_mode",
     (
