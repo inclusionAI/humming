@@ -95,7 +95,8 @@ def _stage_storage_bytes(
         use_inplace_input_scale = layer_config.is_group_input_scale and logical_block_m % 128 == 0
         input_scale_rows = (
             round_up(logical_block_m, 128)
-            if layer_config.is_group_input_scale and not use_inplace_input_scale else 0
+            if layer_config.is_group_input_scale and not use_inplace_input_scale
+            else 0
         )
         scale_rows = weight_scale_rows + input_scale_rows
         if scale_rows:

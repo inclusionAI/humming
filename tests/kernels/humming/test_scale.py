@@ -245,15 +245,23 @@ def test_raw_wgmma_ss_group_scale_layout(warp_n, use_tma, bs_dtype, monkeypatch)
     """Group scales follow SS's N16 fragments, including wide per-warp tiles."""
     skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
     case = _case(
-        "raw-wgmma-ss-group64", a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float8e4m3, bs_dtype=bs_dtype,
-        input_scale_group_size=64, weight_scale_group_size=64,
-        use_int_weight_scale=False, use_fused_e8m0_scale=False,
+        "raw-wgmma-ss-group64",
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        bs_dtype=bs_dtype,
+        input_scale_group_size=64,
+        weight_scale_group_size=64,
+        use_int_weight_scale=False,
+        use_fused_e8m0_scale=False,
     )
     tuning = dict(
-        mma_type="wgmma", block_shape=(16, warp_n * 4, 256),
-        warp_shape=(16, warp_n, 128), num_stages=3,
-        use_tma=use_tma, use_warp_spec=use_tma, use_stream_k=False,
+        mma_type="wgmma",
+        block_shape=(16, warp_n * 4, 256),
+        warp_shape=(16, warp_n, 128),
+        num_stages=3,
+        use_tma=use_tma,
+        use_warp_spec=use_tma,
+        use_stream_k=False,
     )
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
     results = KernelTestRunner(case).run((1, 17, 129))
@@ -265,16 +273,23 @@ def test_raw_wgmma_ss_group_scale_layout(warp_n, use_tma, bs_dtype, monkeypatch)
 def test_raw_wgmma_ss_block_scale_layout(warp_n, input_group, monkeypatch):
     skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
     case = _case(
-        "raw-wgmma-ss-block64", a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float8e4m3, bs_dtype=dtypes.float32,
+        "raw-wgmma-ss-block64",
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        bs_dtype=dtypes.float32,
         weight_scale_type=WeightScaleType.BLOCK,
-        weight_scale_group_size=64, weight_scale_group_size_n=64,
+        weight_scale_group_size=64,
+        weight_scale_group_size_n=64,
         input_scale_group_size=input_group,
     )
     tuning = dict(
-        mma_type="wgmma", block_shape=(16, warp_n * 4, 128),
-        warp_shape=(16, warp_n, 128), num_stages=3,
-        use_tma=True, use_warp_spec=True, use_stream_k=False,
+        mma_type="wgmma",
+        block_shape=(16, warp_n * 4, 128),
+        warp_shape=(16, warp_n, 128),
+        num_stages=3,
+        use_tma=True,
+        use_warp_spec=True,
+        use_stream_k=False,
     )
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
     results = KernelTestRunner(case).run((1, 17, 129))
