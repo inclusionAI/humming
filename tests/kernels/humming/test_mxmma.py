@@ -4,6 +4,7 @@ import torch
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -46,7 +47,7 @@ def _case(
             input_scale_group_size=input_group_size,
             weight_scale_group_size=weight_group_size,
             has_zero_point=has_zero_point,
-            sm_version=120,
+            sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
         ),
         compute_config=ComputeConfig(gemm_type=gemm_type),
         top_k=1 if is_dense else TOP_K,

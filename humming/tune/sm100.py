@@ -31,7 +31,8 @@ class Sm100MmaHeuristics(Sm80Heuristics):
         config = super().get_config(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
         block_m, block_n, _ = config["block_shape"]
         warp_m = config["warp_shape"][0]
-        if use_batch_invariant:
+        # This four-warp schedule targets small M tiles.
+        if use_batch_invariant or block_m > 32:
             return config
 
         warp_k = 1024 // layer_config.a_dtype.num_bits

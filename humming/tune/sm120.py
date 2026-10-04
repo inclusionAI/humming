@@ -20,6 +20,11 @@ class Sm120Heuristics(Sm89Heuristics):
     ]
     b4_allowed_dtypes: list[dtypes.DataType] = [dtypes.float4e2m1, dtypes.float4e0m3]
 
+    @staticmethod
+    def _has_complete_warpgroups(config) -> bool:
+        num_math_warps = math.prod(config["block_shape"]) // math.prod(config["warp_shape"])
+        return num_math_warps % 4 == 0
+
     @classmethod
     def should_use_pdl_for_input(cls, layer_config, shape_m: int) -> bool:
         return layer_config.shape_n >= 4096 and shape_m <= 32
@@ -127,16 +132,10 @@ class Sm120Heuristics(Sm89Heuristics):
         is_wna16 = a.is_floating_point_type and a.num_bits == 16 and not use_f16_accum
         if a.is_floating_point_type and a.num_bits <= 8 and not layer_config.use_fused_e8m0_scale:
             config["use_tma"] = True
-            config["use_warp_spec"] = True
+            config["use_warp_spec"] = cls._has_complete_warpgroups(config)
         elif is_wna16:
             config["use_tma"] = True
-            block_shape = config["block_shape"]
-            warp_shape = config["warp_shape"]
-            m_warps = block_shape[0] // warp_shape[0]
-            n_warps = block_shape[1] // warp_shape[1]
-            k_warps = block_shape[2] // warp_shape[2]
-            num_math_threads = m_warps * n_warps * k_warps * 32
-            config["use_warp_spec"] = num_math_threads % 128 == 0
+            config["use_warp_spec"] = cls._has_complete_warpgroups(config)
             config["num_stages"] = cls._fit_num_stages(
                 layer_config,
                 config,
@@ -209,6 +208,8 @@ class Sm120Heuristics(Sm89Heuristics):
                 mn_warps = block_m // warp_m * (block_n // warp_n)
                 target_k_warps = max(1, 4 // mn_warps)
                 config["warp_shape"] = (warp_m, warp_n, max(warp_k, block_k // target_k_warps))
+                if not cls._has_complete_warpgroups(config):
+                    config["use_warp_spec"] = False
 
             cls._rebalance_dense_warps(layer_config, config, shape_m)
             if is_mxmma:
@@ -278,7 +279,9 @@ class Sm120Heuristics(Sm89Heuristics):
         block_m, block_n, _ = config["block_shape"]
         _, warp_n, _ = config["warp_shape"]
         mma_k = 1024 // layer_config.a_dtype.num_bits
-        block_k = min(layer_config.shape_k, mma_k * 2)
+        block_k = mma_k * 2
+        while block_k > layer_config.shape_k:
+            block_k //= 2
         if layer_config.shape_k % block_k:
             return
 
@@ -350,6 +353,7 @@ class Sm120Heuristics(Sm89Heuristics):
         _, warp_n, warp_k = config["warp_shape"]
         config["block_shape"] = (block_m, block_n, block_k)
         config["warp_shape"] = (block_m, warp_n, warp_k)
+        config["use_warp_spec"] = config.get("use_warp_spec", False) and cls._has_complete_warpgroups(config)
         config["num_stages"] = cls._fit_num_stages(
             layer_config,
             config,

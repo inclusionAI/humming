@@ -4,6 +4,7 @@ import torch
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.kernel.humming import HummingKernel
 from humming.testing import (
     KernelTestCase,
@@ -118,7 +119,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="static_tensor_dynamic_group",
-        sm_version=120,
+        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
     ),
     _case(
         "indexed-dynamic-group-token",
@@ -127,7 +128,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=120,
+        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
     ),
     _case("indexed-partial-k-tile", GemmType.INDEXED, shape_k=96),
     _case("grouped-contiguous", GemmType.GROUPED_CONTIGUOUS),
@@ -139,7 +140,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=120,
+        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
     ),
     _case("grouped-masked", GemmType.GROUPED_MASKED),
     _case(
@@ -150,7 +151,7 @@ MOE_CASES = (
         b_dtype=dtypes.float4e2m1,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=120,
+        sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
     ),
     _case(
         "indexed-bias-pad-k",
