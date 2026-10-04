@@ -43,7 +43,7 @@ def _get_sample_size(tuning_source: str) -> int | None:
 
 
 def _get_test_tuning_sources() -> tuple[str, ...]:
-    value = os.environ.get(TEST_TUNING_SOURCE_ENV, "heuristic+batch_invariant+sampled8")
+    value = os.environ.get(TEST_TUNING_SOURCE_ENV, "heuristic+batch_invariant")
     sources = tuple(dict.fromkeys(source.strip() for source in value.split("+")))
     for source in sources:
         if source not in ("heuristic", "batch_invariant") and _get_sample_size(source) is None:

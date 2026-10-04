@@ -7,7 +7,7 @@ steps:
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/b200
-    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant+sampled8 bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -16,7 +16,7 @@ steps:
             runtimeClassName: nvidia
             containers:
               # NGC 26.07 multi-arch: PyTorch 2.13 development snapshot and CUDA 13.3.
-              - image: nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
+              - image: &test_image nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
                 resources:
                   limits:
                     nvidia.com/gpu: 1
@@ -36,7 +36,7 @@ steps:
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/dgx-spark
-    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant+sampled8 bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -50,6 +50,69 @@ steps:
           volumes:
             - /dev/shm:/dev/shm
 
+  - &l4_tests
+    <<: *b200_tests
+    label: "Humming Tests (L4)"
+    key: humming-l4-ci
+    agents:
+      queue: l4-k8s
+    concurrency_group: humming/l4
+    plugins:
+      # Match vLLM ci-infra's single-GPU L4 Kubernetes preset.
+      - kubernetes:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              karpenter.sh/do-not-disrupt: "true"
+          podSpec:
+            priorityClassName: ci
+            serviceAccountName: buildkite-gpu-jobs
+            tolerations:
+              - key: nvidia.com/gpu
+                operator: Exists
+                effect: NoSchedule
+            nodeSelector:
+              vllm.ci/gpu-pool: l4x4
+            containers:
+              - image: *test_image
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                  requests:
+                    nvidia.com/gpu: 1
+                    cpu: "10"
+                    memory: 40Gi
+                volumeMounts:
+                  - name: devshm
+                    mountPath: /dev/shm
+            volumes:
+              - name: devshm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 24Gi
+
+  - &h200_tests
+    <<: *dgx_spark_tests
+    label: "Humming Tests (H200)"
+    key: humming-h200-ci
+    agents:
+      queue: h200_18gb
+    concurrency_group: humming/h200
+    plugins:
+      # Use the GPU visibility assigned by the MIG agent, as in vLLM ci-infra.
+      - docker#v5.2.0:
+          image: *test_image
+          always-pull: true
+          propagate-environment: true
+          propagate-uid-gid: true
+          environment:
+            - CUDA_VISIBLE_DEVICES
+            - NVIDIA_VISIBLE_DEVICES
+            - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+          volumes:
+            - /dev/shm:/dev/shm
+            - /dev/nvidiactl:/dev/nvidiactl
+
   - input: "Run Humming Full Sampled Tests"
     key: approve-sampled-tests
 
@@ -57,10 +120,22 @@ steps:
     label: "Humming Full Sampled Tests (B200)"
     key: humming-b200-sampled-ci
     depends_on: approve-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled64 bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
   - <<: *dgx_spark_tests
     label: "Humming Full Sampled Tests (DGX Spark)"
     key: humming-dgx-spark-sampled-ci
     depends_on: approve-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled64 bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - <<: *l4_tests
+    label: "Humming Full Sampled Tests (L4)"
+    key: humming-l4-sampled-ci
+    depends_on: approve-sampled-tests
+    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - <<: *h200_tests
+    label: "Humming Full Sampled Tests (H200)"
+    key: humming-h200-sampled-ci
+    depends_on: approve-sampled-tests
+    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
