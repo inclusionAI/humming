@@ -17,7 +17,7 @@ NUM_SAMPLED_TUNING_CONFIGS = 100
 TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
 SAMPLED_TUNING_VALUES = {
     "mma_type": tuple(mma_type.value for mma_type in MmaType),
-    "num_stages": (2, 3, 4, 6, 8),
+    "num_stages": (2, 3, 4, 5, 6, 8),
     "use_tma": (True, False, 123, 456, 789),
     "use_warp_spec": (True, False),
     "use_mbarrier": (True, False),

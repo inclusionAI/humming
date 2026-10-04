@@ -414,6 +414,8 @@ def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch):
     for name in ("umma_cta_group_size", "umma_num_dequant_warpgroups", "output_chunk_rows"):
         assert {config[name] for config in umma_configs} == set(tuning.SAMPLED_TUNING_VALUES[name])
     assert {config["use_tma_b"] for config in umma_configs} == {False, True}
+    assert any(config["block_shape"][2] == 32 for config in umma_configs)
+    assert {3, 5} <= {config["num_stages"] for config in umma_configs}
     for config in configs:
         assert not config["use_stream_k"]
         assert not config["use_tma_a"] and not config["use_tma_c"]
@@ -435,18 +437,21 @@ def test_output_chunk_rows_rejects_invalid_heights(output_chunk_rows):
 
 @pytest.mark.parametrize("sm_version", (100, 103, 107, 110))
 @pytest.mark.parametrize(
-    "a_dtype,b_dtype",
+    "a_dtype,b_dtype,small_m_backend",
     (
-        (dtypes.bfloat16, dtypes.uint4),
-        (dtypes.int8, dtypes.int8),
-        (dtypes.float8e4m3, dtypes.float8e4m3),
-        (dtypes.float8e4m3, dtypes.float4e2m1),
-        (dtypes.float4e2m1, dtypes.float4e2m1),
+        (dtypes.bfloat16, dtypes.uint4, "mma"),
+        (dtypes.int8, dtypes.int8, "mma"),
+        (dtypes.float8e4m3, dtypes.float8e4m3, "mma"),
+        (dtypes.float8e4m3, dtypes.float4e2m1, "umma"),
+        (dtypes.float4e2m1, dtypes.float4e2m1, "umma"),
+        (dtypes.float8e3m4, dtypes.float8e3m4, "umma"),
+        (dtypes.float8e3m4, dtypes.float6e2m3, "umma"),
     ),
 )
-def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
+def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backend, monkeypatch):
     from humming.config import MmaType
     from humming.config.mma import get_default_mma_type
+    from humming.tune.sm100 import Sm100Heuristics
 
     scale_config = {}
     if a_dtype == dtypes.float4e2m1:
@@ -468,6 +473,12 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
     )
     expected = MmaType.MMA if a_dtype == dtypes.int8 and sm_version in (103, 107) else MmaType.UMMA
     assert get_default_mma_type(config) == expected
+
+    monkeypatch.delenv("HUMMING_TEST_TUNING_SOURCE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    for shape_m, backend in ((17, small_m_backend), (257, expected.value)):
+        tuning = Sm100Heuristics.get_config(config, shape_m)
+        assert tuning["mma_type"] == backend
 
 
 @pytest.mark.parametrize(

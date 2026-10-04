@@ -105,7 +105,7 @@ MOE_CASES = (
         has_zero_point=True,
         is_fp_zero_point=True,
     ),
-    _case("indexed", GemmType.INDEXED),
+    _case("indexed", GemmType.INDEXED, weight_scale_group_size=128),
     _case(
         "indexed-static-input",
         GemmType.INDEXED,
@@ -132,6 +132,13 @@ MOE_CASES = (
     ),
     _case("indexed-partial-k-tile", GemmType.INDEXED, shape_k=96),
     _case("grouped-contiguous", GemmType.GROUPED_CONTIGUOUS),
+    _case(
+        "grouped-contiguous-short-k-zp",
+        GemmType.GROUPED_CONTIGUOUS,
+        shape_k=192,
+        weight_scale_group_size=64,
+        has_zero_point=True,
+    ),
     _case(
         "grouped-contiguous-dynamic-group-token",
         GemmType.GROUPED_CONTIGUOUS,

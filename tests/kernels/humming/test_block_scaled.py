@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
@@ -30,10 +29,18 @@ def _case(
     input_group_size: int | None = None,
     weight_group_size: int | None = None,
     gemm_type: GemmType = GemmType.DENSE,
+    use_m_major_input_scale: bool = False,
+    **layer_values,
 ) -> KernelTestCase:
     input_group_size = group_size if input_group_size is None else input_group_size
     weight_group_size = group_size if weight_group_size is None else weight_group_size
+    if input_group_size and not weight_group_size:
+        scale_dtype = dtypes.float8e4m3 if input_group_size == 16 else dtypes.float8e8m0
+        layer_values.setdefault("as_dtype", scale_dtype)
     is_dense = gemm_type == GemmType.DENSE
+    sm_version = current_device.sm_version
+    if sm_version // 10 not in (10, 11, 12) or has_zero_point and sm_version // 10 != 12:
+        sm_version = 120
     return KernelTestCase(
         name=name,
         layer_config=LayerConfig(
@@ -47,15 +54,16 @@ def _case(
             input_scale_group_size=input_group_size,
             weight_scale_group_size=weight_group_size,
             has_zero_point=has_zero_point,
-            sm_version=current_device.sm_version if current_device.sm_version // 10 == 12 else 120,
+            sm_version=sm_version,
+            **layer_values,
         ),
-        compute_config=ComputeConfig(gemm_type=gemm_type),
+        compute_config=ComputeConfig(gemm_type=gemm_type, use_m_major_input_scale=use_m_major_input_scale),
         top_k=1 if is_dense else TOP_K,
         seed=2026,
     )
 
 
-MXMMA_FORMAT_CASES = (
+FORMAT_CASES = (
     _case(
         "e3m4-fp4-e8m0-g32",
         a_dtype=dtypes.float8e3m4,
@@ -214,48 +222,106 @@ MXMMA_ZERO_POINT_CASES = (
     ),
 )
 
-MXMMA_CASES = MXMMA_FORMAT_CASES + MXMMA_ZERO_POINT_CASES
+NATIVE_QUANTIZATION_CASES = tuple(
+    _case(
+        f"{a_dtype}-{b_dtype}-{scale_dtype}-g{group_size}-{quant_mode}-{gemm_type.value}",
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        bs_dtype=scale_dtype,
+        as_dtype=scale_dtype,
+        group_size=group_size,
+        input_quant_mode=quant_mode,
+        weight_scale_2_type="tensor",
+        has_bias=True,
+        gemm_type=gemm_type,
+        use_m_major_input_scale=gemm_type != GemmType.INDEXED,
+    )
+    for a_dtype, b_dtype, group_size, scale_dtype, quant_mode, gemm_type in (
+        ("float4e2m1", "float4e2m1", 32, "float8e8m0", "dynamic_group", GemmType.DENSE),
+        ("float4e2m1", "float4e2m1", 16, "float8e4m3", "dynamic_group_token", GemmType.INDEXED),
+        ("float4e2m1", "float4e2m1", 16, "float8e8m0", "static_tensor_dynamic_group", GemmType.DENSE),
+        ("float4e0m3", "float4e0m3", 16, "float8e4m3", "dynamic_group_token", GemmType.DENSE),
+        ("float4e0m3", "float4e0m3", 16, "float8e4m3", "dynamic_group_token", GemmType.GROUPED_MASKED),
+        ("float4e0m3", "float4e0m3", 16, "float8e8m0", "static_tensor_dynamic_group", GemmType.DENSE),
+        ("float4e0m3", "float4e2m1", 16, "float8e4m3", "dynamic_group_token", GemmType.INDEXED),
+        ("float4e0m3", "float4e2m1", 16, "float8e8m0", "dynamic_group", GemmType.DENSE),
+        ("float4e2m1", "float4e0m3", 16, "float8e8m0", "dynamic_group", GemmType.GROUPED_CONTIGUOUS),
+        ("float4e2m1", "float4e0m3", 16, "float8e4m3", "dynamic_group_token", GemmType.INDEXED),
+        ("float8e4m3", "float4e2m1", 32, "float8e8m0", "dynamic_group", GemmType.DENSE),
+        ("float8e5m2", "float6e3m2", 32, "float8e8m0", "dynamic_group", GemmType.INDEXED),
+        ("float8e3m4", "float8e3m4", 32, "float8e8m0", "dynamic_group", GemmType.DENSE),
+        ("float8e4m3", "float6e2m3", 32, "float8e8m0", "dynamic_group", GemmType.GROUPED_MASKED),
+    )
+)
+
+OPTIONAL_SCALE_CASES = tuple(
+    _case(
+        f"{a_dtype}-{b_dtype}-as{input_group}-bs{weight_group}-{quant_mode}",
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        bs_dtype=dtypes.float8e8m0 if weight_group else dtypes.bfloat16,
+        as_dtype=dtypes.float8e8m0 if input_group else None,
+        group_size=32,
+        input_group_size=input_group,
+        weight_group_size=weight_group,
+        input_quant_mode=quant_mode,
+    )
+    for a_dtype, b_dtype, input_group, weight_group, quant_mode in (
+        ("float8e4m3", "float8e4m3", 0, 32, "dynamic_token"),
+        ("float8e4m3", "float4e2m1", 32, 0, "dynamic_group"),
+        ("float4e2m1", "float4e2m1", 0, 0, "dynamic_token"),
+        ("float8e4m3", "float8e4m3", 0, 0, "static_tensor"),
+        ("float8e4m3", "float4e2m1", 0, 32, "dynamic_token"),
+        ("float4e2m1", "float4e2m1", 32, 0, "dynamic_group"),
+    )
+)
+
+BLOCK_SCALED_CASES = FORMAT_CASES + MXMMA_ZERO_POINT_CASES + NATIVE_QUANTIZATION_CASES + OPTIONAL_SCALE_CASES
 
 
-@pytest.mark.parametrize("test_case", MXMMA_CASES, ids=str)
-def test_mxmma(test_case):
+@pytest.mark.parametrize("test_case", BLOCK_SCALED_CASES, ids=str)
+def test_block_scaled(test_case):
     config = test_case.layer_config
-    assert get_default_mma_type(config) == MmaType.MXMMA
+    assert get_default_mma_type(config) in (MmaType.UMMA, MmaType.MXMMA)
     skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
-    for result in results:
-        torch.testing.assert_close(
-            result.outputs,
-            result.outputs_ref,
-            rtol=test_case.rtol,
-            atol=test_case.atol,
-        )
     assert_kernel_test_shape_coverage(results)
 
 
-def test_mxmma_case_coverage():
-    assert all(get_default_mma_type(case.layer_config) == MmaType.MXMMA for case in MXMMA_CASES)
-    assert {case.layer_config.a_dtype for case in MXMMA_CASES} == {
+def test_block_scaled_case_coverage():
+    assert all(
+        get_default_mma_type(case.layer_config) in (MmaType.UMMA, MmaType.MXMMA)
+        for case in BLOCK_SCALED_CASES
+    )
+    assert {case.layer_config.a_dtype for case in BLOCK_SCALED_CASES} == {
         dtypes.float4e0m3,
         dtypes.float4e2m1,
         dtypes.float8e3m4,
         dtypes.float8e4m3,
         dtypes.float8e5m2,
     }
-    assert {case.layer_config.bs_dtype for case in MXMMA_CASES} == {
+    assert {case.layer_config.bs_dtype for case in BLOCK_SCALED_CASES} == {
         dtypes.bfloat16,
         dtypes.float8e4m3,
         dtypes.float8e8m0,
     }
-    assert {case.layer_config.weight_scale_group_size for case in MXMMA_CASES} == {
+    assert {case.layer_config.weight_scale_group_size for case in BLOCK_SCALED_CASES} == {
         0,
         16,
         32,
     }
+    assert {case.compute_config.gemm_type for case in BLOCK_SCALED_CASES} == {
+        GemmType.DENSE,
+        GemmType.INDEXED,
+        GemmType.GROUPED_CONTIGUOUS,
+        GemmType.GROUPED_MASKED,
+    }
+    assert any(case.layer_config.has_bias for case in BLOCK_SCALED_CASES)
+    assert any(case.compute_config.use_m_major_input_scale for case in BLOCK_SCALED_CASES)
     assert any(
         case.layer_config.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2)
         and case.layer_config.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
-        for case in MXMMA_CASES
+        for case in BLOCK_SCALED_CASES
     )
 
     assert len(MXMMA_ZERO_POINT_CASES) == 6

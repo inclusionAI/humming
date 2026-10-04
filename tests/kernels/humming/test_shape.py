@@ -27,6 +27,7 @@ def _case(
     as_dtype=None,
     input_scale_group_size: int = 0,
     input_quant_mode: str | None = None,
+    weight_scale_type: str | None = None,
     weight_scale_group_size: int = 0,
     weight_scale_group_size_n: int = 0,
     mma_type: MmaType | None = None,
@@ -45,6 +46,7 @@ def _case(
             as_dtype=as_dtype,
             input_scale_group_size=input_scale_group_size,
             input_quant_mode=input_quant_mode,
+            weight_scale_type=weight_scale_type,
             weight_scale_group_size=weight_scale_group_size,
             weight_scale_group_size_n=weight_scale_group_size_n,
             sm_version=90 if mma_type == MmaType.WGMMA else None,
@@ -55,6 +57,12 @@ def _case(
 
 
 PROBLEM_SHAPE_CASES = (
+    _case(
+        "short-k-group-scale",
+        shape_n=256,
+        shape_k=64,
+        weight_scale_group_size=64,
+    ),
     _case(
         "minimum",
         shape_n=MIN_SHAPE_N,
@@ -176,6 +184,15 @@ NATIVE_SHAPE_CASES = tuple(
     )
     for shape_n, shape_k in ((128, 64), (384, 192), (256, 2816), (256, 2880), (256, 2944), (512, 4160))
 ) + (
+    _case(
+        "fp8-large-rectangular",
+        shape_n=4096,
+        shape_k=8192,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        input_quant_mode="static_tensor",
+        weight_scale_type="tensor",
+    ),
     _case(
         "fp8-uint4-n192-k2880",
         shape_n=192,
