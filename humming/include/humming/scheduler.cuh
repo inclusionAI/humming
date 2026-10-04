@@ -35,6 +35,10 @@ private:
 
   static constexpr uint32_t N_BLOCKS = ProblemShape::N / BlockShape::N / kNumCtasDimN;
   static constexpr uint32_t K_BLOCKS = ProblemShape::K / BlockShape::K;
+  static constexpr uint32_t kStreamKBlockAlignment = MAX(1u, MAX(kMaxGroupSize / BlockShape::K, kAsBlocksPerWord));
+  // Pad the scheduling space so every output tile starts at a complete input-scale word.
+  // The padding contributes no MMA iterations.
+  static constexpr uint32_t kStreamKBlocks = CEIL_DIV(K_BLOCKS, kStreamKBlockAlignment) * kStreamKBlockAlignment;
 
   static constexpr uint32_t kRasterGroupM = Ctx::kRasterGroupM;
   static constexpr bool kUseGroupedRaster = kIsGroupedContiguousGemm && kRasterGroupM > 1;
@@ -93,7 +97,7 @@ public:
       current_expert_m_blocks = CEIL_DIV(current_expert_num_tokens, BlockShape::M);
     }
     mn_blocks = m_blocks * N_BLOCKS;
-    mnk_blocks = mn_blocks * K_BLOCKS;
+    mnk_blocks = mn_blocks * kStreamKBlocks;
     uint32_t kNumCtaGroups = gridDim.x / kCtaGroupSize;
 
     if constexpr (kUseStreamK) {
@@ -105,24 +109,23 @@ public:
 
       dp_mn_iters = (mn_blocks - streamk_mn_blocks) / kNumCtaGroups;
 
-      uint32_t streamk_mnk_blocks = streamk_mn_blocks * K_BLOCKS;
+      uint32_t streamk_mnk_blocks = streamk_mn_blocks * kStreamKBlocks;
 
       streamk_mnk_total_iters = CEIL_DIV(streamk_mnk_blocks, kNumCtaGroups);
 
       // A tile can start in the last iteration of a CTA's work interval.
       // Include that partial first slice when bounding the total slice count.
       constexpr uint32_t kMaxSlices = 10;
-      constexpr uint32_t kMinSliceIters = CEIL_DIV(K_BLOCKS - 1, kMaxSlices - 1);
+      constexpr uint32_t kMinSliceIters = CEIL_DIV(kStreamKBlocks - 1, kMaxSlices - 1);
       streamk_mnk_total_iters = MAX(streamk_mnk_total_iters, kMinSliceIters);
 
-      constexpr int32_t blocks_per_group = MAX(kMaxGroupSize / BlockShape::K, kAsBlocksPerWord);
-      constexpr int32_t bpg = blocks_per_group > 1 ? blocks_per_group : 1;
+      constexpr int32_t bpg = kStreamKBlockAlignment;
       constexpr int32_t align_iters = bpg / ct_gcd(bpg, (int32_t)kNumStages) * (int32_t)kNumStages;
       if constexpr (align_iters > 1) {
         streamk_mnk_total_iters = align_iters * CEIL_DIV(streamk_mnk_total_iters, align_iters);
       };
 
-      streamk_mnk_next_index = kNumCtaGroups * dp_mn_iters * K_BLOCKS + streamk_mnk_total_iters * (blockIdx.x / kCtaGroupSize);
+      streamk_mnk_next_index = kNumCtaGroups * dp_mn_iters * kStreamKBlocks + streamk_mnk_total_iters * (blockIdx.x / kCtaGroupSize);
 
       if (streamk_mnk_next_index >= mnk_blocks) {
         streamk_mnk_iters = 0;
@@ -273,7 +276,7 @@ public:
   CUDA_INLINE
   bool get_streamk_next_block() {
     if (!streamk_mnk_iters) return false;
-    uint32_t streamk_mn_index = streamk_mnk_next_index / K_BLOCKS;
+    uint32_t streamk_mn_index = streamk_mnk_next_index / kStreamKBlocks;
 
     map_mn_block(streamk_mn_index, m_block_id, n_block_id);
     if constexpr (kNumCtasDimM > 1) {
@@ -281,21 +284,21 @@ public:
     } else if constexpr (kNumCtasDimN > 1) {
       n_block_id = n_block_id * kNumCtasDimN + cluster_rank;
     }
-    k_block_id = streamk_mnk_next_index - streamk_mn_index * K_BLOCKS;
+    k_block_id = streamk_mnk_next_index - streamk_mn_index * kStreamKBlocks;
 
-    slice_iters = K_BLOCKS - k_block_id;
-    slice_iters = slice_iters > streamk_mnk_iters ? streamk_mnk_iters : slice_iters;
+    uint32_t scheduled_iters = MIN(kStreamKBlocks - k_block_id, streamk_mnk_iters);
+    slice_iters = MIN(K_BLOCKS - k_block_id, scheduled_iters);
 
-    streamk_mnk_iters -= slice_iters;
-    streamk_mnk_next_index += slice_iters;
+    streamk_mnk_iters -= scheduled_iters;
+    streamk_mnk_next_index += scheduled_iters;
 
     if (k_block_id == 0) {
       slice_id = 0;
-      slice_count = CEIL_DIV(K_BLOCKS - slice_iters, streamk_mnk_total_iters) + 1;
+      slice_count = CEIL_DIV(kStreamKBlocks - scheduled_iters, streamk_mnk_total_iters) + 1;
     } else {
       slice_id = k_block_id / streamk_mnk_total_iters;
       uint32_t slice_first_block_iters = k_block_id - slice_id * streamk_mnk_total_iters;
-      slice_count = CEIL_DIV(K_BLOCKS - slice_first_block_iters, streamk_mnk_total_iters);
+      slice_count = CEIL_DIV(kStreamKBlocks - slice_first_block_iters, streamk_mnk_total_iters);
       if (slice_first_block_iters) {
         slice_id++;
         slice_count++;

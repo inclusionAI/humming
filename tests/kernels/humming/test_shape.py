@@ -23,6 +23,10 @@ def _case(
     pad_shape_k: int = 0,
     a_dtype=dtypes.bfloat16,
     b_dtype=dtypes.uint4,
+    bs_dtype=dtypes.bfloat16,
+    as_dtype=None,
+    input_scale_group_size: int = 0,
+    input_quant_mode: str | None = None,
     weight_scale_group_size: int = 0,
     weight_scale_group_size_n: int = 0,
     mma_type: MmaType | None = None,
@@ -37,7 +41,10 @@ def _case(
             a_dtype=a_dtype,
             b_dtype=b_dtype,
             c_dtype=dtypes.bfloat16,
-            bs_dtype=dtypes.bfloat16,
+            bs_dtype=bs_dtype,
+            as_dtype=as_dtype,
+            input_scale_group_size=input_scale_group_size,
+            input_quant_mode=input_quant_mode,
             weight_scale_group_size=weight_scale_group_size,
             weight_scale_group_size_n=weight_scale_group_size_n,
             sm_version=90 if mma_type == MmaType.WGMMA else None,
@@ -153,7 +160,55 @@ PAD_SHAPE_CASES = (
 )
 
 
-SHAPE_CASES = PROBLEM_SHAPE_CASES + PAD_SHAPE_CASES
+# Cross dtype/scale coverage with K64 tile counts; aligned K alone misses MX scale tails.
+NATIVE_SHAPE_CASES = tuple(
+    _case(
+        f"mxfp8-mxfp4-n{shape_n}-k{shape_k}",
+        shape_n=shape_n,
+        shape_k=shape_k,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e8m0,
+        bs_dtype=dtypes.float8e8m0,
+        input_scale_group_size=32,
+        weight_scale_group_size=32,
+        input_quant_mode="dynamic_group",
+    )
+    for shape_n, shape_k in ((128, 64), (384, 192), (256, 2816), (256, 2880), (256, 2944), (512, 4160))
+) + (
+    _case(
+        "fp8-uint4-n192-k2880",
+        shape_n=192,
+        shape_k=2880,
+        a_dtype=dtypes.float8e4m3,
+    ),
+    _case(
+        "fp8-uint2-n320-k192",
+        shape_n=320,
+        shape_k=192,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.uint2,
+    ),
+    _case(
+        "fp8-channel-scale-n384-k192",
+        shape_n=384,
+        shape_k=192,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        bs_dtype=dtypes.float8e4m3,
+    ),
+    _case(
+        "fp8-fp4-channel-scale-n4096-k2880",
+        shape_n=4096,
+        shape_k=2880,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+    ),
+)
+
+
+SHAPE_CASES = PROBLEM_SHAPE_CASES + PAD_SHAPE_CASES + NATIVE_SHAPE_CASES
 
 
 @pytest.mark.parametrize("test_case", SHAPE_CASES, ids=str)

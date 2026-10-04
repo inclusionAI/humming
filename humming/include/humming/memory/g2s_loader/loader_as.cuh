@@ -116,7 +116,7 @@ public:
     const uint32_t *gmem_ptr_load = reinterpret_cast<const uint32_t *>(gmem_ptr);
 
     constexpr uint32_t kNumRows = CEIL_DIV(BlockShape::K / kPartMmaShapeK * kMxScaleVec, 4);
-    constexpr uint32_t kMxGmemStride = ProblemShape::K / kPartMmaShapeK * kMxScaleVec / 4;
+    constexpr uint32_t kMxGmemStride = CEIL_DIV(kProblemNumGroups, 4);
     constexpr uint32_t kNumInts = BlockShape::M * kNumRows;
 
     if constexpr (kNumInts <= kNumLoadThreads) {
@@ -262,6 +262,7 @@ public:
 
   CUDA_INLINE
   void seek(uint32_t, uint32_t m_block_id, uint32_t k_block_id, uint32_t current_shape_m, uint32_t m_offset) {
+    if constexpr (kUseMxScale) counter = 0;
     if constexpr (kIsGroupScale) {
       if constexpr (BlockShape::K >= kGroupSize) {
         col_offset = k_block_id * kNumGroups;
@@ -291,7 +292,7 @@ public:
           if constexpr (kMMajorInputScale)
             gmem_ptr = gmem_ptr_raw + ((col_offset / 4) * total_shape_m + MIN(load_row_offset, total_shape_m));
           else
-            gmem_ptr = gmem_ptr_raw + (row_offset * (kProblemNumGroups / 4) + col_offset / 4);
+            gmem_ptr = gmem_ptr_raw + (row_offset * CEIL_DIV(kProblemNumGroups, 4) + col_offset / 4);
         }
       } else if constexpr (kUseTma) {
         // tma loads via tensor map; gmem_ptr unused

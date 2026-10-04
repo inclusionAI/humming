@@ -597,9 +597,9 @@ class Sm100Heuristics(Sm100MmaHeuristics):
         prefer_umma &= layer_config.shape_k % (512 // layer_config.a_dtype.num_bits) == 0
         prefer_umma &= layer_config.a_dtype.num_bits == 16 or not layer_config.has_zero_point
         if prefer_umma or get_default_mma_type(layer_config) == MmaType.UMMA:
-            has_native_mixed_operands = (
-                layer_config.a_dtype.num_bits == 8 and layer_config.b_dtype != layer_config.a_dtype
-            )
+            has_native_mixed_operands = layer_config.a_dtype.num_bits == 8
+            has_native_mixed_operands &= layer_config.b_dtype.is_floating_point_type
+            has_native_mixed_operands &= layer_config.b_dtype != layer_config.a_dtype
             has_hidden_fp8 = dtypes.float8e3m4 in (layer_config.a_dtype, layer_config.b_dtype)
             requires_umma = layer_config.use_block_scaled_mma or has_native_mixed_operands or has_hidden_fp8
             has_mixed_raw_weights = layer_config.use_raw_weight and (
