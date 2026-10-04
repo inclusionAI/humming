@@ -157,7 +157,8 @@ def get_heuristics_config(
     device_index = get_device_index(device)
     # Backend heuristics inspect the test environment; keep their cache entries separate.
     default_test_source = "heuristic" if "PYTEST_CURRENT_TEST" in os.environ else ""
-    is_heuristic_test = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source) == "heuristic"
+    test_sources = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source).split("+")
+    is_heuristic_test = "heuristic" in (source.strip() for source in test_sources)
     with torch.cuda.device(device_index):
         if isinstance(layer_config, dict):
             layer_config = LayerConfig(**layer_config)

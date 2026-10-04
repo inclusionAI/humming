@@ -592,7 +592,8 @@ class Sm100Heuristics(Sm100MmaHeuristics):
         if shape_m <= 0:
             raise ValueError("shape_m must be positive")
         default_test_source = "heuristic" if "PYTEST_CURRENT_TEST" in os.environ else ""
-        is_heuristic_test = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source) == "heuristic"
+        test_sources = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source).split("+")
+        is_heuristic_test = "heuristic" in (source.strip() for source in test_sources)
         prefer_umma = is_heuristic_test and layer_config.is_umma_supported and not use_f16_accum
         prefer_umma &= layer_config.shape_n % 128 == 0
         prefer_umma &= layer_config.shape_k % (512 // layer_config.a_dtype.num_bits) == 0

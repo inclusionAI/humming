@@ -13,7 +13,7 @@ from humming.device import current_device
 from humming.tune import get_heuristics_config
 from humming.utils.smem import estimate_smem_size_config, fits_device_smem
 
-NUM_SAMPLED_TUNING_CONFIGS = 32
+NUM_SAMPLED_TUNING_CONFIGS = 100
 TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
 SAMPLED_TUNING_VALUES = {
     "mma_type": tuple(mma_type.value for mma_type in MmaType),
@@ -478,6 +478,7 @@ def _enumerate_backend_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
     mma_type: MmaType,
+    sample_size: int,
 ) -> list[tuple[dict, dict]]:
     rng = random.Random(_get_seed(layer_config, compute_config))
     groups = (
@@ -501,7 +502,7 @@ def _enumerate_backend_candidates(
     for items in itertools.product(*reduced_groups):
         add(items)
 
-    target_pool_size = NUM_SAMPLED_TUNING_CONFIGS * 5
+    target_pool_size = sample_size * 5
     product_size = math.prod(len(group) for group in groups)
     trial_count = min(product_size, target_pool_size * 500)
     for flat_index in rng.sample(range(product_size), trial_count):
@@ -519,12 +520,15 @@ def _enumerate_backend_candidates(
 def enumerate_test_tuning_configs(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
+    sample_size: int = NUM_SAMPLED_TUNING_CONFIGS,
 ) -> list[tuple[dict, dict]]:
     candidates = []
     for value in SAMPLED_TUNING_VALUES["mma_type"]:
         mma_type = MmaType(value)
         if _is_legal_mma_type(layer_config, compute_config, mma_type):
-            candidates.extend(_enumerate_backend_candidates(layer_config, compute_config, mma_type))
+            candidates.extend(
+                _enumerate_backend_candidates(layer_config, compute_config, mma_type, sample_size)
+            )
     return candidates
 
 
@@ -533,7 +537,7 @@ def sample_test_tuning_configs(
     compute_config: ComputeConfig,
     sample_size: int = NUM_SAMPLED_TUNING_CONFIGS,
 ) -> list[dict]:
-    candidates = enumerate_test_tuning_configs(layer_config, compute_config)
+    candidates = enumerate_test_tuning_configs(layer_config, compute_config, sample_size)
     rng = random.Random(_get_seed(layer_config, compute_config))
     selected = _select_pairwise(candidates, rng, max_count=sample_size)
     selected_ids = {id(candidate) for candidate in selected}

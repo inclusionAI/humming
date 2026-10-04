@@ -386,7 +386,6 @@ def test_sampled_backends_match_fixed_layout(
     monkeypatch.setattr(HummingKernel, "_instances", {})
     monkeypatch.setattr(HummingKernel, "prepare", lambda self: None)
     monkeypatch.setattr(HummingKernel, "register_kernel", lambda self: None)
-    monkeypatch.setattr(tuning, "NUM_SAMPLED_TUNING_CONFIGS", 20)
     layer = LayerConfig(
         sm_version=sm_version,
         shape_n=512,
@@ -412,7 +411,8 @@ def test_sampled_backends_match_fixed_layout(
         assert kernel.use_raw_weight == layer.use_raw_weight
 
 
-def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch):
+@pytest.mark.parametrize("sample_size", (None, 32))
+def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch, sample_size):
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo
     from humming.testing import tuning
@@ -429,8 +429,10 @@ def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch):
     )
     compute = ComputeConfig(gemm_type=GemmType.INDEXED, use_batch_invariant=True)
     layer = dataclasses.replace(layer, num_experts=4)
-    configs = tuning.sample_test_tuning_configs(layer, compute)
-    assert len(configs) == tuning.NUM_SAMPLED_TUNING_CONFIGS == 32
+    sample_options = {} if sample_size is None else {"sample_size": sample_size}
+    configs = tuning.sample_test_tuning_configs(layer, compute, **sample_options)
+    assert tuning.NUM_SAMPLED_TUNING_CONFIGS == 100
+    assert len(configs) == (sample_size or tuning.NUM_SAMPLED_TUNING_CONFIGS)
     umma_configs = [config for config in configs if config["mma_type"] == "umma"]
     for name in ("umma_cta_group_size", "umma_num_dequant_warpgroups", "output_chunk_rows"):
         assert {config[name] for config in umma_configs} == set(tuning.SAMPLED_TUNING_VALUES[name])
@@ -441,7 +443,7 @@ def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch):
         assert not config["use_stream_k"]
         assert not config["use_tma_a"] and not config["use_tma_c"]
         assert config["block_shape"][2] == config["warp_shape"][2]
-    assert configs == tuning.sample_test_tuning_configs(layer, compute)
+    assert configs == tuning.sample_test_tuning_configs(layer, compute, **sample_options)
 
 
 @pytest.mark.parametrize("output_chunk_rows", (-32, 8, 16, 24, 48, 288))
@@ -513,13 +515,15 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backe
         (80, "bfloat16", 256, False, "mma"),
     ),
 )
+@pytest.mark.parametrize("tuning_source", ("heuristic", "heuristic+batch_invariant"))
 def test_heuristic_tests_prefer_available_backend(
-    sm_version, a_dtype, shape_n, use_f16_accum, expected, monkeypatch
+    sm_version, a_dtype, shape_n, use_f16_accum, expected, monkeypatch, tuning_source
 ):
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo
     from humming.testing import tuning
 
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", tuning_source)
     monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
     monkeypatch.setattr(DeviceInfo, "is_ppu", property(lambda self: False))
     layer = LayerConfig(
@@ -824,7 +828,7 @@ def test_mxmma_compiler_version_matches_scale_format(
     monkeypatch.setattr(KernelTestRunner, "prepare_weight", lambda self: None)
     monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "sampled")
 
-    def stop_before_sampling(*args):
+    def stop_before_sampling(*args, **kwargs):
         raise RuntimeError("reached tuning generation")
 
     monkeypatch.setattr(runner_module, "sample_test_tuning_configs", stop_before_sampling)

@@ -1,13 +1,13 @@
 steps:
   - &b200_tests
-    label: "Common Tests (B200)"
+    label: "Humming Tests (B200)"
     key: humming-b200-ci
     agents:
       queue: b200-k8s
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/b200
-    command: bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant+sampled8 bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -29,14 +29,14 @@ steps:
                   medium: Memory
 
   - &dgx_spark_tests
-    label: "Common Tests (DGX Spark)"
+    label: "Humming Tests (DGX Spark)"
     key: humming-dgx-spark-ci
     agents:
       queue: dgx-spark
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/dgx-spark
-    command: bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant+sampled8 bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -50,27 +50,17 @@ steps:
           volumes:
             - /dev/shm:/dev/shm
 
-  - <<: *b200_tests
-    label: "Batch Invariant Tests (B200)"
-    key: humming-b200-batch-invariant-ci
-    command: HUMMING_TEST_TUNING_SOURCE=batch_invariant bash .buildkite/run-tests.sh tests/kernels/humming/
-
-  - <<: *dgx_spark_tests
-    label: "Batch Invariant Tests (DGX Spark)"
-    key: humming-dgx-spark-batch-invariant-ci
-    command: HUMMING_TEST_TUNING_SOURCE=batch_invariant bash .buildkite/run-tests.sh tests/kernels/humming/
-
-  - input: "Run Sampled Tests"
+  - input: "Run Humming Full Sampled Tests"
     key: approve-sampled-tests
 
   - <<: *b200_tests
-    label: "Sampled Tests (B200)"
+    label: "Humming Full Sampled Tests (B200)"
     key: humming-b200-sampled-ci
     depends_on: approve-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SOURCE=sampled64 bash .buildkite/run-tests.sh tests/kernels/humming/
 
   - <<: *dgx_spark_tests
-    label: "Sampled Tests (DGX Spark)"
+    label: "Humming Full Sampled Tests (DGX Spark)"
     key: humming-dgx-spark-sampled-ci
     depends_on: approve-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SOURCE=sampled64 bash .buildkite/run-tests.sh tests/kernels/humming/

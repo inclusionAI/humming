@@ -105,10 +105,22 @@ def test_precompiled_manifest_uses_content_hashes(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
-def test_launcher_runs_device_local_kernels():
+@pytest.mark.parametrize("tuning_source", ("heuristic", "batch_invariant", "heuristic+batch_invariant"))
+def test_launcher_runs_device_local_kernels(monkeypatch, tuning_source):
     from humming import dtypes
     from humming.config import ComputeConfig, GemmType, LayerConfig
-    from humming.testing import KernelTestCase, KernelTestRunner
+    from humming.kernel.humming import HummingKernel
+    from humming.testing import KernelTestCase, KernelTestRunner, assert_kernel_test_shape_coverage
+
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", tuning_source)
+    compile_batches = []
+    compile_many = HummingKernel.compile_many
+
+    def record_compile_batch(kernel_specs, device):
+        compile_batches.append([config["use_batch_invariant"] for _, config in kernel_specs])
+        return compile_many(kernel_specs, device)
+
+    monkeypatch.setattr(HummingKernel, "compile_many", record_compile_batch)
 
     def make_case():
         return KernelTestCase(
@@ -128,14 +140,20 @@ def test_launcher_runs_device_local_kernels():
     for device_index in range(2):
         with torch.cuda.device(device_index):
             runner = KernelTestRunner(make_case())
-            result = runner.run((1,))[0]
+            results = runner.run((1,))
             torch.cuda.synchronize(device_index)
-            torch.testing.assert_close(
-                result.outputs,
-                result.outputs_ref,
-                rtol=runner.test_case.rtol,
-                atol=runner.test_case.atol,
-            )
+            assert_kernel_test_shape_coverage(results, (1,))
+            assert len(compile_batches) == device_index + 1
+            expected_modes = [source == "batch_invariant" for source in tuning_source.split("+")]
+            assert compile_batches[-1] == expected_modes
+            assert not runner.compute_config.use_batch_invariant
+            for result in results:
+                torch.testing.assert_close(
+                    result.outputs,
+                    result.outputs_ref,
+                    rtol=runner.test_case.rtol,
+                    atol=runner.test_case.atol,
+                )
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
