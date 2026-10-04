@@ -129,14 +129,14 @@ CUDA_INLINE void dequant(const uint32_t *qb, uint32_t *res, uint32_t j, uint32_t
 }
 
 
-// Scale bytes have a canonical order independent of the weight dequantization layout.
 template <class SourceType, class TargetType>
 constexpr bool kNativeScaleDequantSupported =
     kNativeDequantSupported<SourceType, TargetType> ||
     (std::is_same<TargetType, BFloat16>::value && kNativeDequantSupported<SourceType, Float16>);
 
 
-template <class SourceType, class TargetType>
+// Software conversion may retain (0, 2, 1, 3) order for callers that can absorb the permutation.
+template <class SourceType, class TargetType, bool kKeepDequantOrder = false>
 CUDA_INLINE void dequant_scale(const uint32_t *src, uint32_t *dst, uint32_t index) {
   if constexpr (kNativeDequantSupported<SourceType, TargetType>) {
     dequant_native<SourceType, TargetType>(src, dst, index);
@@ -151,12 +151,14 @@ CUDA_INLINE void dequant_scale(const uint32_t *src, uint32_t *dst, uint32_t inde
     }
   } else {
     dequant<SourceType, TargetType>(src, dst, index);
-    PRAGMA_UNROLL
-    for (uint32_t i = 0; i < 2; i++) {
-      uint32_t even = dst[2 * i];
-      uint32_t odd = dst[2 * i + 1];
-      dst[2 * i] = __byte_perm(even, odd, 0x5410);
-      dst[2 * i + 1] = __byte_perm(even, odd, 0x7632);
+    if constexpr (!kKeepDequantOrder) {
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < 2; i++) {
+        uint32_t even = dst[2 * i];
+        uint32_t odd = dst[2 * i + 1];
+        dst[2 * i] = __byte_perm(even, odd, 0x5410);
+        dst[2 * i + 1] = __byte_perm(even, odd, 0x7632);
+      }
     }
   }
 }
@@ -173,7 +175,7 @@ CUDA_INLINE void dequant_scale_float32(const uint32_t *src, uint32_t *dst, uint3
     }
   } else {
     // Expand eight scale bytes into four packed BF16 pairs before widening to FP32.
-    dequant_scale<SourceType, BFloat16>(src, pairs, index);
+    dequant_scale<SourceType, BFloat16, true>(src, pairs, index);
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < 4; i++) {
       nv_bfloat162 values = *reinterpret_cast<nv_bfloat162 *>(&pairs[i]);
@@ -183,7 +185,16 @@ CUDA_INLINE void dequant_scale_float32(const uint32_t *src, uint32_t *dst, uint3
         const nv_bfloat162 factor = *reinterpret_cast<const nv_bfloat162 *>(&kFactorBits);
         values = __hmul2(values, factor);
       }
-      reinterpret_cast<float2 *>(dst)[i] = __bfloat1622float2(values);
+      float2 converted = __bfloat1622float2(values);
+      if constexpr (kNativeScaleDequantSupported<SourceType, BFloat16>) {
+        reinterpret_cast<float2 *>(dst)[i] = converted;
+      } else {
+        // Restore byte order through register indices instead of packed permutations.
+        constexpr uint32_t kValuesPerGroup = 4;
+        uint32_t first = i / 2 * kValuesPerGroup + i % 2;
+        reinterpret_cast<float *>(dst)[first] = converted.x;
+        reinterpret_cast<float *>(dst)[first + 2] = converted.y;
+      }
     }
   }
 }

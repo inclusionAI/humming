@@ -126,7 +126,7 @@ public:
 
     if (j % 2 == 0) {
       if constexpr (ElementA::kBits == 16 && ElementBS::kBits == 8 && kIsGroupWeightScale && !kUseFusedE8m0Scale) {
-        dequant_scale<ElementBS, ElementA>(bs[buffer_id], dq_bs, 0);
+        dequant_scale<ElementBS, ElementA, true>(bs[buffer_id], dq_bs, 0);
 
         if constexpr (kExpOffset.y) {
           // A bf16 factor holds at most 2^127, so a larger offset takes a second factor.
@@ -174,7 +174,14 @@ public:
       scalar_t2 bs_f16_ptr[2];
       scalar_t2 bzp_f16_ptr[2];
 
-      if constexpr (kIsGroupWeightScale) {
+      if constexpr (kIsGroupWeightScale && ElementBS::kBits == 8 && !kUseFusedE8m0Scale && !kUseNativeDequantBS) {
+        // The scale dequantization leaves each group of four scales in (0, 2, 1, 3) order.
+        scalar_t *bs_half_ptr = reinterpret_cast<scalar_t *>(dq_bs);
+        PRAGMA_UNROLL
+        for (uint32_t i = 0; i < 2; i++) {
+          bs_f16_ptr[i] = this->num2num2(bs_half_ptr[j < 4 ? j / 2 * 4 + i * 2 + j % 2 : j * 2 + i]);
+        }
+      } else if constexpr (kIsGroupWeightScale) {
         scalar_t *bs_half_ptr = reinterpret_cast<scalar_t *>(ElementBS::kBits == 8 ? &dq_bs[j] : &bs[buffer_id][j]);
         PRAGMA_UNROLL
         for (uint32_t i = 0; i < 2; i++) {
