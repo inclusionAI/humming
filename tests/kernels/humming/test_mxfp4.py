@@ -6,6 +6,7 @@ import torch
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.schema.compressed_tensors import CompressedTensorsInputSchema
 from humming.schema.humming import HummingWeightSchema
 from humming.testing import (
@@ -224,6 +225,8 @@ def test_mxfp4_input_schema_compatibility(checkpoint_format, group_size):
 )
 def test_native_block_scaled(a_dtype, b_dtype, group_size, scale_dtype, quant_mode, gemm_type):
     """Numerical contracts shared by native block-scaled backends and sampled tuning."""
+    if current_device.sm_version < 100:
+        pytest.skip("native block-scaled MMA requires SM100 or newer")
     layer = LayerConfig(
         shape_n=512,
         shape_k=1024,

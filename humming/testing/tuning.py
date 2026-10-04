@@ -8,10 +8,9 @@ import random
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
-from humming.config.mma import fits_warp_specialization_registers
+from humming.config.mma import get_register_budget_error
 from humming.device import current_device
 from humming.tune import get_heuristics_config
-from humming.utils.math import round_up
 from humming.utils.smem import estimate_smem_size_config, fits_device_smem
 
 NUM_SAMPLED_TUNING_CONFIGS = 100
@@ -405,22 +404,10 @@ def _fits_device_resources(
         if launch_bound_registers < load_thread_registers:
             return False
 
-    if mma_type == MmaType.WGMMA:
-        register_overhead = 38
-        math_thread_registers = round_up(warp_shape[0] // 2 + register_overhead, 8)
-        if math_thread_registers > launch_bound_registers:
-            return False
-
-        load_thread_registers = 40 if config["use_warp_spec"] else 0
-        num_loads_threads = num_threads - num_math_threads
-        math_registers = num_math_threads * math_thread_registers
-        load_registers = num_loads_threads * load_thread_registers
-        registers_per_cta = math_registers + load_registers
-        if registers_per_cta * num_ctas_per_sm > registers_per_sm:
-            return False
-
     tuning_config = create_tuning_config(config)
-    if not fits_warp_specialization_registers(layer_config, tuning_config, compute_config.use_f16_accum):
+    if get_register_budget_error(
+        layer_config, tuning_config, compute_config.use_f16_accum, registers_per_sm
+    ) is not None:
         return False
     if mma_type == MmaType.UMMA:
         from humming.tune.sm100 import Sm100UmmaHeuristics

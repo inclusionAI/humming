@@ -46,7 +46,7 @@ SF_DTYPE_MAP = {
 
 
 def get_default_mma_type(layer_config):
-    if layer_config.sm_version // 10 == 9:
+    if layer_config.sm_version // 10 == 9 and layer_config.a_dtype != dtypes.int4:
         return MmaType.WGMMA
     if layer_config.use_block_scaled_mma and layer_config.sm_version // 10 == 12:
         return MmaType.MXMMA
@@ -58,34 +58,57 @@ def get_default_mma_type(layer_config):
     return MmaType.MMA
 
 
-def fits_warp_specialization_registers(layer_config, tuning_config, use_f16_accum=False):
+def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, registers_per_sm=64 * 1024):
+    """Return a diagnostic when accumulators and one operand buffer exhaust the budget."""
     mma_type = tuning_config.mma_type or get_default_mma_type(layer_config)
-    if not tuning_config.use_warp_spec or mma_type == MmaType.UMMA:
-        return True
+    if mma_type == MmaType.UMMA:
+        return None  # UMMA accumulators use TMEM and have separate resource checks.
+    warp_m, warp_n, warp_k = tuning_config.warp_shape
+    num_math_threads = math.prod(tuning_config.block_shape) // math.prod(tuning_config.warp_shape) * 32
+    num_threads = num_math_threads + (128 if tuning_config.use_warp_spec else 0)
+    launch_budget = registers_per_sm // (num_threads * tuning_config.num_ctas_per_sm) // 8 * 8
+    accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
+    has_group_accumulator = mma_type != MmaType.MXMMA and layer_config.a_dtype.num_bits < 16 and (
+        layer_config.input_scale_group_size > 0
+        or (
+            not layer_config.use_fused_e8m0_scale
+            and (layer_config.is_group_weight_scale or layer_config.is_block_weight_scale)
+        )
+    )
+    math_budget = min(255, launch_budget)
+    if tuning_config.use_warp_spec:
+        # Match humming_ws.cuh's allocation, using the full physical accumulator
+        # count for its preferred budget, independently of our spill estimate.
+        physical_accumulators = accumulator_registers * (2 if has_group_accumulator else 1)
+        preferred_budget = min(232, max(128, physical_accumulators * 2 + 96))
+        needs_more_load_registers = num_math_threads > 256 or (
+            tuning_config.num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
+        )
+        load_registers = 40 if needs_more_load_registers else 24
+        available_registers = launch_budget * (num_math_threads + 128) - load_registers * 128
+        if num_math_threads > 256:
+            preferred_budget = 96
+        math_budget = min(preferred_budget, max(24, available_registers // num_math_threads // 8 * 8))
 
-    block_shape, warp_shape = tuning_config.block_shape, tuning_config.warp_shape
-    num_math_threads = math.prod(block_shape) // math.prod(warp_shape) * 32
-    num_warps = (num_math_threads + 128) // 32
-    num_ctas = tuning_config.num_ctas_per_sm
-    # Match the warp allocation granularity and setmaxnreg budgets in humming_ws.cuh.
-    registers_per_warp = (64 * 1024) // (num_warps * num_ctas) // 256 * 256
-    accumulator_registers = warp_shape[0] * warp_shape[1] // (64 if use_f16_accum else 32)
-    has_group_weight_scale = layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
-    needs_scale_accumulator = has_group_weight_scale and not layer_config.use_fused_e8m0_scale
-    needs_scale_accumulator |= layer_config.input_scale_group_size > 0
-    if mma_type != MmaType.MXMMA and layer_config.a_dtype.num_bits < 16 and needs_scale_accumulator:
-        accumulator_registers *= 2
-
-    needs_more_load_registers = num_ctas == 1 and layer_config.a_dtype.num_bits != 16
-    needs_more_load_registers |= num_math_threads > 256
-    load_thread_registers = 40 if needs_more_load_registers else 24
-    available_registers = max(0, registers_per_warp * num_warps - 128 * load_thread_registers)
-    estimated_registers = min(232, max(128, accumulator_registers * 2 + 96))
-    preferred_registers = 96 if num_math_threads > 256 else estimated_registers
-    available_math_registers = max(24, available_registers // num_math_threads // 8 * 8)
-    math_thread_registers = min(preferred_registers, available_math_registers)
-    # Allow moderate spilling; reject accumulator demand above twice the register budget.
-    return accumulator_registers <= math_thread_registers * 2
+    # Each ordinary MMA buffer spans K=256/activation_bits, hence M/4 and N/4
+    # 32-bit registers per thread. Count dequantized operands, not both copies.
+    buffer_registers = (warp_m + warp_n) / 4
+    if mma_type == MmaType.WGMMA:
+        # A is always in smem; raw-weight SS also keeps B in smem.
+        buffer_registers = 0 if layer_config.use_raw_weight else warp_n / 4
+        if not layer_config.use_raw_weight and layer_config.use_packed_k_layout:
+            # The packed B buffer holds one N=64 WGMMA fragment across all K slabs.
+            buffer_registers = warp_k * layer_config.a_dtype.num_bits / 64
+    if has_group_accumulator:
+        accumulator_registers *= 1.25
+    demand = accumulator_registers + buffer_registers
+    if demand >= math_budget - 8:
+        return (
+            f"register budget exceeded: accumulator {accumulator_registers:g} + "
+            f"single-buffer {buffer_registers:g} = {demand:g} must be < "
+            f"math-thread budget {math_budget:g} - 8 ({math_budget - 8:g})"
+        )
+    return None
 
 
 def calc_reg_count(rows, cols, ptx_dtype):

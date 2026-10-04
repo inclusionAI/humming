@@ -134,8 +134,8 @@ public:
     uint32_t delta_m = kUsePackedKLayout ? iter_id : 0;
     uint32_t delta_j = final_regs_c_index() == 0 ? delta_m : 0;
 
+    fence_accumulators(delta_j);
     wgmma_fence();
-    may_fence_regs(delta_j);
 
     PRAGMA_UNROLL
     for (uint32_t k = 0; k < kRunKLoop; k++) {
@@ -183,7 +183,7 @@ public:
     uint32_t delta_m = kUsePackedKLayout ? iter_id : 0;
     uint32_t delta_j = final_regs_c_index() == 0 ? delta_m : 0;
     wgmma_wait<0>();
-    may_fence_regs(delta_j);
+    fence_accumulators(delta_j);
 
     if constexpr (Ctx::kUsePackedLateAS) {
       // Read each scale only when promoting its accumulator, keeping AS out of
@@ -216,13 +216,11 @@ public:
     wait_and_promote(stage_id, iter_id);
   }
 
-  CUDA_INLINE void may_fence_regs(uint32_t delta_j) {
-    if constexpr (final_regs_c_index() != 0) {
-      constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
-      PRAGMA_UNROLL
-      for (uint32_t j = 0; j < kNumIters; j++)
-        fence_regs(regs_c[0][delta_j + j][0]);
-    }
+  CUDA_INLINE void fence_accumulators(uint32_t delta_j) {
+    constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
+    PRAGMA_UNROLL
+    for (uint32_t j = 0; j < kNumIters; j++)
+      fence_regs(regs_c[0][delta_j + j][0]);
   }
 
   template <class T>

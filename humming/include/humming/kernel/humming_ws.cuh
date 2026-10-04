@@ -41,8 +41,6 @@ struct WarpSpecializationRegisterAllocation {
   static constexpr uint32_t kLoadThreadRegisterUsage = TuningConfig::kNumLoadThreads * kLoadThreadRegisters;
   static constexpr uint32_t kRegistersAvailableForMath = kRegisterBudgetPerCta > kLoadThreadRegisterUsage ? kRegisterBudgetPerCta - kLoadThreadRegisterUsage : 0;
   static constexpr uint32_t kMathThreadRegisters = MIN(kPreferredMathThreadRegisters, MAX(24, kRegistersAvailableForMath / TuningConfig::kNumMathThreads / 8 * 8));
-  static_assert(kAccumulatorRegistersPerThread <= kMathThreadRegisters * 2,
-                "warp specialization accumulator registers exceed twice the math-thread budget");
 };
 
 template <

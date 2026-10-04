@@ -171,3 +171,27 @@ def test_kernel_runtime_instances_are_context_local():
 
     assert kernel0 is not kernel1
     torch.testing.assert_close(output0.cpu(), output1.cpu(), rtol=0, atol=0)
+
+
+def test_nvrtc_signature_uses_subprocess_library(monkeypatch):
+    import ctypes
+
+    loaded_paths = []
+
+    class VersionFunction:
+        def __call__(self, major, minor):
+            ctypes.cast(major, ctypes.POINTER(ctypes.c_int))[0] = 13
+            ctypes.cast(minor, ctypes.POINTER(ctypes.c_int))[0] = 2
+            return 0
+
+    class Library:
+        nvrtcVersion = VersionFunction()
+
+    def load_library(path):
+        loaded_paths.append(path)
+        return Library()
+
+    monkeypatch.setattr(compiler_module, "get_nvrtc_library_path", lambda: "/toolkit/libnvrtc.so")
+    monkeypatch.setattr(compiler_module.ctypes, "CDLL", load_library)
+    assert compiler_module.NVRTCCompiler.signature() == "nvrtc+13.2"
+    assert loaded_paths == ["/toolkit/libnvrtc.so"]

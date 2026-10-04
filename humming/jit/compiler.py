@@ -1,3 +1,4 @@
+import ctypes
 import glob
 import json
 import os
@@ -5,7 +6,6 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from cuda.bindings import nvrtc
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
@@ -97,7 +97,10 @@ class Compiler:
             if returncode != 0:
                 print(stderr, flush=True)
                 (cache_dirname / "kernel_tmp.cubin").unlink(missing_ok=True)
-                raise RuntimeError(f"{cls} run failed")
+                raise RuntimeError(
+                    f"{cls.__name__} failed with exit code {returncode}; "
+                    f"source and compiler logs: {cache_dirname}"
+                )
 
             os.replace(cache_dirname / "kernel_tmp.cubin", cache_filename)
             return cache_filename.as_posix()
@@ -165,8 +168,16 @@ class NVRTCCompiler(Compiler):
 
     @classmethod
     def signature(cls):
-        _, major, minor = nvrtc.nvrtcVersion()
-        return f"nvrtc+{major}.{minor}"
+        # The subprocess uses the toolkit library, which can differ from the
+        # library selected by cuda-python's bindings.
+        library = ctypes.CDLL(get_nvrtc_library_path())
+        major, minor = ctypes.c_int(), ctypes.c_int()
+        version = library.nvrtcVersion
+        version.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+        version.restype = ctypes.c_int
+        if version(ctypes.byref(major), ctypes.byref(minor)) != 0:
+            raise RuntimeError("Could not query the NVRTC compiler version")
+        return f"nvrtc+{major.value}.{minor.value}"
 
     @classmethod
     def get_flags(cls, sm_version, disable_fast_math=False):

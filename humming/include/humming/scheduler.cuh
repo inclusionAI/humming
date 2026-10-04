@@ -109,12 +109,11 @@ public:
 
       streamk_mnk_total_iters = CEIL_DIV(streamk_mnk_blocks, kNumCtaGroups);
 
-      if constexpr (Ctx::kUseUmma) {
-        using ElementC = typename Ctx::ElementC;
-        constexpr uint32_t kMaxSlices = 1u << (ElementC::kMantissaBits / 2);
-        constexpr uint32_t kMinSliceIters = CEIL_DIV(K_BLOCKS - 1, kMaxSlices - 1);
-        streamk_mnk_total_iters = MAX(streamk_mnk_total_iters, kMinSliceIters);
-      }
+      // A tile can start in the last iteration of a CTA's work interval.
+      // Include that partial first slice when bounding the total slice count.
+      constexpr uint32_t kMaxSlices = 10;
+      constexpr uint32_t kMinSliceIters = CEIL_DIV(K_BLOCKS - 1, kMaxSlices - 1);
+      streamk_mnk_total_iters = MAX(streamk_mnk_total_iters, kMinSliceIters);
 
       constexpr int32_t blocks_per_group = MAX(kMaxGroupSize / BlockShape::K, kAsBlocksPerWord);
       constexpr int32_t bpg = blocks_per_group > 1 ? blocks_per_group : 1;

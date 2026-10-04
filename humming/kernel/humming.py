@@ -17,7 +17,10 @@ from humming.config import (
     TuningConfig,
 )
 from humming.config.config import _cuda_compiler_version
-from humming.config.mma import fits_warp_specialization_registers, get_default_mma_type
+from humming.config.mma import (
+    get_default_mma_type,
+    get_register_budget_error,
+)
 from humming.device import current_device, get_device_index
 from humming.jit.runtime import KernelRuntime
 from humming.tune import get_heuristics_config
@@ -456,9 +459,11 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert self.a_dtype in allowed_f16_dtypes
 
     def check_config(self):
-        assert fits_warp_specialization_registers(self, self, self.use_f16_accum), (
-            "warp specialization accumulator registers exceed twice the math-thread budget"
+        register_error = get_register_budget_error(
+            self, self, self.use_f16_accum, current_device.max_registers_per_sm
         )
+        if register_error is not None:
+            raise ValueError(register_error)
         is_low_bit_mma = self.mma_type == MmaType.MMA and self.a_dtype.num_bits < 16
         has_canonical_group_scales = self.is_group_weight_scale and not self.use_fused_e8m0_scale
         if is_low_bit_mma and has_canonical_group_scales and not current_device.is_ppu:

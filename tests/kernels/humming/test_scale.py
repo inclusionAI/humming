@@ -308,6 +308,8 @@ def test_raw_wgmma_ss_block_scale_layout(warp_n, input_group, monkeypatch):
     ),
 )
 def test_optional_native_group_scales(a_dtype, b_dtype, input_group, weight_group, quant_mode):
+    if current_device.sm_version < 100:
+        pytest.skip("native block-scaled MMA requires SM100 or newer")
     layer = LayerConfig(
         shape_n=256,
         shape_k=512,

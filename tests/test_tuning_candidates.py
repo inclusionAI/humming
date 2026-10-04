@@ -524,18 +524,18 @@ def test_heuristic_test_mode_has_separate_cache_entries(monkeypatch):
     "warp_m,num_ctas,expected",
     (
         (16, 3, True),
-        (32, 3, True),
+        (32, 3, False),
         (32, 2, True),
-        (64, 3, True),
-        (48, 4, True),
+        (64, 3, False),
+        (48, 4, False),
         (64, 4, False),
-        (128, 1, True),
+        (128, 1, False),
         (128, 3, False),
     ),
 )
 def test_warp_specialization_register_budget(warp_m, num_ctas, expected, monkeypatch):
     from humming.config import ComputeConfig, TuningConfig
-    from humming.config.mma import fits_warp_specialization_registers
+    from humming.config.mma import get_register_budget_error
     from humming.kernel.humming import HummingKernel
     from humming.testing import tuning
 
@@ -555,18 +555,105 @@ def test_warp_specialization_register_budget(warp_m, num_ctas, expected, monkeyp
         output_chunk_rows=32,
         smem_reuse_mode="last_stage",
     )
-    assert fits_warp_specialization_registers(layer, config) == expected
+    assert (get_register_budget_error(layer, config) is None) == expected
     schedule_fields = {field.name for field in dataclasses.fields(ScheduleCandidate)}
     schedule_config = {name: value for name, value in config.to_dict().items() if name in schedule_fields}
     schedule = ScheduleCandidate.from_config("register-budget", schedule_config)
     analysis = analyze_candidate(_problem(layer_config=layer), schedule)
-    reason = "warp specialization accumulator registers exceed twice the math-thread budget"
-    assert (reason in analysis.rejection_reasons) == (not expected)
+    has_register_error = any(
+        reason.startswith("register budget exceeded:") for reason in analysis.rejection_reasons
+    )
+    assert has_register_error == (not expected)
     if not expected:
         assert not tuning._fits_device_resources(layer, compute, (config.to_dict(), {}))
         monkeypatch.setattr(HummingKernel, "_instances", {})
         monkeypatch.setattr(
             HummingKernel, "prepare", lambda self: pytest.fail("invalid config reached compilation")
         )
-        with pytest.raises(AssertionError, match="accumulator registers"):
+        with pytest.raises(ValueError, match="register budget exceeded"):
             HummingKernel(**(layer.to_dict() | compute.to_dict() | config.to_dict()))
+
+
+@pytest.mark.parametrize("a_dtype,expected", [("int4", "mma"), ("int8", "wgmma"), ("bfloat16", "wgmma")])
+def test_sm90_default_backend_supports_activation(a_dtype, expected):
+    from humming.config.mma import get_default_mma_type
+
+    layer = LayerConfig(
+        sm_version=90, shape_n=256, shape_k=256,
+        a_dtype=a_dtype, b_dtype="uint4", c_dtype="bfloat16",
+    )
+    assert get_default_mma_type(layer).value == expected
+
+
+@pytest.mark.parametrize(
+    "warp_m,warp_n,group_size,num_ctas,expected",
+    [(176, 16, 128, 4, False), (80, 64, 128, 3, False),
+     (128, 64, 0, 3, False), (32, 16, 128, 2, True)],
+)
+def test_sampled_wgmma_accounts_for_all_accumulators(
+    warp_m, warp_n, group_size, num_ctas, expected, monkeypatch
+):
+    from humming.config import ComputeConfig
+    from humming.device import DeviceInfo
+    from humming.testing import tuning
+
+    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
+    monkeypatch.setattr(DeviceInfo, "max_threads_per_sm", property(lambda self: 2048))
+    monkeypatch.setattr(tuning, "fits_device_smem", lambda *args: True)
+    layer = LayerConfig(
+        sm_version=90, shape_n=1024, shape_k=1024,
+        a_dtype="float8e4m3", b_dtype="uint4", c_dtype="bfloat16",
+        input_scale_group_size=group_size, weight_scale_group_size=group_size,
+        use_fused_e8m0_scale=False,
+    )
+    config = dict(
+        mma_type="wgmma", block_shape=(warp_m, warp_n * 4, 128),
+        warp_shape=(warp_m, warp_n, 128), num_ctas_per_sm=num_ctas,
+        use_warp_spec=False, num_stages=2, use_tma=False,
+    )
+    compute = ComputeConfig(gemm_type=GemmType.DENSE)
+    assert tuning._fits_device_resources(layer, compute, (config, {})) == expected
+
+
+@pytest.mark.parametrize(
+    "mma_type,raw_weight,group_size,packed,warp_shape,budget,expected",
+    [
+        # MMA: 192 accumulator + 24 A + 16 B = 232; equality must reject.
+        ("mma", False, 0, False, (96, 64, 64), 240, False),
+        ("mma", False, 0, False, (96, 64, 64), 248, True),
+        # WGMMA excludes A in smem, and excludes B as well for raw-weight SS.
+        ("wgmma", False, 0, False, (96, 64, 64), 216, False),
+        ("wgmma", False, 0, False, (96, 64, 64), 224, True),
+        ("wgmma", True, 0, False, (96, 64, 64), 200, False),
+        ("wgmma", True, 0, False, (96, 64, 64), 208, True),
+        # FP8 group scale: 128 * 1.25 + 16 A + 16 B = 192, not 288.
+        ("mma", False, 128, False, (64, 64, 128), 200, False),
+        ("mma", False, 128, False, (64, 64, 128), 208, True),
+        ("wgmma", True, 128, False, (64, 64, 128), 168, False),
+        ("wgmma", True, 128, False, (64, 64, 128), 176, True),
+        # WGMMA packed B covers all K=128 slabs (16 registers for FP8).
+        ("wgmma", False, 128, True, (64, 16, 128), 64, False),
+        ("wgmma", False, 128, True, (64, 16, 128), 72, True),
+    ],
+)
+def test_sampled_operand_register_budget(
+    mma_type, raw_weight, group_size, packed, warp_shape, budget, expected
+):
+    from humming.config import TuningConfig
+    from humming.config.mma import get_register_budget_error
+
+    a_dtype = "float8e4m3" if group_size else "float16"
+    layer = LayerConfig(
+        sm_version=90, shape_n=1024, shape_k=1024,
+        a_dtype=a_dtype, b_dtype=a_dtype if raw_weight else "uint4", c_dtype="float16",
+        use_packed_k_layout=packed,
+        input_scale_group_size=group_size, weight_scale_group_size=group_size,
+        use_fused_e8m0_scale=False,
+    )
+    config = TuningConfig(
+        mma_type=mma_type, warp_shape=warp_shape,
+        block_shape=(warp_shape[0], warp_shape[1] * 4, warp_shape[2]),
+        use_warp_spec=False, num_ctas_per_sm=1,
+    )
+    error = get_register_budget_error(layer, config, registers_per_sm=budget * 128)
+    assert (error is None) == expected

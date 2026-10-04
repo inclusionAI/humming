@@ -5,7 +5,10 @@ from typing import Any
 
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType, SmemReuseMode
-from humming.config.mma import fits_warp_specialization_registers, get_default_mma_type
+from humming.config.mma import (
+    get_default_mma_type,
+    get_register_budget_error,
+)
 from humming.utils.smem import estimate_smem_size_layer
 
 
@@ -431,10 +434,12 @@ def _analyze_execution(
     if (schedule.use_warp_spec or schedule.use_tma) and not schedule.use_mbarrier:
         reasons.append("warp specialization and TMA require mbarrier synchronization")
     mma_type = schedule.mma_type or get_default_mma_type(problem.layer_config)
-    if num_math_threads and not fits_warp_specialization_registers(
-        problem.layer_config, schedule, problem.use_f16_accum or schedule.use_f16_accum
-    ):
-        reasons.append("warp specialization accumulator registers exceed twice the math-thread budget")
+    if num_math_threads:
+        register_error = get_register_budget_error(
+            problem.layer_config, schedule, problem.use_f16_accum or schedule.use_f16_accum
+        )
+        if register_error is not None:
+            reasons.append(register_error)
     if mma_type == MmaType.WGMMA and schedule.num_stages < 3:
         reasons.append(f"WGMMA requires at least three stages, got {schedule.num_stages}")
 
