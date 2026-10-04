@@ -247,7 +247,7 @@ public:
       is_last_iter = (k + 1 == kNumKSlabs);
     } else {
       k_index = iter_id * kPartMmaShapeK + (k + 1) * MmaShape::K;
-      is_last_iter = iter_id == (Ctx::kWarpIters - 1);
+      is_last_iter = k_index == WarpShape::K;
     }
     uint32_t is_as_group_end = kIsGroupInputScale && k_index % kInputScaleGroupSize == 0;
     constexpr bool kProcessGroupWeightScale = kIsGroupWeightScale && !kUseFusedE8m0Scale;
@@ -388,7 +388,7 @@ public:
 
     uint32_t buffer_id = iter_id % 2;
     uint32_t k_index = iter_id * kPartMmaShapeK + (k + 1) * MmaShape::K;
-    uint32_t is_last_iter = iter_id == (Ctx::kWarpIters - 1);
+    uint32_t is_last_iter = k_index == WarpShape::K;
     uint32_t is_as_group_end = kApplyGroupInputScaleOnC && k_index % kInputScaleGroupSize == 0;
     uint32_t is_bs_group_end = (kApplyGroupWeightScaleOnC || kApplyBlockWeightScaleOnC) && k_index % kWeightScaleGroupSize == 0;
 
@@ -517,7 +517,7 @@ public:
       is_last_iter = (k + 1 == kNumKSlabs);
     } else {
       k_index = iter_id * kPartMmaShapeK + (k + 1) * MmaShape::K;
-      is_last_iter = iter_id == (Ctx::kWarpIters - 1);
+      is_last_iter = k_index == WarpShape::K;
     }
     uint32_t is_as_group_end = kApplyGroupInputScaleOnC && k_index % kInputScaleGroupSize == 0;
     uint32_t is_bs_group_end = (kApplyGroupWeightScaleOnC || kApplyBlockWeightScaleOnC) && k_index % kWeightScaleGroupSize == 0;
