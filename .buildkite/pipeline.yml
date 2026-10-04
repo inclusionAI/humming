@@ -92,12 +92,19 @@ steps:
                   sizeLimit: 24Gi
 
   - &h200_tests
-    <<: *dgx_spark_tests
     label: "Humming Tests (H200)"
     key: humming-h200-ci
     agents:
       queue: h200_18gb
+    timeout_in_minutes: 180
+    concurrency: 1
     concurrency_group: humming/h200
+    env:
+      # The agent environment hook pulls the image before Docker plugin setup.
+      BUILDKITE_PLUGIN_DOCKER_IMAGE: *test_image
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
+    artifact_paths:
+      - "test-results/pytest.xml"
     plugins:
       # Use the GPU visibility assigned by the MIG agent, as in vLLM ci-infra.
       - docker#v5.2.0:
@@ -113,29 +120,38 @@ steps:
             - /dev/shm:/dev/shm
             - /dev/nvidiactl:/dev/nvidiactl
 
-  - input: "Run Humming Full Sampled Tests"
-    key: approve-sampled-tests
+  - input: "Run Humming Full Sampled Tests (B200)"
+    key: approve-b200-sampled-tests
 
   - <<: *b200_tests
     label: "Humming Full Sampled Tests (B200)"
     key: humming-b200-sampled-ci
-    depends_on: approve-sampled-tests
+    depends_on: approve-b200-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - input: "Run Humming Full Sampled Tests (DGX Spark)"
+    key: approve-dgx-spark-sampled-tests
 
   - <<: *dgx_spark_tests
     label: "Humming Full Sampled Tests (DGX Spark)"
     key: humming-dgx-spark-sampled-ci
-    depends_on: approve-sampled-tests
+    depends_on: approve-dgx-spark-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - input: "Run Humming Full Sampled Tests (L4)"
+    key: approve-l4-sampled-tests
 
   - <<: *l4_tests
     label: "Humming Full Sampled Tests (L4)"
     key: humming-l4-sampled-ci
-    depends_on: approve-sampled-tests
+    depends_on: approve-l4-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - input: "Run Humming Full Sampled Tests (H200)"
+    key: approve-h200-sampled-tests
 
   - <<: *h200_tests
     label: "Humming Full Sampled Tests (H200)"
     key: humming-h200-sampled-ci
-    depends_on: approve-sampled-tests
+    depends_on: approve-h200-sampled-tests
     command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
