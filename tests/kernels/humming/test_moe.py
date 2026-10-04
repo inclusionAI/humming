@@ -219,6 +219,34 @@ def test_moe_case_coverage():
     }
 
 
+def test_indexed_mma_tma_scale_pipeline(monkeypatch):
+    skip_if_unsupported(a_dtype=dtypes.bfloat16, mma_type="mma", use_tma=True)
+    case = next(case for case in MOE_CASES if case.name == "indexed-partial-k-tile")
+    config = dict(
+        mma_type="mma",
+        block_shape=(32, 128, 32),
+        warp_shape=(16, 64, 32),
+        num_stages=4,
+        num_ctas_per_sm=1,
+        use_tma=True,
+        use_tma_a=False,
+        use_tma_b=False,
+        use_tma_bs=True,
+        use_tma_c=False,
+        use_warp_spec=False,
+        use_mbarrier=True,
+        use_cp_async=False,
+        use_stream_k=False,
+        output_chunk_rows=32,
+        smem_reuse_mode="none",
+    )
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(config))
+    shape_ms = (1, 17, 257)
+    results = KernelTestRunner(case).run(shape_ms)
+    assert_kernel_test_shape_coverage(results, shape_ms)
+
+
 @pytest.mark.parametrize("raster_group_m", [1, 8])
 @pytest.mark.parametrize("use_stream_k", [False, True])
 @pytest.mark.parametrize("offset_dtype", [torch.int32, torch.int64])

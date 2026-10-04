@@ -8,6 +8,7 @@ import random
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, TuningConfig
+from humming.config.mma import fits_warp_specialization_registers
 from humming.device import current_device
 from humming.tune import get_heuristics_config
 from humming.utils.math import round_up
@@ -397,12 +398,11 @@ def _fits_device_resources(
         return False
 
     if config["use_warp_spec"] and mma_type != MmaType.UMMA:
-        uses_register_reallocation = num_math_threads > 128 or layer_config.shape_k > block_shape[2] * 16
         needs_more_load_registers = num_math_threads > 256 or (
             num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
         )
         load_thread_registers = 40 if needs_more_load_registers else 24
-        if uses_register_reallocation and launch_bound_registers < load_thread_registers:
+        if launch_bound_registers < load_thread_registers:
             return False
 
     if mma_type == MmaType.WGMMA:
@@ -420,6 +420,8 @@ def _fits_device_resources(
             return False
 
     tuning_config = create_tuning_config(config)
+    if not fits_warp_specialization_registers(layer_config, tuning_config, compute_config.use_f16_accum):
+        return False
     if mma_type == MmaType.UMMA:
         from humming.tune.sm100 import Sm100UmmaHeuristics
 

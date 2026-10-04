@@ -58,6 +58,36 @@ def get_default_mma_type(layer_config):
     return MmaType.MMA
 
 
+def fits_warp_specialization_registers(layer_config, tuning_config, use_f16_accum=False):
+    mma_type = tuning_config.mma_type or get_default_mma_type(layer_config)
+    if not tuning_config.use_warp_spec or mma_type == MmaType.UMMA:
+        return True
+
+    block_shape, warp_shape = tuning_config.block_shape, tuning_config.warp_shape
+    num_math_threads = math.prod(block_shape) // math.prod(warp_shape) * 32
+    num_warps = (num_math_threads + 128) // 32
+    num_ctas = tuning_config.num_ctas_per_sm
+    # Match the warp allocation granularity and setmaxnreg budgets in humming_ws.cuh.
+    registers_per_warp = (64 * 1024) // (num_warps * num_ctas) // 256 * 256
+    accumulator_registers = warp_shape[0] * warp_shape[1] // (64 if use_f16_accum else 32)
+    has_group_weight_scale = layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
+    needs_scale_accumulator = has_group_weight_scale and not layer_config.use_fused_e8m0_scale
+    needs_scale_accumulator |= layer_config.input_scale_group_size > 0
+    if mma_type != MmaType.MXMMA and layer_config.a_dtype.num_bits < 16 and needs_scale_accumulator:
+        accumulator_registers *= 2
+
+    needs_more_load_registers = num_ctas == 1 and layer_config.a_dtype.num_bits != 16
+    needs_more_load_registers |= num_math_threads > 256
+    load_thread_registers = 40 if needs_more_load_registers else 24
+    available_registers = max(0, registers_per_warp * num_warps - 128 * load_thread_registers)
+    estimated_registers = min(232, max(128, accumulator_registers * 2 + 96))
+    preferred_registers = 96 if num_math_threads > 256 else estimated_registers
+    available_math_registers = max(24, available_registers // num_math_threads // 8 * 8)
+    math_thread_registers = min(preferred_registers, available_math_registers)
+    # Allow moderate spilling; reject accumulator demand above twice the register budget.
+    return accumulator_registers <= math_thread_registers * 2
+
+
 def calc_reg_count(rows, cols, ptx_dtype):
     total_bits = rows * cols * DTYPE_BIT_WIDTH_MAP[ptx_dtype]
     assert total_bits % (32 * 32) == 0

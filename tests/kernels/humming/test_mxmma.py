@@ -251,7 +251,11 @@ def test_mxmma_case_coverage():
         16,
         32,
     }
-    assert any(case.layer_config.mxmma_native_mixed for case in MXMMA_CASES)
+    assert any(
+        case.layer_config.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2)
+        and case.layer_config.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
+        for case in MXMMA_CASES
+    )
 
     assert len(MXMMA_ZERO_POINT_CASES) == 6
     assert all(case.layer_config.has_zero_point for case in MXMMA_ZERO_POINT_CASES)

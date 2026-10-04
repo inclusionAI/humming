@@ -514,3 +514,55 @@ def test_heuristic_test_mode_has_separate_cache_entries(monkeypatch):
     assert get_heuristics_config(layer, 17)["mma_type"] == "umma"
     monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "sampled")
     assert get_heuristics_config(layer, 17)["mma_type"] == "mma"
+
+
+@pytest.mark.parametrize(
+    "warp_m,num_ctas,expected",
+    (
+        (16, 3, True),
+        (32, 3, True),
+        (32, 2, True),
+        (64, 3, True),
+        (48, 4, True),
+        (64, 4, False),
+        (128, 1, True),
+        (128, 3, False),
+    ),
+)
+def test_warp_specialization_register_budget(warp_m, num_ctas, expected, monkeypatch):
+    from humming.config import ComputeConfig, TuningConfig
+    from humming.config.mma import fits_warp_specialization_registers
+    from humming.kernel.humming import HummingKernel
+    from humming.testing import tuning
+
+    layer = dataclasses.replace(_layer(), sm_version=103)
+    compute = ComputeConfig(gemm_type=GemmType.INDEXED)
+    config = TuningConfig(
+        mma_type="mma",
+        block_shape=(warp_m, 128, 256),
+        warp_shape=(warp_m, 64, 64),
+        num_stages=2,
+        num_ctas_per_sm=num_ctas,
+        use_warp_spec=True,
+        use_tma=True,
+        use_tma_a=False,
+        use_tma_c=False,
+        use_stream_k=False,
+        output_chunk_rows=32,
+        smem_reuse_mode="last_stage",
+    )
+    assert fits_warp_specialization_registers(layer, config) == expected
+    schedule_fields = {field.name for field in dataclasses.fields(ScheduleCandidate)}
+    schedule_config = {name: value for name, value in config.to_dict().items() if name in schedule_fields}
+    schedule = ScheduleCandidate.from_config("register-budget", schedule_config)
+    analysis = analyze_candidate(_problem(layer_config=layer), schedule)
+    reason = "warp specialization accumulator registers exceed twice the math-thread budget"
+    assert (reason in analysis.rejection_reasons) == (not expected)
+    if not expected:
+        assert not tuning._fits_device_resources(layer, compute, (config.to_dict(), {}))
+        monkeypatch.setattr(HummingKernel, "_instances", {})
+        monkeypatch.setattr(
+            HummingKernel, "prepare", lambda self: pytest.fail("invalid config reached compilation")
+        )
+        with pytest.raises(AssertionError, match="accumulator registers"):
+            HummingKernel(**(layer.to_dict() | compute.to_dict() | config.to_dict()))

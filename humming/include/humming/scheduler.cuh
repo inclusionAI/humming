@@ -241,7 +241,9 @@ public:
   CUDA_INLINE
   bool get_next_block() {
     bool has_next_block = false;
-    if (dp_mn_iters) {
+    // Derive the non-Stream-K predicate from the index. Updating a cached predicate
+    // inside this branch can make ptxas mispredicate the current tile's TMA coordinates.
+    if (kUseStreamK ? dp_mn_iters != 0 : dp_mn_next_index < mn_blocks) {
       slice_iters = K_BLOCKS;
 
       map_mn_block(dp_mn_next_index, m_block_id, n_block_id);
@@ -254,7 +256,6 @@ public:
       k_block_id = 0;
       dp_mn_next_index += gridDim.x / kCtaGroupSize;
       if constexpr (kUseStreamK) dp_mn_iters--;
-      else dp_mn_iters = dp_mn_next_index < mn_blocks;
       has_next_block = true;
     } else if constexpr (kUseStreamK) {
       has_next_block = get_streamk_next_block();
