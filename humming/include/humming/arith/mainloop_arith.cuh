@@ -635,6 +635,6 @@ public:
 
   template <class T = uint32_t>
   CUDA_INLINE T *regs_zp_as_ptr(uint32_t buffer_id) {
-    return reinterpret_cast<T *>(zp[buffer_id]);
+    return reinterpret_cast<T *>(zp[kIsChannelWeightScale ? 0 : buffer_id]);
   };
 };
