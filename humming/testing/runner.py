@@ -22,6 +22,7 @@ from humming.testing.data import (
     generate_random_topk_ids,
 )
 from humming.testing.tuning import (
+    NUM_SAMPLED_TUNING_CONFIGS,
     create_tuning_config,
     generate_heuristics_configs,
     sample_test_tuning_configs,
@@ -42,7 +43,8 @@ def assert_kernel_test_shape_coverage(
     counts = Counter(result.shape_m for result in results)
     assert set(counts) == set(shape_ms)
     assert len(set(counts.values())) == 1
-    expected_minimum = 100 if os.environ.get(TEST_TUNING_SOURCE_ENV) == "sampled" else 1
+    use_sampled_configs = os.environ.get(TEST_TUNING_SOURCE_ENV) == "sampled"
+    expected_minimum = NUM_SAMPLED_TUNING_CONFIGS if use_sampled_configs else 1
     assert next(iter(counts.values())) >= expected_minimum
 
 

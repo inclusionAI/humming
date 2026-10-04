@@ -401,6 +401,7 @@ def test_sampled_backends_match_fixed_layout(
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE, use_f16_accum=use_f16_accum)
     configs = tuning.sample_test_tuning_configs(layer, compute, sample_size=20)
+    assert len(configs) == 20
     assert {config["mma_type"] for config in configs} == expected
     assert "mma_type" not in layer.to_dict()
     for config in configs:
@@ -429,6 +430,7 @@ def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch):
     compute = ComputeConfig(gemm_type=GemmType.INDEXED, use_batch_invariant=True)
     layer = dataclasses.replace(layer, num_experts=4)
     configs = tuning.sample_test_tuning_configs(layer, compute)
+    assert len(configs) == tuning.NUM_SAMPLED_TUNING_CONFIGS == 32
     umma_configs = [config for config in configs if config["mma_type"] == "umma"]
     for name in ("umma_cta_group_size", "umma_num_dequant_warpgroups", "output_chunk_rows"):
         assert {config[name] for config in umma_configs} == set(tuning.SAMPLED_TUNING_VALUES[name])

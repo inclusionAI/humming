@@ -13,7 +13,7 @@ from humming.device import current_device
 from humming.tune import get_heuristics_config
 from humming.utils.smem import estimate_smem_size_config, fits_device_smem
 
-NUM_SAMPLED_TUNING_CONFIGS = 100
+NUM_SAMPLED_TUNING_CONFIGS = 32
 TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
 SAMPLED_TUNING_VALUES = {
     "mma_type": tuple(mma_type.value for mma_type in MmaType),
@@ -350,13 +350,17 @@ def _get_seed(layer_config: LayerConfig, compute_config: ComputeConfig) -> int:
     return int.from_bytes(hashlib.sha256(content).digest()[:8], "little")
 
 
-def _select_pairwise(candidates: list[tuple[dict, dict]], rng: random.Random) -> list[tuple[dict, dict]]:
+def _select_pairwise(
+    candidates: list[tuple[dict, dict]], rng: random.Random, max_count: int | None = None
+) -> list[tuple[dict, dict]]:
     pair_sets = [frozenset(_get_covered_pairs(candidate)) for candidate in candidates]
     uncovered = set().union(*pair_sets)
     remaining = list(range(len(candidates)))
     rng.shuffle(remaining)
     selected = []
     while uncovered and remaining:
+        if max_count is not None and len(selected) >= max_count:
+            break
         candidate_index = max(remaining, key=lambda index: len(pair_sets[index] & uncovered))
         covered = pair_sets[candidate_index] & uncovered
         if not covered:
@@ -531,11 +535,11 @@ def sample_test_tuning_configs(
 ) -> list[dict]:
     candidates = enumerate_test_tuning_configs(layer_config, compute_config)
     rng = random.Random(_get_seed(layer_config, compute_config))
-    selected = _select_pairwise(candidates, rng)
+    selected = _select_pairwise(candidates, rng, max_count=sample_size)
     selected_ids = {id(candidate) for candidate in selected}
     remaining = [candidate for candidate in candidates if id(candidate) not in selected_ids]
     rng.shuffle(remaining)
-    target_size = min(max(sample_size, len(selected)), len(candidates))
+    target_size = min(sample_size, len(candidates))
     selected.extend(remaining[: target_size - len(selected)])
     rng.shuffle(selected)
     return [config for config, _ in selected]
