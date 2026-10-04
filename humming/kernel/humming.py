@@ -303,12 +303,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             and self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)
             and self.b_dtype in (dtypes.float4e2m1, dtypes.float6e3m2, dtypes.float6e2m3)
         )
-        umma_native_mixed = (
-            self.mma_type == MmaType.UMMA
-            and self.a_dtype.num_bits <= 8
-            and self.b_dtype.is_floating_point_type
-        )
-        use_native_weight = self.use_raw_weight or mma_native_mixed or umma_native_mixed
+        use_native_weight = self.use_raw_weight or mma_native_mixed
         self.mma_b_dtype = self.b_dtype if use_native_weight else self.a_dtype
 
         scale_dtype = dtypes.float8e8m0
@@ -423,7 +418,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert self.b_dtype.num_bits <= self.a_dtype.mantissa_bits + 2
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_floating_point_type:
             assert self.b_dtype.is_signed
-            uses_native_umma = self.mma_type == MmaType.UMMA and self.a_dtype.num_bits <= 8
+            uses_native_umma = (
+                self.mma_type == MmaType.UMMA and self.a_dtype.num_bits <= 8 and self.use_raw_weight
+            )
             if not self.use_block_scaled_mma and not uses_native_umma:
                 assert self.b_dtype.exponent_bits <= self.a_dtype.exponent_bits
                 assert self.b_dtype.mantissa_bits <= self.a_dtype.mantissa_bits
@@ -497,14 +494,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 block_m = self.block_shape[0]
                 assert block_m <= 32 or block_m % 16 == 0, "INT8 UMMA requires M divisible by 16 above M=32"
             elif self.a_dtype.num_bits == 8:
-                assert self.b_dtype.is_integer_type or self.b_dtype in (
-                    dtypes.float8e4m3,
-                    dtypes.float8e5m2,
-                    dtypes.float8e3m4,
-                    dtypes.float4e2m1,
-                    dtypes.float6e3m2,
-                    dtypes.float6e2m3,
-                )
                 assert not self.is_block_weight_scale and not self.has_zero_point
                 if self.use_block_scaled_mma:
                     for group_size, scale_dtype in (

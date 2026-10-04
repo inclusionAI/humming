@@ -96,15 +96,6 @@ class LayerConfig(BaseHummingConfig):
         )
         has_fp8_output = self.c_dtype in (dtypes.float16, dtypes.bfloat16)
         has_fp8_activation = self.a_dtype in (dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4)
-        has_fp8_weights = self.b_dtype in (
-            dtypes.float8e4m3,
-            dtypes.float8e5m2,
-            dtypes.float8e3m4,
-            dtypes.float4e2m1,
-            dtypes.float6e3m2,
-            dtypes.float6e2m3,
-        )
-        has_fp8_operands = has_fp8_activation and (has_fp8_weights or self.b_dtype.is_integer_type)
         has_mx_input_scale = self.input_scale_group_size == 0 or (
             self.input_scale_group_size == 32 and self.as_dtype in (None, dtypes.float8e8m0)
         )
@@ -118,7 +109,7 @@ class LayerConfig(BaseHummingConfig):
             and not self.is_block_weight_scale
         )
         has_supported_fp8_scales = has_fp8_epilogue_scales or has_mx_scales
-        use_fp8_umma = has_fp8_output and has_fp8_operands and has_supported_fp8_scales
+        use_fp8_umma = has_fp8_output and has_fp8_activation and has_supported_fp8_scales
         fp4_dtypes = (dtypes.float4e2m1, dtypes.float4e0m3)
         has_fp4_weights = self.b_dtype in fp4_dtypes or self.b_dtype.is_integer_type
         has_fp4_operands = self.a_dtype in fp4_dtypes and has_fp4_weights
