@@ -1,12 +1,12 @@
 from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import current_device
-from humming.tune.base import DeviceHeuristics
 from humming.tune.candidate import (
     DeviceProfile,
     TuningDecision,
     TuningProblem,
 )
+from humming.tune.sm8x import Sm80Heuristics
 from humming.tune.sm90_policies import (
     Sm90CandidatePolicy,
     build_sm90_seed_config,
@@ -17,7 +17,7 @@ from humming.tune.sm90_policies import (
 from humming.utils.smem import estimate_smem_size_layer
 
 
-class Sm90Heuristics(DeviceHeuristics):
+class Sm90Heuristics(Sm80Heuristics):
     max_smem_size: int = 227 * 1024
     candidate_policy = Sm90CandidatePolicy()
     b16_allowed_dtypes: list[dtypes.DataType] = [dtypes.float16, dtypes.bfloat16]
@@ -167,6 +167,9 @@ class Sm90Heuristics(DeviceHeuristics):
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
     ):
+        if layer_config.a_dtype == dtypes.int4:
+            return super().get_config(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+
         use_grouped_scale_candidates = cls._uses_grouped_scale_candidates(layer_config)
         use_indexed_a16_policy = cls._uses_indexed_a16_policy(layer_config, use_batch_invariant, gemm_type)
         use_candidates = use_grouped_scale_candidates or use_indexed_a16_policy
