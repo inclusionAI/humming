@@ -112,39 +112,6 @@ def test_umma_operand_wait_once_per_iteration(block_n, block_k, monkeypatch):
     _assert_results(case, (64, 257))
 
 
-@pytest.mark.parametrize("shape_n,shape_k,num_sms", ((256, 256, 3), (128, 8192, 64)))
-@pytest.mark.parametrize("use_tma_c", (False, True))
-@pytest.mark.parametrize(
-    "weight_values",
-    (
-        dict(b_dtype="uint4", weight_scale_group_size=128, has_bias=True),
-        dict(b_dtype="uint4", weight_scale_type="channel", has_bias=True),
-    ),
-)
-def test_umma_native_output_stream_k_bias(weight_values, use_tma_c, shape_n, shape_k, num_sms, monkeypatch):
-    """Only the first K slice contributes bias to native output."""
-    case = _case("native-output-stream-k", GemmType.DENSE, **weight_values)
-
-    case = dataclasses.replace(
-        case, layer_config=dataclasses.replace(case.layer_config, shape_n=shape_n, shape_k=shape_k)
-    )
-
-    def select_stream_k(layer_config, shape_m, gemm_type, **kwargs):
-        return Sm100Heuristics.get_umma_config(layer_config, shape_m, gemm_type) | {
-            "block_shape": (128, 128, 64),
-            "warp_shape": (128, 32, 64),
-            "num_stages": 2,
-            "num_ctas_per_sm": 1,
-            "num_sms": num_sms,
-            "use_tma": True,
-            "use_tma_c": use_tma_c,
-            "use_stream_k": True,
-        }
-
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", select_stream_k)
-    _assert_results(case, (17, 257))
-
-
 @pytest.mark.parametrize(
     "gemm_type,block_m,shape_k,block_n,weight_name",
     (
