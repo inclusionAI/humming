@@ -30,7 +30,7 @@ from humming.testing.tuning import (
 )
 from humming.transform import transform_humming_tensors
 
-_DEFAULT_SHAPE_MS = (1, 17, 64, 257, 1024, 4096)
+_DEFAULT_SHAPE_MS = (1, 17, 64, 257, 1024, 4090)
 TEST_TUNING_SOURCE_ENV = "HUMMING_TEST_TUNING_SOURCE"
 NUMERICAL_ERROR_LOG_ENV = "HUMMING_TEST_NUMERICAL_ERROR_LOG"
 
