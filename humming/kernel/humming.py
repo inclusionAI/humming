@@ -117,6 +117,7 @@ extern "C" __constant__ uint32_t BS_DTYPE_ID = {{bs_dtype}}::kId;
 @dataclasses.dataclass(kw_only=True)
 class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
     name: ClassVar[str] = "humming"
+    disable_fast_math: ClassVar[bool] = True
     _str2kernel_cache: ClassVar[dict[tuple, torch.Tensor]] = {}
     _id2kernel: ClassVar[dict[int, "HummingKernel"]] = {}
 

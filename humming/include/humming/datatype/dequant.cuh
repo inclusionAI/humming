@@ -176,16 +176,14 @@ CUDA_INLINE void dequant_scale_float32(const uint32_t *src, uint32_t *dst, uint3
     dequant_scale<SourceType, BFloat16>(src, pairs, index);
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < 4; i++) {
-      float2 values = __bfloat1622float2(*reinterpret_cast<nv_bfloat162 *>(&pairs[i]));
+      nv_bfloat162 values = *reinterpret_cast<nv_bfloat162 *>(&pairs[i]);
       constexpr uint32_t kExponentOffset = 128 - (1u << (SourceType::kExponentBits - 1));
       if constexpr (kExponentOffset != 0) {
-        constexpr uint32_t kFactorBits = (127 + kExponentOffset) << 23;
-        float factor = __uint_as_float(kFactorBits);
-        // Preserve the bit-expanded subnormals even when the kernel uses fast math.
-        asm("mul.rn.f32 %0, %0, %1;" : "+f"(values.x) : "f"(factor));
-        asm("mul.rn.f32 %0, %0, %1;" : "+f"(values.y) : "f"(factor));
+        constexpr uint32_t kFactorBits = ((127 + kExponentOffset) * 0x00010001u) << 7;
+        const nv_bfloat162 factor = *reinterpret_cast<const nv_bfloat162 *>(&kFactorBits);
+        values = __hmul2(values, factor);
       }
-      reinterpret_cast<float2 *>(dst)[i] = values;
+      reinterpret_cast<float2 *>(dst)[i] = __bfloat1622float2(values);
     }
   }
 }
