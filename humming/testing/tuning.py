@@ -395,19 +395,6 @@ def _fits_device_resources(
     registers_per_sm = current_device.max_registers_per_sm
     if num_threads * num_ctas_per_sm > max_threads:
         return False
-    launch_bound_registers = registers_per_sm // (num_threads * num_ctas_per_sm) // 8 * 8
-    if mma_type == MmaType.UMMA and launch_bound_registers < 40:
-        # TMEM transfers and their address operands cannot compile at a 32-register limit.
-        return False
-
-    if config["use_warp_spec"] and mma_type != MmaType.UMMA:
-        needs_more_load_registers = num_math_threads > 256 or (
-            num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
-        )
-        load_thread_registers = 40 if needs_more_load_registers else 24
-        if launch_bound_registers < load_thread_registers:
-            return False
-
     tuning_config = create_tuning_config(config)
     if (
         get_register_budget_error(layer_config, tuning_config, compute_config.use_f16_accum, registers_per_sm)

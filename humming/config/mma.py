@@ -89,28 +89,34 @@ def get_mxmma_compiler_error(layer_config, compiler_version):
 
 
 def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, registers_per_sm=None):
-    """Return a diagnostic when accumulators and one operand buffer exhaust the budget."""
     mma_type = tuning_config.mma_type or get_default_mma_type(layer_config)
-    if mma_type == MmaType.UMMA:
-        return None  # UMMA accumulators use TMEM and have separate resource checks.
     if registers_per_sm is None:
         registers_per_sm = current_device.max_registers_per_sm
     warp_m, warp_n, warp_k = tuning_config.warp_shape
     num_math_threads = math.prod(tuning_config.block_shape) // math.prod(tuning_config.warp_shape) * 32
     num_threads = num_math_threads + (128 if tuning_config.use_warp_spec else 0)
+    if mma_type == MmaType.UMMA:
+        if layer_config.use_raw_weight:
+            dequant_threads = 0
+        else:
+            dequant_threads = 128 * tuning_config.umma_num_dequant_warpgroups
+        num_threads = 256 + dequant_threads
     launch_budget = registers_per_sm // (num_threads * tuning_config.num_ctas_per_sm) // 8 * 8
-    accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
-    has_group_accumulator = (
-        mma_type != MmaType.MXMMA
-        and layer_config.a_dtype.num_bits < 16
-        and (
-            layer_config.input_scale_group_size > 0
-            or (
-                not layer_config.use_fused_e8m0_scale
-                and (layer_config.is_group_weight_scale or layer_config.is_block_weight_scale)
-            )
+    if launch_budget < 64:
+        return (
+            "register budget exceeded: requires at least 64 registers per thread; "
+            f"launch budget {launch_budget:g}"
         )
-    )
+    if mma_type == MmaType.UMMA:
+        return None  # UMMA accumulators use TMEM and have separate resource checks.
+
+    accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
+    has_group_accumulator = False
+    if mma_type != MmaType.MXMMA and layer_config.a_dtype.num_bits < 16:
+        has_group_scale = layer_config.input_scale_group_size > 0
+        if not has_group_scale and not layer_config.use_fused_e8m0_scale:
+            has_group_scale = layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
+        has_group_accumulator = has_group_scale
     math_budget = min(255, launch_budget)
     if tuning_config.use_warp_spec:
         # Match humming_ws.cuh's allocation, using the full physical accumulator
@@ -125,6 +131,12 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
         if num_math_threads > 256:
             preferred_budget = 96
         math_budget = min(preferred_budget, max(24, available_registers // num_math_threads // 8 * 8))
+
+    if math_budget < 64:
+        return (
+            "register budget exceeded: requires at least 64 registers per math thread; "
+            f"launch budget {launch_budget:g}, math-thread budget {math_budget:g}"
+        )
 
     # Each ordinary MMA buffer spans K=256/activation_bits, hence M/4 and N/4
     # 32-bit registers per thread. Count dequantized operands, not both copies.

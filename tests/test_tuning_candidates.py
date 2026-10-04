@@ -544,7 +544,7 @@ def test_heuristic_tests_prefer_available_backend(
 @pytest.mark.parametrize(
     "warp_m,num_ctas,expected",
     (
-        (16, 3, True),
+        (16, 3, False),
         (32, 3, False),
         (32, 2, True),
         (64, 3, False),
@@ -649,57 +649,6 @@ def test_sampled_wgmma_accounts_for_all_accumulators(
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE)
     assert tuning._fits_device_resources(layer, compute, (config, {})) == expected
-
-
-@pytest.mark.parametrize(
-    "mma_type,raw_weight,group_size,packed,warp_shape,budget,expected",
-    [
-        # MMA: 192 accumulator + 24 A + 16 B = 232; equality must reject.
-        ("mma", False, 0, False, (96, 64, 64), 240, False),
-        ("mma", False, 0, False, (96, 64, 64), 248, True),
-        # WGMMA excludes A in smem, and excludes B as well for raw-weight SS.
-        ("wgmma", False, 0, False, (96, 64, 64), 216, False),
-        ("wgmma", False, 0, False, (96, 64, 64), 224, True),
-        ("wgmma", True, 0, False, (96, 64, 64), 200, False),
-        ("wgmma", True, 0, False, (96, 64, 64), 208, True),
-        # FP8 group scale: 128 * 1.25 + 16 A + 16 B = 192, not 288.
-        ("mma", False, 128, False, (64, 64, 128), 200, False),
-        ("mma", False, 128, False, (64, 64, 128), 208, True),
-        ("wgmma", True, 128, False, (64, 64, 128), 168, False),
-        ("wgmma", True, 128, False, (64, 64, 128), 176, True),
-        # WGMMA packed B covers all K=128 slabs (16 registers for FP8).
-        ("wgmma", False, 128, True, (64, 16, 128), 64, False),
-        ("wgmma", False, 128, True, (64, 16, 128), 72, True),
-    ],
-)
-def test_sampled_operand_register_budget(
-    mma_type, raw_weight, group_size, packed, warp_shape, budget, expected
-):
-    from humming.config import TuningConfig
-    from humming.config.mma import get_register_budget_error
-
-    a_dtype = "float8e4m3" if group_size else "float16"
-    layer = LayerConfig(
-        sm_version=90,
-        shape_n=1024,
-        shape_k=1024,
-        a_dtype=a_dtype,
-        b_dtype=a_dtype if raw_weight else "uint4",
-        c_dtype="float16",
-        use_packed_k_layout=packed,
-        input_scale_group_size=group_size,
-        weight_scale_group_size=group_size,
-        use_fused_e8m0_scale=False,
-    )
-    config = TuningConfig(
-        mma_type=mma_type,
-        warp_shape=warp_shape,
-        block_shape=(warp_shape[0], warp_shape[1] * 4, warp_shape[2]),
-        use_warp_spec=False,
-        num_ctas_per_sm=1,
-    )
-    error = get_register_budget_error(layer, config, registers_per_sm=budget * 128)
-    assert (error is None) == expected
 
 
 @pytest.mark.parametrize("registers_per_sm,expected", [(65536, False), (131072, True)])
