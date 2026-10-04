@@ -69,9 +69,10 @@ public:
 
   CUDA_INLINE
   void transform_b(uint32_t buffer_id, uint32_t iter_id) {
-    if constexpr (std::is_same<ElementA, ElementB>::value) return;
-
-    if constexpr (kNativeMixed) {
+    if constexpr (Ctx::kUseRawWeight) {
+      // Raw operands are loaded directly into regs_b, including mixed FP4 formats.
+      return;
+    } else if constexpr (kNativeMixed) {
       PRAGMA_UNROLL
       for (uint32_t i = 0; i < WarpShape::N / 16; i++) {
         uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id][i * 16 / MmaShape::N]);
@@ -178,7 +179,7 @@ public:
 
   template <class T = uint32_t>
   CUDA_INLINE T *regs_qb_as_ptr(uint32_t buffer_id) {
-    if constexpr (std::is_same<ElementA, ElementB>::value) {
+    if constexpr (Ctx::kUseRawWeight) {
       return reinterpret_cast<T *>(regs_b[buffer_id]);
     } else {
       return reinterpret_cast<T *>(regs_qb[buffer_id]);

@@ -419,7 +419,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         }
         assert self.a_dtype in dtype_map
         assert self.sm_version >= dtype_map[self.a_dtype]
-        if self.sm_version == 121 and self.mma_type == MmaType.MXMMA and self.a_dtype == dtypes.float4e0m3:
+        has_e0m3_operand = dtypes.float4e0m3 in (self.a_dtype, self.b_dtype)
+        if self.sm_version == 121 and self.mma_type == MmaType.MXMMA and has_e0m3_operand:
             err_msg = "E0M3 MXMMA on SM121 requires CUDA 13.1 or newer (PTX ISA 9.1)"
             assert _cuda_compiler_version(self._get_compiler()) >= (13, 1), err_msg
         assert self.b_dtype.num_bits <= 8
@@ -442,7 +443,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             if not self.use_block_scaled_mma and not uses_native_umma:
                 assert self.b_dtype.exponent_bits <= self.a_dtype.exponent_bits
                 assert self.b_dtype.mantissa_bits <= self.a_dtype.mantissa_bits
-            if not uses_native_umma:
+            uses_native_mxmma = self.mma_type == MmaType.MXMMA and self.use_raw_weight
+            if not (uses_native_umma or uses_native_mxmma):
                 assert self.a_dtype.exponent_bits == 0 or self.b_dtype.exponent_bits >= 1
         elif self.b_dtype.is_floating_point_type and self.a_dtype.is_integer_type:
             assert self.use_fused_e8m0_scale
