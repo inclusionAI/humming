@@ -46,6 +46,7 @@ class Sm121Heuristics(Sm120Heuristics):
         shape_k = layer_config.shape_k
         if num_a_bits >= 8 and use_tma and block_k >= warp_k * 2:
             config["block_shape"] = (block_m, block_n, block_k // 2)
+            config["use_warp_spec"] &= cls._has_complete_warpgroups(config)
             if is_wna16:
                 cls._use_tma_b_only(config)
         elif num_b_bits <= 4 and not use_stream_k and block_k == 128 and shape_k % (block_k * 2) == 0:

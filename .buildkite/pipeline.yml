@@ -1,12 +1,13 @@
 steps:
-  - label: "Humming Tests (B200)"
+  - &b200_tests
+    label: "Base Tests (B200)"
     key: humming-b200-ci
     agents:
       queue: b200-k8s
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/b200
-    command: bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -15,7 +16,7 @@ steps:
             runtimeClassName: nvidia
             containers:
               # NGC 26.07 multi-arch: PyTorch 2.13 development snapshot and CUDA 13.3.
-              - image: nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
+              - image: &test_image nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
                 resources:
                   limits:
                     nvidia.com/gpu: 1
@@ -27,14 +28,15 @@ steps:
                 emptyDir:
                   medium: Memory
 
-  - label: "Humming Tests (DGX Spark)"
+  - &dgx_spark_tests
+    label: "Base Tests (DGX Spark)"
     key: humming-dgx-spark-ci
     agents:
       queue: dgx-spark
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/dgx-spark
-    command: bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -47,3 +49,115 @@ steps:
           gpus: all
           volumes:
             - /dev/shm:/dev/shm
+
+  - &l4_tests
+    <<: *b200_tests
+    label: "Base Tests (L4)"
+    key: humming-l4-ci
+    agents:
+      queue: l4-k8s
+    concurrency_group: humming/l4
+    plugins:
+      # Match vLLM ci-infra's single-GPU L4 Kubernetes preset.
+      - kubernetes:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              karpenter.sh/do-not-disrupt: "true"
+          podSpec:
+            priorityClassName: ci
+            serviceAccountName: buildkite-gpu-jobs
+            tolerations:
+              - key: nvidia.com/gpu
+                operator: Exists
+                effect: NoSchedule
+            nodeSelector:
+              vllm.ci/gpu-pool: l4x4
+            containers:
+              - image: *test_image
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                  requests:
+                    nvidia.com/gpu: 1
+                    cpu: "10"
+                    memory: 40Gi
+                volumeMounts:
+                  - name: devshm
+                    mountPath: /dev/shm
+            volumes:
+              - name: devshm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 24Gi
+
+  - &h200_tests
+    label: "Base Tests (H200)"
+    key: humming-h200-ci
+    agents:
+      queue: h200_18gb
+    timeout_in_minutes: 180
+    concurrency: 1
+    concurrency_group: humming/h200
+    env:
+      # The agent environment hook pulls the image before Docker plugin setup.
+      BUILDKITE_PLUGIN_DOCKER_IMAGE: *test_image
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
+    artifact_paths:
+      - "test-results/pytest.xml"
+    plugins:
+      # Use the GPU visibility assigned by the MIG agent, as in vLLM ci-infra.
+      - docker#v5.2.0:
+          image: *test_image
+          always-pull: true
+          propagate-environment: true
+          propagate-uid-gid: true
+          environment:
+            - CUDA_VISIBLE_DEVICES
+            - NVIDIA_VISIBLE_DEVICES
+            - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+          volumes:
+            - /dev/shm:/dev/shm
+            - /dev/nvidiactl:/dev/nvidiactl
+
+  - input: "Run Large Sampled Tests (B200)"
+    key: approve-b200-sampled-tests
+
+  - <<: *b200_tests
+    label: "Large Sampled Tests (B200)"
+    key: humming-b200-sampled-ci
+    concurrency_group: humming/b200-sampled
+    depends_on: approve-b200-sampled-tests
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - input: "Run Large Sampled Tests (DGX Spark)"
+    key: approve-dgx-spark-sampled-tests
+
+  - <<: *dgx_spark_tests
+    label: "Large Sampled Tests (DGX Spark)"
+    key: humming-dgx-spark-sampled-ci
+    concurrency_group: humming/dgx-spark-sampled
+    depends_on: approve-dgx-spark-sampled-tests
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - input: "Run Large Sampled Tests (L4)"
+    key: approve-l4-sampled-tests
+
+  - <<: *l4_tests
+    label: "Large Sampled Tests (L4)"
+    key: humming-l4-sampled-ci
+    concurrency_group: humming/l4-sampled
+    depends_on: approve-l4-sampled-tests
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+
+  - input: "Run Large Sampled Tests (H200)"
+    key: approve-h200-sampled-tests
+
+  - <<: *h200_tests
+    label: "Large Sampled Tests (H200)"
+    key: humming-h200-sampled-ci
+    agents:
+      queue: h200_35gb
+    concurrency_group: humming/h200-sampled
+    depends_on: approve-h200-sampled-tests
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/

@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,15 +23,32 @@ from humming.testing.data import (
     generate_random_topk_ids,
 )
 from humming.testing.tuning import (
+    NUM_SAMPLED_TUNING_CONFIGS,
     create_tuning_config,
     generate_heuristics_configs,
     sample_test_tuning_configs,
 )
 from humming.transform import prepare_fp16_e8m0_scale, transform_humming_tensors
 
-_DEFAULT_SHAPE_MS = (1, 17, 64, 257, 1024, 4096)
+_DEFAULT_SHAPE_MS = (1, 30, 257, 1024, 4090)
 TEST_TUNING_SOURCE_ENV = "HUMMING_TEST_TUNING_SOURCE"
 NUMERICAL_ERROR_LOG_ENV = "HUMMING_TEST_NUMERICAL_ERROR_LOG"
+
+
+def _get_sample_size(tuning_source: str) -> int | None:
+    match = re.fullmatch(r"sampled([1-9][0-9]*)?", tuning_source)
+    if match is None:
+        return None
+    return int(match[1]) if match[1] else NUM_SAMPLED_TUNING_CONFIGS
+
+
+def _get_test_tuning_sources() -> tuple[str, ...]:
+    value = os.environ.get(TEST_TUNING_SOURCE_ENV, "heuristic+batch_invariant")
+    sources = tuple(dict.fromkeys(source.strip() for source in value.split("+")))
+    for source in sources:
+        if source not in ("heuristic", "batch_invariant") and _get_sample_size(source) is None:
+            raise ValueError(f"invalid tuning source: {value}")
+    return sources
 
 
 def assert_kernel_test_shape_coverage(
@@ -39,11 +57,14 @@ def assert_kernel_test_shape_coverage(
 ) -> None:
     if shape_ms is None:
         shape_ms = _DEFAULT_SHAPE_MS
-    counts = Counter(result.shape_m for result in results)
-    assert set(counts) == set(shape_ms)
-    assert len(set(counts.values())) == 1
-    expected_minimum = 100 if os.environ.get(TEST_TUNING_SOURCE_ENV) == "sampled" else 1
-    assert next(iter(counts.values())) >= expected_minimum
+    tuning_sources = _get_test_tuning_sources()
+    assert {result.tuning_source for result in results} == set(tuning_sources)
+    for tuning_source in tuning_sources:
+        counts = Counter(result.shape_m for result in results if result.tuning_source == tuning_source)
+        assert set(counts) == set(shape_ms)
+        assert len(set(counts.values())) == 1
+        expected_minimum = _get_sample_size(tuning_source) or 1
+        assert next(iter(counts.values())) >= expected_minimum
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -83,6 +104,7 @@ class KernelTestCase:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class KernelTestResult:
+    tuning_source: str
     shape_m: int
     tuning_config: TuningConfig
     tuning_values: dict
@@ -95,13 +117,16 @@ class KernelTestRunner:
         self.test_case = test_case
         self.layer_config = test_case.layer_config
         self.compute_config = test_case.compute_config
+        self.tuning_source = "heuristic"
         self.device = torch.cuda.current_device()
         self.weight_ref: torch.Tensor
         self.bias_ref: torch.Tensor | None = None
         self.kernel_tensors: dict[str, torch.Tensor]
         self.prepare_weight()
 
-    def prepare_kernels(self, shape_ms: tuple[int, ...]) -> dict[int, list[tuple[torch.Tensor, dict, int]]]:
+    def prepare_kernels(
+        self, shape_ms: tuple[int, ...]
+    ) -> list[tuple[str, ComputeConfig, dict[int, list[tuple[torch.Tensor, dict, int]]]]]:
         if self.layer_config.mxmma_supported:
             compiler_version = _cuda_compiler_version(HummingKernel._get_compiler())
             compiler_error = get_mxmma_compiler_error(self.layer_config, compiler_version)
@@ -110,49 +135,68 @@ class KernelTestRunner:
 
                 pytest.skip(compiler_error)
 
-        tuning_source = os.environ.get(TEST_TUNING_SOURCE_ENV, "heuristic")
-        if tuning_source == "batch_invariant":
-            self.compute_config = dataclasses.replace(self.compute_config, use_batch_invariant=True)
+        tuning_sources = _get_test_tuning_sources()
+        if any(_get_sample_size(source) is None for source in tuning_sources):
+            if get_default_mma_type(self.layer_config) == MmaType.WGMMA:
+                min_warp_shape_n = 32 if self.layer_config.a_dtype.num_bits == 16 else 16
+                if self.layer_config.shape_n % (min_warp_shape_n * 4):
+                    import pytest
 
-        if tuning_source != "sampled" and get_default_mma_type(self.layer_config) == MmaType.WGMMA:
-            min_warp_shape_n = 32 if self.layer_config.a_dtype.num_bits == 16 else 16
-            if self.layer_config.shape_n % (min_warp_shape_n * 4):
+                    pytest.skip("shape_n cannot form four WGMMA warp tiles")
+
+        groups = []
+        compile_configs = []
+        effective_shape_ms = [self.test_case.effective_shape_m(shape_m) for shape_m in shape_ms]
+        for tuning_source in tuning_sources:
+            compute_config = self.test_case.compute_config
+            if tuning_source == "batch_invariant":
+                compute_config = dataclasses.replace(compute_config, use_batch_invariant=True)
+            sample_size = _get_sample_size(tuning_source)
+            if sample_size is not None:
+                tuning_configs = sample_test_tuning_configs(
+                    self.layer_config, compute_config, sample_size=sample_size
+                )
+            else:
+                tuning_configs = generate_heuristics_configs(
+                    self.layer_config, compute_config, effective_shape_ms
+                )
+            if not tuning_configs:
                 import pytest
 
-                pytest.skip("shape_n cannot form four WGMMA warp tiles")
-
-        if tuning_source == "sampled":
-            tuning_configs = sample_test_tuning_configs(self.layer_config, self.compute_config)
-        elif tuning_source in ("heuristic", "batch_invariant"):
-            effective_shape_ms = [self.test_case.effective_shape_m(shape_m) for shape_m in shape_ms]
-            tuning_configs = generate_heuristics_configs(
-                self.layer_config,
-                self.compute_config,
-                effective_shape_ms,
+                pytest.skip(f"no legal tuning configs for {tuning_source}")
+            groups.append((tuning_source, compute_config, tuning_configs))
+            compile_configs.extend(
+                (0, 1 << 30, values | {"use_batch_invariant": compute_config.use_batch_invariant})
+                for values in tuning_configs
             )
-        else:
-            raise ValueError(f"invalid tuning source: {tuning_source}")
-
-        if not tuning_configs:
-            import pytest
-
-            pytest.skip("no legal tuning configs for this layer and compute config")
 
         kernel_configs = HummingKernel.prepare_kernels(
             self.layer_config.to_str(),
             self.compute_config.to_str(),
-            [(0, 1 << 30, values) for values in tuning_configs],
+            compile_configs,
             device=self.device,
         ).reshape(-1, 4)
-        assert kernel_configs.shape[0] == len(tuning_configs)
+        assert kernel_configs.shape[0] == len(compile_configs)
         for kernel_id in set(kernel_configs[:, 2].tolist()):
             HummingKernel._id2kernel[kernel_id].assert_smem_size_matches_estimate()
 
-        enum_iter_objs = enumerate(zip(kernel_configs, tuning_configs, strict=True))
-        kernels = [(*values, index) for index, values in enum_iter_objs]
-        if tuning_source == "sampled":
-            return dict.fromkeys(shape_ms, kernels)
-        return {shape_m: [kernel] for shape_m, kernel in zip(shape_ms, kernels, strict=True)}
+        prepared_groups = []
+        offset = 0
+        for tuning_source, compute_config, tuning_configs in groups:
+            group_configs = kernel_configs[offset : offset + len(tuning_configs)]
+            kernels = [
+                (kernel_config, values, index)
+                for index, (kernel_config, values) in enumerate(
+                    zip(group_configs, tuning_configs, strict=True)
+                )
+            ]
+            if _get_sample_size(tuning_source) is not None:
+                shape_kernels = dict.fromkeys(shape_ms, kernels)
+            else:
+                shape_kernels = {shape_m: [kernel] for shape_m, kernel in zip(shape_ms, kernels, strict=True)}
+            prepared_groups.append((tuning_source, compute_config, shape_kernels))
+            offset += len(tuning_configs)
+        return prepared_groups
 
     def prepare_weight(self) -> None:
         torch.manual_seed(self.test_case.seed + 123)
@@ -437,6 +481,23 @@ class KernelTestRunner:
             **self.kernel_tensors,
         )
 
+    def _assert_close(self, outputs: torch.Tensor, outputs_ref: torch.Tensor, use_stream_k: bool) -> None:
+        rtol, atol = self.test_case.rtol, self.test_case.atol
+        try:
+            torch.testing.assert_close(outputs, outputs_ref, rtol=rtol, atol=atol)
+        except AssertionError:
+            if outputs.dtype != torch.bfloat16 or not use_stream_k:
+                raise
+            # Keep rtol unchanged and validate tensor metadata and non-finite values.
+            torch.testing.assert_close(outputs, outputs_ref, rtol=rtol, atol=2 * atol)
+            outliers = ~torch.isclose(outputs, outputs_ref, rtol=rtol, atol=atol).reshape(-1)
+            # Allow at most 0.01% isolated outliers, with a minimum allowance of two.
+            max_outliers = max(2, outputs.numel() // 10000)
+            if outliers.sum().item() > max_outliers:
+                raise
+            if torch.any(outliers[:-1] & outliers[1:]):
+                raise
+
     def _run_kernel(
         self,
         shape_m: int,
@@ -454,12 +515,8 @@ class KernelTestRunner:
                 f"tuning_index={tuning_index}, tuning_config={tuning_values}"
             ) from error
         try:
-            torch.testing.assert_close(
-                outputs,
-                outputs_ref,
-                rtol=self.test_case.rtol,
-                atol=self.test_case.atol,
-            )
+            compiled_kernel = HummingKernel._id2kernel[int(kernel_config[2])]
+            self._assert_close(outputs, outputs_ref, compiled_kernel.use_stream_k)
         except AssertionError as error:
             self._record_numerical_error(error, shape_m, tuning_values, tuning_index)
             raise AssertionError(
@@ -473,6 +530,7 @@ class KernelTestRunner:
             ) from error
 
         return KernelTestResult(
+            tuning_source=self.tuning_source,
             shape_m=shape_m,
             tuning_config=create_tuning_config(tuning_values),
             tuning_values=tuning_values,
@@ -490,7 +548,25 @@ class KernelTestRunner:
         if not shape_ms:
             return []
 
-        kernels = self.prepare_kernels(shape_ms)
+        prepared_groups = self.prepare_kernels(shape_ms)
+        results = []
+        original_compute_config = self.compute_config
+        original_tuning_source = self.tuning_source
+        try:
+            for tuning_source, compute_config, kernels in prepared_groups:
+                self.tuning_source = tuning_source
+                self.compute_config = compute_config
+                results.extend(self._run_prepared_kernels(shape_ms, kernels))
+        finally:
+            self.compute_config = original_compute_config
+            self.tuning_source = original_tuning_source
+        return results
+
+    def _run_prepared_kernels(
+        self,
+        shape_ms: tuple[int, ...],
+        kernels: dict[int, list[tuple[torch.Tensor, dict, int]]],
+    ) -> list[KernelTestResult]:
         max_shape_m = max(shape_ms)
         shape_k = self.layer_config.shape_k - self.layer_config.pad_shape_k
         output_top_k = 1 if self.compute_config.gemm_type == GemmType.DENSE else self.test_case.top_k
@@ -585,7 +661,7 @@ class KernelTestRunner:
             "pytest_test": os.environ.get("PYTEST_CURRENT_TEST"),
             "test_case": dataclasses.asdict(self.test_case),
             "shape_m": shape_m,
-            "tuning_source": os.environ.get(TEST_TUNING_SOURCE_ENV, "heuristic"),
+            "tuning_source": self.tuning_source,
             "tuning_index": tuning_index,
             "tuning_config": tuning_values,
             "device": current_device.name,

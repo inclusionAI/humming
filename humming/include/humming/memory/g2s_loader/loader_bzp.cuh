@@ -21,11 +21,10 @@ private:
   static constexpr bool kIsChannel = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsGroup = Ctx::kIsGroupWeightScale;
   static constexpr bool kEvictWeightsFirst = Ctx::kUseUmma && Ctx::kIsDenseGemm && kIsGroup && Ctx::kRasterGroupM > 1;
-  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr uint32_t kGroupSize = kIsGroup ? Ctx::kWeightScaleGroupSize : ProblemShape::K;
 
   static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
-  static constexpr uint32_t kNumGroupsPerMma = kUseMxmma && ElementA::kBits == 4 && kIsGroup ? kPartMmaShapeK / kGroupSize : 1;
+  static constexpr uint32_t kNumGroupsPerMma = Ctx::kUseBlockScaledMma && ElementA::kBits == 4 && kIsGroup ? kPartMmaShapeK / kGroupSize : 1;
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
   static constexpr uint32_t kSmemStride = BlockShape::N * kNumZPBits / 32 / 4 * kNumGroupsPerMma;
   static constexpr uint32_t kGmemStride = ProblemShape::N * kNumZPBits / 32 / 4 * kNumGroupsPerMma;

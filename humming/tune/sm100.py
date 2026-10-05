@@ -31,7 +31,8 @@ class Sm100MmaHeuristics(Sm80Heuristics):
         config = super().get_config(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
         block_m, block_n, _ = config["block_shape"]
         warp_m = config["warp_shape"][0]
-        if use_batch_invariant:
+        # This four-warp schedule targets small M tiles.
+        if use_batch_invariant or block_m > 32:
             return config
 
         warp_k = 1024 // layer_config.a_dtype.num_bits
@@ -591,11 +592,11 @@ class Sm100Heuristics(Sm100MmaHeuristics):
         if shape_m <= 0:
             raise ValueError("shape_m must be positive")
         default_test_source = "heuristic" if "PYTEST_CURRENT_TEST" in os.environ else ""
-        is_heuristic_test = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source) == "heuristic"
+        test_sources = os.environ.get("HUMMING_TEST_TUNING_SOURCE", default_test_source).split("+")
+        is_heuristic_test = "heuristic" in (source.strip() for source in test_sources)
         prefer_umma = is_heuristic_test and layer_config.is_umma_supported and not use_f16_accum
         prefer_umma &= layer_config.shape_n % 128 == 0
         prefer_umma &= layer_config.shape_k % (512 // layer_config.a_dtype.num_bits) == 0
-        prefer_umma &= layer_config.a_dtype.num_bits == 16 or not layer_config.has_zero_point
         if prefer_umma or get_default_mma_type(layer_config) == MmaType.UMMA:
             has_native_mixed_operands = layer_config.a_dtype.num_bits == 8
             has_native_mixed_operands &= layer_config.b_dtype.is_floating_point_type

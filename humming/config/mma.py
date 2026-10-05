@@ -89,34 +89,54 @@ def get_mxmma_compiler_error(layer_config, compiler_version):
 
 
 def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, registers_per_sm=None):
-    """Return a diagnostic when accumulators and one operand buffer exhaust the budget."""
     mma_type = tuning_config.mma_type or get_default_mma_type(layer_config)
-    if mma_type == MmaType.UMMA:
-        return None  # UMMA accumulators use TMEM and have separate resource checks.
     if registers_per_sm is None:
         registers_per_sm = current_device.max_registers_per_sm
     warp_m, warp_n, warp_k = tuning_config.warp_shape
     num_math_threads = math.prod(tuning_config.block_shape) // math.prod(tuning_config.warp_shape) * 32
     num_threads = num_math_threads + (128 if tuning_config.use_warp_spec else 0)
+    if mma_type == MmaType.UMMA:
+        if layer_config.use_raw_weight:
+            dequant_threads = 0
+        else:
+            dequant_threads = 128 * tuning_config.umma_num_dequant_warpgroups
+        num_threads = 256 + dequant_threads
     launch_budget = registers_per_sm // (num_threads * tuning_config.num_ctas_per_sm) // 8 * 8
-    accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
-    has_group_accumulator = (
-        mma_type != MmaType.MXMMA
-        and layer_config.a_dtype.num_bits < 16
-        and (
-            layer_config.input_scale_group_size > 0
-            or (
-                not layer_config.use_fused_e8m0_scale
-                and (layer_config.is_group_weight_scale or layer_config.is_block_weight_scale)
-            )
+    if launch_budget < 56:
+        return (
+            "register budget exceeded: requires at least 56 registers per thread; "
+            f"launch budget {launch_budget:g}"
         )
-    )
+    if mma_type == MmaType.UMMA:
+        return None  # UMMA accumulators use TMEM and have separate resource checks.
+
+    if mma_type == MmaType.WGMMA:
+        # One instruction spans project N=64 across four warps. ptxas needs
+        # 26 extra registers for SS, or 30 for RS, beyond its accumulator tuple.
+        # setmaxnreg can raise the runtime math budget, but not this compile limit.
+        instruction_accumulators = warp_m // (4 if use_f16_accum else 2)
+        instruction_overhead = 26 if layer_config.use_raw_weight else 30
+        instruction_registers = instruction_accumulators + instruction_overhead
+        if instruction_registers > launch_budget:
+            return (
+                "register budget exceeded: WGMMA instruction requires at least "
+                f"{instruction_registers} registers per thread; launch budget {launch_budget:g}"
+            )
+
+    accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
+    has_group_accumulator = False
+    if mma_type != MmaType.MXMMA and layer_config.a_dtype.num_bits < 16:
+        has_group_scale = layer_config.input_scale_group_size > 0
+        if not has_group_scale and not layer_config.use_fused_e8m0_scale:
+            has_group_scale = layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
+        has_group_accumulator = has_group_scale
     math_budget = min(255, launch_budget)
     if tuning_config.use_warp_spec:
         # Match humming_ws.cuh's allocation, using the full physical accumulator
         # count for its preferred budget, independently of our spill estimate.
         physical_accumulators = accumulator_registers * (2 if has_group_accumulator else 1)
         preferred_budget = min(232, max(128, physical_accumulators * 2 + 96))
+        preferred_budget = math.ceil(preferred_budget / 8) * 8
         needs_more_load_registers = num_math_threads > 256 or (
             tuning_config.num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
         )
@@ -125,6 +145,12 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
         if num_math_threads > 256:
             preferred_budget = 96
         math_budget = min(preferred_budget, max(24, available_registers // num_math_threads // 8 * 8))
+
+    if math_budget < 56:
+        return (
+            "register budget exceeded: requires at least 56 registers per math thread; "
+            f"launch budget {launch_budget:g}, math-thread budget {math_budget:g}"
+        )
 
     # Each ordinary MMA buffer spans K=256/activation_bits, hence M/4 and N/4
     # 32-bit registers per thread. Count dequantized operands, not both copies.
@@ -137,11 +163,15 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
             buffer_registers = warp_k * layer_config.a_dtype.num_bits / 64
     if has_group_accumulator:
         accumulator_registers *= 1.25
-    demand = accumulator_registers + buffer_registers
+    input_scale_registers = 0
+    if mma_type == MmaType.WGMMA and layer_config.input_scale_group_size > 0:
+        input_scale_registers = math.ceil(warp_m / 16) * 4
+    demand = accumulator_registers + buffer_registers + input_scale_registers
     if demand >= math_budget - 8:
         return (
             f"register budget exceeded: accumulator {accumulator_registers:g} + "
-            f"single-buffer {buffer_registers:g} = {demand:g} must be < "
+            f"single-buffer {buffer_registers:g} + input scales {input_scale_registers:g} "
+            f"= {demand:g} must be < "
             f"math-thread budget {math_budget:g} - 8 ({math_budget - 8:g})"
         )
     return None

@@ -14,7 +14,6 @@ private:
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
   static constexpr bool kIsChannelScale = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsGroupScale = Ctx::kIsGroupWeightScale;
-  static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr uint32_t kGroupSize = kIsChannelScale ? BlockShape::K : Ctx::kWeightScaleGroupSize;
 
   static constexpr uint32_t kPartMmaShapeK = Ctx::kPartMmaShapeK;
@@ -23,7 +22,7 @@ private:
   static constexpr uint32_t K_WARPS = Ctx::K_WARPS;
 
   static constexpr uint32_t kNumZPBits = kIsFpZeroPoint ? 16 : MAX(4, static_next_power_of_2(ElementB::kBits));
-  static constexpr uint32_t kNumGroupsPerMma = kUseMxmma && ElementA::kBits == 4 && kIsGroupScale ? kPartMmaShapeK / kGroupSize : 1;
+  static constexpr uint32_t kNumGroupsPerMma = Ctx::kUseBlockScaledMma && ElementA::kBits == 4 && kIsGroupScale ? kPartMmaShapeK / kGroupSize : 1;
   static constexpr uint32_t kLoadBytes = WarpShape::N / 8 * kNumZPBits / 8 * kNumGroupsPerMma;
   using LoadType = typename LoadTypeChooser<kLoadBytes>::Type;
   static constexpr uint32_t kSmemStride = BlockShape::N * kNumZPBits / 32 / 4 * kNumGroupsPerMma;

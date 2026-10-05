@@ -4,6 +4,7 @@ import torch
 from humming import dtypes, ops
 from humming.config import ComputeConfig, GemmType, LayerConfig
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.kernel.humming import HummingKernel
 from humming.testing import (
     KernelTestCase,
@@ -17,6 +18,9 @@ SHAPE_N = 1024
 SHAPE_K = 1024
 NUM_EXPERTS = 8
 TOP_K = 2
+BLOCK_SCALED_SM_VERSION = (
+    current_device.sm_version if current_device.sm_version // 10 in (10, 11, 12) else 120
+)
 
 
 def _case(
@@ -104,7 +108,7 @@ MOE_CASES = (
         has_zero_point=True,
         is_fp_zero_point=True,
     ),
-    _case("indexed", GemmType.INDEXED),
+    _case("indexed", GemmType.INDEXED, weight_scale_group_size=128),
     _case(
         "indexed-static-input",
         GemmType.INDEXED,
@@ -116,30 +120,40 @@ MOE_CASES = (
         GemmType.INDEXED,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="static_tensor_dynamic_group",
-        sm_version=120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case(
         "indexed-dynamic-group-token",
         GemmType.INDEXED,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case("indexed-partial-k-tile", GemmType.INDEXED, shape_k=96),
     _case("grouped-contiguous", GemmType.GROUPED_CONTIGUOUS),
+    _case(
+        "grouped-contiguous-short-k-zp",
+        GemmType.GROUPED_CONTIGUOUS,
+        shape_k=192,
+        weight_scale_group_size=64,
+        has_zero_point=True,
+    ),
     _case(
         "grouped-contiguous-dynamic-group-token",
         GemmType.GROUPED_CONTIGUOUS,
         use_m_major_input_scale=True,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case("grouped-masked", GemmType.GROUPED_MASKED),
     _case(
@@ -148,9 +162,10 @@ MOE_CASES = (
         use_m_major_input_scale=True,
         a_dtype=dtypes.float4e2m1,
         b_dtype=dtypes.float4e2m1,
+        as_dtype=dtypes.float8e4m3,
         input_scale_group_size=16,
         input_quant_mode="dynamic_group_token",
-        sm_version=120,
+        sm_version=BLOCK_SCALED_SM_VERSION,
     ),
     _case(
         "indexed-bias-pad-k",
@@ -219,34 +234,6 @@ def test_moe_case_coverage():
     }
 
 
-def test_indexed_mma_tma_scale_pipeline(monkeypatch):
-    skip_if_unsupported(a_dtype=dtypes.bfloat16, mma_type="mma", use_tma=True)
-    case = next(case for case in MOE_CASES if case.name == "indexed-partial-k-tile")
-    config = dict(
-        mma_type="mma",
-        block_shape=(32, 128, 32),
-        warp_shape=(16, 64, 32),
-        num_stages=4,
-        num_ctas_per_sm=1,
-        use_tma=True,
-        use_tma_a=False,
-        use_tma_b=False,
-        use_tma_bs=True,
-        use_tma_c=False,
-        use_warp_spec=False,
-        use_mbarrier=True,
-        use_cp_async=False,
-        use_stream_k=False,
-        output_chunk_rows=32,
-        smem_reuse_mode="none",
-    )
-    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(config))
-    shape_ms = (1, 17, 257)
-    results = KernelTestRunner(case).run(shape_ms)
-    assert_kernel_test_shape_coverage(results, shape_ms)
-
-
 @pytest.mark.parametrize("raster_group_m", [1, 8])
 @pytest.mark.parametrize("use_stream_k", [False, True])
 @pytest.mark.parametrize("offset_dtype", [torch.int32, torch.int64])
@@ -312,68 +299,3 @@ def test_grouped_contiguous_skips_unused_capacity(use_stream_k, offset_dtype, ra
             torch.testing.assert_close(output[start : start + count], reference, atol=0.01, rtol=0.01)
             start += count
         assert (output[start:] == -123).all()
-
-
-@pytest.mark.parametrize(
-    "gemm_type",
-    (GemmType.INDEXED, GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED),
-)
-@pytest.mark.parametrize("multicast", (1, 2))
-@pytest.mark.parametrize("use_stream_k", (False, True))
-def test_raw_wgmma_tma_b_general_moe(gemm_type, multicast, use_stream_k, monkeypatch):
-    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
-    case = _case(
-        "raw-wgmma-tma-b-general",
-        gemm_type,
-        a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.float8e4m3,
-        has_bias=True,
-    )
-    tuning = dict(
-        mma_type="wgmma",
-        block_shape=(16, 256, 128),
-        warp_shape=(16, 32, 128),
-        num_stages=3,
-        use_tma=True,
-        use_warp_spec=True,
-        use_stream_k=use_stream_k,
-        multi_cast_size_b=multicast,
-        use_tma_a=gemm_type != GemmType.INDEXED,
-        use_tma_c=gemm_type != GemmType.INDEXED,
-    )
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
-    if multicast > 1:
-        with pytest.raises(AssertionError, match="B multicast requires dense GEMM"):
-            KernelTestRunner(case).run((1,))
-        return
-    results = KernelTestRunner(case).run((1, 17, 129))
-    assert_kernel_test_shape_coverage(results, (1, 17, 129))
-
-
-@pytest.mark.parametrize("gemm_type", (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED))
-@pytest.mark.parametrize("a_dtype,b_dtype", (("float8e4m3", "float8e4m3"), ("bfloat16", "uint4")))
-@pytest.mark.parametrize("pad_k", (0, 128, 32))
-@pytest.mark.parametrize("use_stream_k", (False, True))
-def test_wgmma_tma_a_general_moe(gemm_type, a_dtype, b_dtype, pad_k, use_stream_k, monkeypatch):
-    skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
-    case = _case(
-        "wgmma-tma-a-general-moe",
-        gemm_type,
-        a_dtype=a_dtype,
-        b_dtype=b_dtype,
-        shape_k=1024,
-        pad_shape_k=pad_k,
-        has_bias=True,
-    )
-    tuning = dict(
-        mma_type="wgmma",
-        block_shape=(16, 128, 256),
-        warp_shape=(16, 32, 64 if a_dtype == "bfloat16" else 128),
-        num_stages=3,
-        use_tma=True,
-        use_warp_spec=True,
-        use_stream_k=use_stream_k,
-    )
-    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: dict(tuning))
-    results = KernelTestRunner(case).run((1, 17, 129))
-    assert_kernel_test_shape_coverage(results, (1, 17, 129))

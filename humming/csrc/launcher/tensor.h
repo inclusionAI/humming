@@ -216,7 +216,7 @@ inline void check_tensor_bzp(std::optional<Tensor> &tensor, KernelData &kernel_d
     expected_dtype = dtype_id_to_tensor_dtype(kernel_data.c_dtype_id);
   } else {
     uint32_t scale_vec = 1;
-    if (kernel_data.mma_type == MmaType::MXMMA && get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
+    if (kernel_data.use_block_scaled_mma && get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
       scale_vec = 256 / 4 / group_size;
     }
     expected_shape.push_back(num_groups / scale_vec);
@@ -488,8 +488,7 @@ inline CUtensorMap make_tma_desc_bzp(std::optional<Tensor> &tensor_, KernelData 
   }
 
   uint32_t num_bits = get_dtype_num_bits(kernel_data.b_dtype_id) <= 4 ? 4 : 8;
-  if (kernel_data.mma_type == MmaType::MXMMA &&
-      get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
+  if (kernel_data.use_block_scaled_mma && get_dtype_num_bits(kernel_data.a_dtype_id) == 4 && group_size > 0) {
     uint32_t scale_vec = 256 / 4 / group_size;
     if (scale_vec > 1) return make_tma_desc(tensor, {block_shape_n * num_bits * scale_vec / 32, num_groups / scale_vec}, 0, "bzp");
   }

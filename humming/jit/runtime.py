@@ -10,6 +10,7 @@ import torch
 from humming import dtypes
 from humming.device import current_device
 from humming.jit.compiler import NVCCCompiler, NVRTCCompiler
+from humming.utils.cpu import get_parallel_build_workers
 from humming.utils.cubin import get_cubin_kernel_names
 
 
@@ -111,10 +112,9 @@ class KernelRuntime:
                 return kernel_type(**kernel_args)
 
         kernel_specs = list(kernel_specs)
-        parallel = len(kernel_specs) > 1
-        parallel &= os.environ.get("HUMMING_DISABLE_PARALLEL_BUILD", "0") != "1"
+        workers = min(len(kernel_specs), get_parallel_build_workers()) if kernel_specs else 0
+        parallel = workers > 1
         if parallel:
-            workers = min(16, len(kernel_specs))
             with ThreadPoolExecutor(
                 max_workers=workers,
             ) as executor:

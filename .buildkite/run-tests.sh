@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+echo "--- CPU and compilation limits"
+python3 humming/utils/cpu.py
+
 echo "--- :nvidia: GPU Info"
 nvidia-smi
 
@@ -28,4 +31,7 @@ uv pip install --python .venv/bin/python --no-deps -e .
 
 echo "--- Run tests"
 mkdir -p test-results
-.venv/bin/python -m pytest tests -v --junitxml=test-results/pytest.xml
+if [[ $# -eq 0 ]]; then
+  set -- tests
+fi
+.venv/bin/python -m pytest "$@" -v --junitxml=test-results/pytest.xml

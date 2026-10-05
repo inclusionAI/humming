@@ -17,7 +17,7 @@ NUM_SAMPLED_TUNING_CONFIGS = 100
 TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
 SAMPLED_TUNING_VALUES = {
     "mma_type": tuple(mma_type.value for mma_type in MmaType),
-    "num_stages": (2, 3, 4, 6, 8),
+    "num_stages": (2, 3, 4, 5, 6, 8),
     "use_tma": (True, False, 123, 456, 789),
     "use_warp_spec": (True, False),
     "use_mbarrier": (True, False),
@@ -66,9 +66,7 @@ def _is_legal_mma_type(layer_config, compute_config, mma_type):
     if has_mixed_raw_weights and mma_type != MmaType.UMMA:
         return False
     if mma_type == MmaType.UMMA:
-        if not layer_config.is_umma_supported or compute_config.use_f16_accum:
-            return False
-        return layer_config.a_dtype.num_bits == 16 or not layer_config.has_zero_point
+        return layer_config.is_umma_supported and not compute_config.use_f16_accum
     if mma_type == MmaType.MXMMA:
         return sm_version // 10 == 12 and layer_config.use_block_scaled_mma
     if mma_type == MmaType.WGMMA:
@@ -271,6 +269,9 @@ def _generate_transfer_candidates(
             continue
         if (use_tma or signature["use_warp_spec"]) and not signature["use_mbarrier"]:
             continue
+        requires_cp_async = signature["use_warp_spec"] or mma_type in (MmaType.WGMMA, MmaType.UMMA)
+        if requires_cp_async and not signature["use_cp_async"]:
+            continue
         if compute_config.gemm_type == GemmType.INDEXED:
             tma_values.update(use_tma_a=False, use_tma_as=False, use_tma_as2=False, use_tma_c=False)
         if not (
@@ -352,13 +353,17 @@ def _get_seed(layer_config: LayerConfig, compute_config: ComputeConfig) -> int:
     return int.from_bytes(hashlib.sha256(content).digest()[:8], "little")
 
 
-def _select_pairwise(candidates: list[tuple[dict, dict]], rng: random.Random) -> list[tuple[dict, dict]]:
+def _select_pairwise(
+    candidates: list[tuple[dict, dict]], rng: random.Random, max_count: int | None = None
+) -> list[tuple[dict, dict]]:
     pair_sets = [frozenset(_get_covered_pairs(candidate)) for candidate in candidates]
     uncovered = set().union(*pair_sets)
     remaining = list(range(len(candidates)))
     rng.shuffle(remaining)
     selected = []
     while uncovered and remaining:
+        if max_count is not None and len(selected) >= max_count:
+            break
         candidate_index = max(remaining, key=lambda index: len(pair_sets[index] & uncovered))
         covered = pair_sets[candidate_index] & uncovered
         if not covered:
@@ -391,19 +396,6 @@ def _fits_device_resources(
     registers_per_sm = current_device.max_registers_per_sm
     if num_threads * num_ctas_per_sm > max_threads:
         return False
-    launch_bound_registers = registers_per_sm // (num_threads * num_ctas_per_sm) // 8 * 8
-    if mma_type == MmaType.UMMA and launch_bound_registers < 40:
-        # TMEM transfers and their address operands cannot compile at a 32-register limit.
-        return False
-
-    if config["use_warp_spec"] and mma_type != MmaType.UMMA:
-        needs_more_load_registers = num_math_threads > 256 or (
-            num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
-        )
-        load_thread_registers = 40 if needs_more_load_registers else 24
-        if launch_bound_registers < load_thread_registers:
-            return False
-
     tuning_config = create_tuning_config(config)
     if (
         get_register_budget_error(layer_config, tuning_config, compute_config.use_f16_accum, registers_per_sm)
@@ -476,6 +468,7 @@ def _enumerate_backend_candidates(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
     mma_type: MmaType,
+    sample_size: int,
 ) -> list[tuple[dict, dict]]:
     rng = random.Random(_get_seed(layer_config, compute_config))
     groups = (
@@ -499,7 +492,7 @@ def _enumerate_backend_candidates(
     for items in itertools.product(*reduced_groups):
         add(items)
 
-    target_pool_size = NUM_SAMPLED_TUNING_CONFIGS * 5
+    target_pool_size = sample_size * 5
     product_size = math.prod(len(group) for group in groups)
     trial_count = min(product_size, target_pool_size * 500)
     for flat_index in rng.sample(range(product_size), trial_count):
@@ -517,12 +510,15 @@ def _enumerate_backend_candidates(
 def enumerate_test_tuning_configs(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
+    sample_size: int = NUM_SAMPLED_TUNING_CONFIGS,
 ) -> list[tuple[dict, dict]]:
     candidates = []
     for value in SAMPLED_TUNING_VALUES["mma_type"]:
         mma_type = MmaType(value)
         if _is_legal_mma_type(layer_config, compute_config, mma_type):
-            candidates.extend(_enumerate_backend_candidates(layer_config, compute_config, mma_type))
+            candidates.extend(
+                _enumerate_backend_candidates(layer_config, compute_config, mma_type, sample_size)
+            )
     return candidates
 
 
@@ -531,13 +527,13 @@ def sample_test_tuning_configs(
     compute_config: ComputeConfig,
     sample_size: int = NUM_SAMPLED_TUNING_CONFIGS,
 ) -> list[dict]:
-    candidates = enumerate_test_tuning_configs(layer_config, compute_config)
+    candidates = enumerate_test_tuning_configs(layer_config, compute_config, sample_size)
     rng = random.Random(_get_seed(layer_config, compute_config))
-    selected = _select_pairwise(candidates, rng)
+    selected = _select_pairwise(candidates, rng, max_count=sample_size)
     selected_ids = {id(candidate) for candidate in selected}
     remaining = [candidate for candidate in candidates if id(candidate) not in selected_ids]
     rng.shuffle(remaining)
-    target_size = min(max(sample_size, len(selected)), len(candidates))
+    target_size = min(sample_size, len(candidates))
     selected.extend(remaining[: target_size - len(selected)])
     rng.shuffle(selected)
     return [config for config, _ in selected]

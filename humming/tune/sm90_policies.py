@@ -176,6 +176,12 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         block_shape_k = 64
         warp_shape_n = 32
         warp_shape_k = 64
+    if problem.use_batch_invariant:
+        # Keep one K partition and the same reduction tile for every batch size.
+        batch_invariant_k = 128 if layer_config.use_packed_k_layout else 1024 // layer_config.a_dtype.num_bits
+        block_shape_k = min(batch_invariant_k, layer_config.shape_k & -layer_config.shape_k)
+        warp_shape_k = block_shape_k
+
     config = {
         "block_shape": (block_shape_m, block_shape_n, block_shape_k),
         "warp_shape": (block_shape_m, warp_shape_n, warp_shape_k),
@@ -218,7 +224,10 @@ def select_grouped_scale(
         problem.shape_m,
         max_block_m,
     )
-    block_ks = (256, 128, 64) if block_shape_m <= 32 else (128, 64)
+    if problem.use_batch_invariant:
+        block_ks = (min(128, layer_config.shape_k & -layer_config.shape_k),)
+    else:
+        block_ks = (256, 128, 64) if block_shape_m <= 32 else (128, 64)
     use_multicast = problem.gemm_type == GemmType.DENSE and problem.shape_m / block_shape_m >= 4
 
     candidates = []

@@ -3,6 +3,7 @@ import pytest
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -12,6 +13,9 @@ from humming.testing import (
 
 MIN_SHAPE_N = 64
 MIN_SHAPE_K = 32
+BLOCK_SCALED_SM_VERSION = (
+    current_device.sm_version if current_device.sm_version // 10 in (10, 11, 12) else 120
+)
 
 
 def _case(
@@ -27,9 +31,11 @@ def _case(
     as_dtype=None,
     input_scale_group_size: int = 0,
     input_quant_mode: str | None = None,
+    weight_scale_type: str | None = None,
     weight_scale_group_size: int = 0,
     weight_scale_group_size_n: int = 0,
     mma_type: MmaType | None = None,
+    sm_version: int | None = None,
 ) -> KernelTestCase:
     return KernelTestCase(
         name=name,
@@ -45,9 +51,10 @@ def _case(
             as_dtype=as_dtype,
             input_scale_group_size=input_scale_group_size,
             input_quant_mode=input_quant_mode,
+            weight_scale_type=weight_scale_type,
             weight_scale_group_size=weight_scale_group_size,
             weight_scale_group_size_n=weight_scale_group_size_n,
-            sm_version=90 if mma_type == MmaType.WGMMA else None,
+            sm_version=90 if mma_type == MmaType.WGMMA else sm_version,
         ),
         compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
         seed=2026,
@@ -55,6 +62,12 @@ def _case(
 
 
 PROBLEM_SHAPE_CASES = (
+    _case(
+        "short-k-group-scale",
+        shape_n=256,
+        shape_k=64,
+        weight_scale_group_size=64,
+    ),
     _case(
         "minimum",
         shape_n=MIN_SHAPE_N,
@@ -164,6 +177,7 @@ PAD_SHAPE_CASES = (
 NATIVE_SHAPE_CASES = tuple(
     _case(
         f"mxfp8-mxfp4-n{shape_n}-k{shape_k}",
+        sm_version=BLOCK_SCALED_SM_VERSION,
         shape_n=shape_n,
         shape_k=shape_k,
         a_dtype=dtypes.float8e4m3,
@@ -176,6 +190,15 @@ NATIVE_SHAPE_CASES = tuple(
     )
     for shape_n, shape_k in ((128, 64), (384, 192), (256, 2816), (256, 2880), (256, 2944), (512, 4160))
 ) + (
+    _case(
+        "fp8-large-rectangular",
+        shape_n=4096,
+        shape_k=8192,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        input_quant_mode="static_tensor",
+        weight_scale_type="tensor",
+    ),
     _case(
         "fp8-uint4-n192-k2880",
         shape_n=192,

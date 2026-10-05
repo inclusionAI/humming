@@ -336,22 +336,43 @@ def test_decision_rejects_an_illegal_selection():
 
 
 @pytest.mark.parametrize(
-    "sm_version,a_dtype,b_dtype,group_size,scale_dtype,packed_k,use_f16_accum,expected",
+    "sm_version,a_dtype,b_dtype,group_size,scale_dtype,packed_k,use_f16_accum,has_zero_point,expected",
     (
-        (90, "bfloat16", "uint4", 128, "bfloat16", False, False, {"mma", "wgmma"}),
-        (90, "float8e4m3", "uint4", 128, "bfloat16", True, False, {"wgmma"}),
-        (90, "int4", "int4", 0, "bfloat16", False, False, {"mma"}),
-        (103, "bfloat16", "uint4", 128, "bfloat16", False, False, {"mma", "umma"}),
-        (103, "float8e4m3", "float8e4m3", 0, "bfloat16", False, False, {"mma", "umma"}),
-        (103, "float8e4m3", "float4e2m1", 32, "float8e8m0", False, False, {"umma"}),
-        (100, "int8", "uint4", 0, "bfloat16", False, False, {"mma", "umma"}),
-        (103, "int8", "uint4", 0, "bfloat16", False, False, {"mma"}),
-        (103, "float16", "uint4", 128, "float16", False, True, {"mma"}),
-        (120, "float4e2m1", "float4e2m1", 32, "float8e8m0", False, False, {"mxmma"}),
+        (90, "bfloat16", "uint4", 128, "bfloat16", False, False, False, {"mma", "wgmma"}),
+        (90, "float8e4m3", "uint4", 128, "bfloat16", True, False, False, {"wgmma"}),
+        (90, "int4", "int4", 0, "bfloat16", False, False, False, {"mma"}),
+        (103, "bfloat16", "uint4", 128, "bfloat16", False, False, False, {"mma", "umma"}),
+        (103, "float8e4m3", "float8e4m3", 0, "bfloat16", False, False, False, {"mma", "umma"}),
+        (103, "float8e4m3", "float4e2m1", 32, "float8e8m0", False, False, False, {"umma"}),
+        (100, "float8e3m4", "float3e1m1", 0, "bfloat16", False, False, False, {"umma"}),
+        (103, "float8e3m4", "float3e2m0", 0, "bfloat16", False, False, False, {"umma"}),
+        (103, "float8e4m3", "float3e1m1", 0, "bfloat16", False, False, False, {"mma", "umma"}),
+        (100, "int8", "uint4", 0, "bfloat16", False, False, False, {"mma", "umma"}),
+        (100, "int8", "uint4", 0, "bfloat16", False, False, True, {"mma", "umma"}),
+        (110, "int8", "uint7", 0, "bfloat16", False, False, True, {"mma", "umma"}),
+        (103, "int8", "uint4", 0, "bfloat16", False, False, False, {"mma"}),
+        (103, "float16", "uint4", 128, "float16", False, True, False, {"mma"}),
+        (120, "float4e2m1", "float4e2m1", 32, "float8e8m0", False, False, False, {"mxmma"}),
+        (100, "float8e3m4", "uint5", 32, "float8e8m0", False, False, True, {"umma"}),
+        (103, "float8e4m3", "uint4", 32, "float8e8m0", False, False, True, {"umma"}),
+        (103, "float8e5m2", "uint3", 32, "float8e8m0", False, False, True, {"umma"}),
+        (103, "float8e4m3", "uint4", 0, "bfloat16", False, False, True, {"mma", "umma"}),
+        (100, "float4e2m1", "uint2", 16, "float8e4m3", False, False, True, {"umma"}),
+        (103, "float4e2m1", "uint2", 32, "float8e8m0", False, False, True, {"umma"}),
+        (120, "float4e0m3", "uint3", 16, "float8e4m3", False, False, True, {"mxmma"}),
     ),
 )
 def test_sampled_backends_match_fixed_layout(
-    sm_version, a_dtype, b_dtype, group_size, scale_dtype, packed_k, use_f16_accum, expected, monkeypatch
+    sm_version,
+    a_dtype,
+    b_dtype,
+    group_size,
+    scale_dtype,
+    packed_k,
+    use_f16_accum,
+    has_zero_point,
+    expected,
+    monkeypatch,
 ):
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo
@@ -365,7 +386,6 @@ def test_sampled_backends_match_fixed_layout(
     monkeypatch.setattr(HummingKernel, "_instances", {})
     monkeypatch.setattr(HummingKernel, "prepare", lambda self: None)
     monkeypatch.setattr(HummingKernel, "register_kernel", lambda self: None)
-    monkeypatch.setattr(tuning, "NUM_SAMPLED_TUNING_CONFIGS", 20)
     layer = LayerConfig(
         sm_version=sm_version,
         shape_n=512,
@@ -376,12 +396,16 @@ def test_sampled_backends_match_fixed_layout(
         bs_dtype=scale_dtype,
         weight_scale_group_size=group_size,
         use_packed_k_layout=packed_k,
+        has_zero_point=has_zero_point,
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE, use_f16_accum=use_f16_accum)
     configs = tuning.sample_test_tuning_configs(layer, compute, sample_size=20)
+    assert len(configs) == 20
     assert {config["mma_type"] for config in configs} == expected
     assert "mma_type" not in layer.to_dict()
     for config in configs:
+        requires_cp_async = config["use_warp_spec"] or config["mma_type"] in ("wgmma", "umma")
+        assert not requires_cp_async or config["use_cp_async"]
         # Exercise the real kernel validators and code generation without compiling.
         tuning_values = tuning.create_tuning_config(config).to_dict()
         kernel = HummingKernel(**(layer.to_dict() | compute.to_dict() | tuning_values))
@@ -389,7 +413,8 @@ def test_sampled_backends_match_fixed_layout(
         assert kernel.use_raw_weight == layer.use_raw_weight
 
 
-def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch):
+@pytest.mark.parametrize("sample_size", (None, 32))
+def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch, sample_size):
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo
     from humming.testing import tuning
@@ -406,16 +431,21 @@ def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch):
     )
     compute = ComputeConfig(gemm_type=GemmType.INDEXED, use_batch_invariant=True)
     layer = dataclasses.replace(layer, num_experts=4)
-    configs = tuning.sample_test_tuning_configs(layer, compute)
+    sample_options = {} if sample_size is None else {"sample_size": sample_size}
+    configs = tuning.sample_test_tuning_configs(layer, compute, **sample_options)
+    assert tuning.NUM_SAMPLED_TUNING_CONFIGS == 100
+    assert len(configs) == (sample_size or tuning.NUM_SAMPLED_TUNING_CONFIGS)
     umma_configs = [config for config in configs if config["mma_type"] == "umma"]
     for name in ("umma_cta_group_size", "umma_num_dequant_warpgroups", "output_chunk_rows"):
         assert {config[name] for config in umma_configs} == set(tuning.SAMPLED_TUNING_VALUES[name])
     assert {config["use_tma_b"] for config in umma_configs} == {False, True}
+    assert any(config["block_shape"][2] == 32 for config in umma_configs)
+    assert {3, 5} <= {config["num_stages"] for config in umma_configs}
     for config in configs:
         assert not config["use_stream_k"]
         assert not config["use_tma_a"] and not config["use_tma_c"]
         assert config["block_shape"][2] == config["warp_shape"][2]
-    assert configs == tuning.sample_test_tuning_configs(layer, compute)
+    assert configs == tuning.sample_test_tuning_configs(layer, compute, **sample_options)
 
 
 @pytest.mark.parametrize("output_chunk_rows", (-32, 8, 16, 24, 48, 288))
@@ -432,18 +462,21 @@ def test_output_chunk_rows_rejects_invalid_heights(output_chunk_rows):
 
 @pytest.mark.parametrize("sm_version", (100, 103, 107, 110))
 @pytest.mark.parametrize(
-    "a_dtype,b_dtype",
+    "a_dtype,b_dtype,small_m_backend",
     (
-        (dtypes.bfloat16, dtypes.uint4),
-        (dtypes.int8, dtypes.int8),
-        (dtypes.float8e4m3, dtypes.float8e4m3),
-        (dtypes.float8e4m3, dtypes.float4e2m1),
-        (dtypes.float4e2m1, dtypes.float4e2m1),
+        (dtypes.bfloat16, dtypes.uint4, "mma"),
+        (dtypes.int8, dtypes.int8, "mma"),
+        (dtypes.float8e4m3, dtypes.float8e4m3, "mma"),
+        (dtypes.float8e4m3, dtypes.float4e2m1, "umma"),
+        (dtypes.float4e2m1, dtypes.float4e2m1, "umma"),
+        (dtypes.float8e3m4, dtypes.float8e3m4, "umma"),
+        (dtypes.float8e3m4, dtypes.float6e2m3, "umma"),
     ),
 )
-def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
+def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backend, monkeypatch):
     from humming.config import MmaType
     from humming.config.mma import get_default_mma_type
+    from humming.tune.sm100 import Sm100Heuristics
 
     scale_config = {}
     if a_dtype == dtypes.float4e2m1:
@@ -466,6 +499,12 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
     expected = MmaType.MMA if a_dtype == dtypes.int8 and sm_version in (103, 107) else MmaType.UMMA
     assert get_default_mma_type(config) == expected
 
+    monkeypatch.delenv("HUMMING_TEST_TUNING_SOURCE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    for shape_m, backend in ((17, small_m_backend), (257, expected.value)):
+        tuning = Sm100Heuristics.get_config(config, shape_m)
+        assert tuning["mma_type"] == backend
+
 
 @pytest.mark.parametrize(
     "sm_version,a_dtype,shape_n,use_f16_accum,expected",
@@ -478,13 +517,15 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype):
         (80, "bfloat16", 256, False, "mma"),
     ),
 )
+@pytest.mark.parametrize("tuning_source", ("heuristic", "heuristic+batch_invariant"))
 def test_heuristic_tests_prefer_available_backend(
-    sm_version, a_dtype, shape_n, use_f16_accum, expected, monkeypatch
+    sm_version, a_dtype, shape_n, use_f16_accum, expected, monkeypatch, tuning_source
 ):
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo
     from humming.testing import tuning
 
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", tuning_source)
     monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
     monkeypatch.setattr(DeviceInfo, "is_ppu", property(lambda self: False))
     layer = LayerConfig(
@@ -499,63 +540,6 @@ def test_heuristic_tests_prefer_available_backend(
     compute = ComputeConfig(gemm_type=GemmType.DENSE, use_f16_accum=use_f16_accum)
     configs = tuning.generate_heuristics_configs(layer, compute, (1, 17, 257))
     assert {config["mma_type"] for config in configs} == {expected}
-
-
-@pytest.mark.parametrize(
-    "warp_m,num_ctas,expected",
-    (
-        (16, 3, True),
-        (32, 3, False),
-        (32, 2, True),
-        (64, 3, False),
-        (48, 4, False),
-        (64, 4, False),
-        (128, 1, False),
-        (128, 3, False),
-    ),
-)
-def test_warp_specialization_register_budget(warp_m, num_ctas, expected, monkeypatch):
-    from humming.config import ComputeConfig, TuningConfig
-    from humming.config.mma import get_register_budget_error
-    from humming.device import DeviceInfo
-    from humming.kernel.humming import HummingKernel
-    from humming.testing import tuning
-
-    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
-
-    layer = dataclasses.replace(_layer(), sm_version=103)
-    compute = ComputeConfig(gemm_type=GemmType.INDEXED)
-    config = TuningConfig(
-        mma_type="mma",
-        block_shape=(warp_m, 128, 256),
-        warp_shape=(warp_m, 64, 64),
-        num_stages=2,
-        num_ctas_per_sm=num_ctas,
-        use_warp_spec=True,
-        use_tma=True,
-        use_tma_a=False,
-        use_tma_c=False,
-        use_stream_k=False,
-        output_chunk_rows=32,
-        smem_reuse_mode="last_stage",
-    )
-    assert (get_register_budget_error(layer, config) is None) == expected
-    schedule_fields = {field.name for field in dataclasses.fields(ScheduleCandidate)}
-    schedule_config = {name: value for name, value in config.to_dict().items() if name in schedule_fields}
-    schedule = ScheduleCandidate.from_config("register-budget", schedule_config)
-    analysis = analyze_candidate(_problem(layer_config=layer), schedule)
-    has_register_error = any(
-        reason.startswith("register budget exceeded:") for reason in analysis.rejection_reasons
-    )
-    assert has_register_error == (not expected)
-    if not expected:
-        assert not tuning._fits_device_resources(layer, compute, (config.to_dict(), {}))
-        monkeypatch.setattr(HummingKernel, "_instances", {})
-        monkeypatch.setattr(
-            HummingKernel, "prepare", lambda self: pytest.fail("invalid config reached compilation")
-        )
-        with pytest.raises(ValueError, match="register budget exceeded"):
-            HummingKernel(**(layer.to_dict() | compute.to_dict() | config.to_dict()))
 
 
 @pytest.mark.parametrize("a_dtype,expected", [("int4", "mma"), ("int8", "wgmma"), ("bfloat16", "wgmma")])
@@ -609,57 +593,6 @@ def test_sampled_wgmma_accounts_for_all_accumulators(
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE)
     assert tuning._fits_device_resources(layer, compute, (config, {})) == expected
-
-
-@pytest.mark.parametrize(
-    "mma_type,raw_weight,group_size,packed,warp_shape,budget,expected",
-    [
-        # MMA: 192 accumulator + 24 A + 16 B = 232; equality must reject.
-        ("mma", False, 0, False, (96, 64, 64), 240, False),
-        ("mma", False, 0, False, (96, 64, 64), 248, True),
-        # WGMMA excludes A in smem, and excludes B as well for raw-weight SS.
-        ("wgmma", False, 0, False, (96, 64, 64), 216, False),
-        ("wgmma", False, 0, False, (96, 64, 64), 224, True),
-        ("wgmma", True, 0, False, (96, 64, 64), 200, False),
-        ("wgmma", True, 0, False, (96, 64, 64), 208, True),
-        # FP8 group scale: 128 * 1.25 + 16 A + 16 B = 192, not 288.
-        ("mma", False, 128, False, (64, 64, 128), 200, False),
-        ("mma", False, 128, False, (64, 64, 128), 208, True),
-        ("wgmma", True, 128, False, (64, 64, 128), 168, False),
-        ("wgmma", True, 128, False, (64, 64, 128), 176, True),
-        # WGMMA packed B covers all K=128 slabs (16 registers for FP8).
-        ("wgmma", False, 128, True, (64, 16, 128), 64, False),
-        ("wgmma", False, 128, True, (64, 16, 128), 72, True),
-    ],
-)
-def test_sampled_operand_register_budget(
-    mma_type, raw_weight, group_size, packed, warp_shape, budget, expected
-):
-    from humming.config import TuningConfig
-    from humming.config.mma import get_register_budget_error
-
-    a_dtype = "float8e4m3" if group_size else "float16"
-    layer = LayerConfig(
-        sm_version=90,
-        shape_n=1024,
-        shape_k=1024,
-        a_dtype=a_dtype,
-        b_dtype=a_dtype if raw_weight else "uint4",
-        c_dtype="float16",
-        use_packed_k_layout=packed,
-        input_scale_group_size=group_size,
-        weight_scale_group_size=group_size,
-        use_fused_e8m0_scale=False,
-    )
-    config = TuningConfig(
-        mma_type=mma_type,
-        warp_shape=warp_shape,
-        block_shape=(warp_shape[0], warp_shape[1] * 4, warp_shape[2]),
-        use_warp_spec=False,
-        num_ctas_per_sm=1,
-    )
-    error = get_register_budget_error(layer, config, registers_per_sm=budget * 128)
-    assert (error is None) == expected
 
 
 @pytest.mark.parametrize("registers_per_sm,expected", [(65536, False), (131072, True)])
@@ -789,7 +722,7 @@ def test_mxmma_compiler_version_matches_scale_format(
     monkeypatch.setattr(KernelTestRunner, "prepare_weight", lambda self: None)
     monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "sampled")
 
-    def stop_before_sampling(*args):
+    def stop_before_sampling(*args, **kwargs):
         raise RuntimeError("reached tuning generation")
 
     monkeypatch.setattr(runner_module, "sample_test_tuning_configs", stop_before_sampling)

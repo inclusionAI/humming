@@ -120,6 +120,8 @@ def test_f16_accumulation(test_case):
     assert config.c_dtype == dtypes.float16
     if config.use_block_scaled_mma:
         pytest.skip("block-scaled layers require FP32 accumulation")
+    if config.use_raw_weight and config.a_dtype.num_bits != config.b_dtype.num_bits:
+        pytest.skip("native mixed weight layout requires UMMA with FP32 accumulation")
     skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
 
     runner = KernelTestRunner(test_case)
