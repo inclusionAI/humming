@@ -196,6 +196,7 @@ SPECIAL_WEIGHT_CASES = (
 )
 
 
+@pytest.mark.filterwarnings(r"ignore:`torch\.jit\.script_method` is deprecated\. ")
 def test_forward_fullgraph():
     """Catch graph breaks in the forward path and reuse the graph across token counts."""
     torch._dynamo.reset()
