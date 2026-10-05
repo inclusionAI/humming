@@ -7,7 +7,7 @@ steps:
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/b200
-    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant+sampled1 bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -36,7 +36,7 @@ steps:
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/dgx-spark
-    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant+sampled1 bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
@@ -102,7 +102,7 @@ steps:
     env:
       # The agent environment hook pulls the image before Docker plugin setup.
       BUILDKITE_PLUGIN_DOCKER_IMAGE: *test_image
-    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant+sampled1 bash .buildkite/run-tests.sh
+    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
