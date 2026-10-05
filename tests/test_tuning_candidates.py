@@ -375,11 +375,13 @@ def test_sampled_backends_match_fixed_layout(
     monkeypatch,
 ):
     from humming.config import ComputeConfig
-    from humming.device import DeviceInfo
+    from humming.device import DeviceInfo, current_device
     from humming.kernel.humming import HummingKernel
     from humming.testing import tuning
 
-    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
+    if current_device.sm_version != sm_version:
+        pytest.skip(f"Requires SM{sm_version}, got SM{current_device.sm_version}")
+
     monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: 132))
     monkeypatch.setattr(DeviceInfo, "is_ppu", property(lambda self: False))
     monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
@@ -476,7 +478,11 @@ def test_output_chunk_rows_rejects_invalid_heights(output_chunk_rows):
 def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backend, monkeypatch):
     from humming.config import MmaType
     from humming.config.mma import get_default_mma_type
+    from humming.device import current_device
     from humming.tune.sm100 import Sm100Heuristics
+
+    if current_device.sm_version != sm_version:
+        pytest.skip(f"Requires SM{sm_version}, got SM{current_device.sm_version}")
 
     scale_config = {}
     if a_dtype == dtypes.float4e2m1:
