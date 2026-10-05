@@ -220,6 +220,9 @@ public:
 
   template <class WriteChunk>
   CUDA_INLINE void write_umma(MMA &mma, uint32_t slice_id, uint32_t slice_count, WriteChunk write_chunk) {
+    // Overlapped accumulators can emit other rows before row zero. Prepare
+    // channel scales before either output order reads them.
+    arith.may_process_on_smem_write(0, 0);
     // Specialize both output orders so scale-array indices stay compile-time constants.
     if constexpr (MMA::kAccumulatorStride != 0 && MMA::kAccumulatorStride < WarpShape::M) {
       if (mma.output_chunk_index(0) != 0) write_umma_order<true>(mma, slice_id, slice_count, write_chunk);
