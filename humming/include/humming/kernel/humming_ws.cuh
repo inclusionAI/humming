@@ -31,7 +31,8 @@ struct WarpSpecializationRegisterAllocation {
   static constexpr uint32_t kLoadThreadRegisters = TuningConfig::kNumMathThreads > 256 || (TuningConfig::kNumCtasPerSm == 1 && ElementA::kBits != 16) ? 40 : 24;
   static constexpr uint32_t kAccumulatorRegistersPerThread = sizeof(typename MMA::CRegistersArrayType) / sizeof(uint32_t) * (MMA::final_regs_c_index() + 1);
   static constexpr uint32_t kEstimatedMathThreadRegisters = MIN(232, MAX(128, kAccumulatorRegistersPerThread * 2 + 96));
-  static constexpr uint32_t kPreferredMathThreadRegisters = TuningConfig::kNumMathThreads > 256 ? 96 : kEstimatedMathThreadRegisters;
+  // setmaxnreg requires multiples of eight; the physical budget below is rounded down.
+  static constexpr uint32_t kPreferredMathThreadRegisters = TuningConfig::kNumMathThreads > 256 ? 96 : CEIL_DIV(kEstimatedMathThreadRegisters, 8) * 8;
   static constexpr uint32_t kNumWarps = TuningConfig::kNumThreads / 32;
   static constexpr uint32_t kRegisterAllocationGranularityPerWarp = 256;
   static constexpr uint32_t kRegisterBudgetPerWarp =

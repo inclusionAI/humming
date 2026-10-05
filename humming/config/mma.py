@@ -136,6 +136,7 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
         # count for its preferred budget, independently of our spill estimate.
         physical_accumulators = accumulator_registers * (2 if has_group_accumulator else 1)
         preferred_budget = min(232, max(128, physical_accumulators * 2 + 96))
+        preferred_budget = math.ceil(preferred_budget / 8) * 8
         needs_more_load_registers = num_math_threads > 256 or (
             tuning_config.num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
         )
