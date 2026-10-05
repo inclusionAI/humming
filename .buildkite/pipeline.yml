@@ -95,7 +95,7 @@ steps:
     label: "Humming Tests (H200)"
     key: humming-h200-ci
     agents:
-      queue: h200_18gb
+      queue: h200_35gb
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/h200
