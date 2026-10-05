@@ -162,11 +162,15 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
             buffer_registers = warp_k * layer_config.a_dtype.num_bits / 64
     if has_group_accumulator:
         accumulator_registers *= 1.25
-    demand = accumulator_registers + buffer_registers
+    input_scale_registers = 0
+    if mma_type == MmaType.WGMMA and layer_config.input_scale_group_size > 0:
+        input_scale_registers = math.ceil(warp_m / 16) * 4
+    demand = accumulator_registers + buffer_registers + input_scale_registers
     if demand >= math_budget - 8:
         return (
             f"register budget exceeded: accumulator {accumulator_registers:g} + "
-            f"single-buffer {buffer_registers:g} = {demand:g} must be < "
+            f"single-buffer {buffer_registers:g} + input scales {input_scale_registers:g} "
+            f"= {demand:g} must be < "
             f"math-thread budget {math_budget:g} - 8 ({math_budget - 8:g})"
         )
     return None

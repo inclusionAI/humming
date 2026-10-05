@@ -347,9 +347,11 @@ public:
         constexpr uint32_t kFullPackets = kNumBSPerGroup / 4;
         constexpr uint32_t kTailScales = kNumBSPerGroup % 4;
 
-        PRAGMA_UNROLL
-        for (uint32_t i = 0; i < kFullPackets; i++)
-          dq_bs_vals[i] = F8Conversion<ElementBS>::num42float4(bs_vals[i]);
+        if constexpr (kFullPackets > 0) {
+          PRAGMA_UNROLL
+          for (uint32_t i = 0; i < kFullPackets; i++)
+            dq_bs_vals[i] = F8Conversion<ElementBS>::num42float4(bs_vals[i]);
+        }
 
         if constexpr (kTailScales != 0) {
           uint32_t packed = 0;
