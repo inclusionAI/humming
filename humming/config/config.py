@@ -591,7 +591,9 @@ class TuningConfig(BaseHummingConfig):
             self.use_cp_async = current_device.sm_major >= 8
 
         if self.use_warp_spec:
-            assert self.use_tma or self.use_cp_async, "warp specialization requires TMA or cp.async"
+            assert self.use_cp_async, "warp specialization requires cp.async"
+        if self.mma_type in (MmaType.WGMMA, MmaType.UMMA):
+            assert self.use_cp_async, f"{self.mma_type.value} requires cp.async"
 
         self.num_math_threads = math.prod(self.block_shape) // math.prod(self.warp_shape) * 32
         if self.use_warp_spec:

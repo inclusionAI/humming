@@ -404,7 +404,8 @@ def test_sampled_backends_match_fixed_layout(
     assert {config["mma_type"] for config in configs} == expected
     assert "mma_type" not in layer.to_dict()
     for config in configs:
-        assert not config["use_warp_spec"] or config["use_tma"] or config["use_cp_async"]
+        requires_cp_async = config["use_warp_spec"] or config["mma_type"] in ("wgmma", "umma")
+        assert not requires_cp_async or config["use_cp_async"]
         # Exercise the real kernel validators and code generation without compiling.
         tuning_values = tuning.create_tuning_config(config).to_dict()
         kernel = HummingKernel(**(layer.to_dict() | compute.to_dict() | tuning_values))

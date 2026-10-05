@@ -269,7 +269,8 @@ def _generate_transfer_candidates(
             continue
         if (use_tma or signature["use_warp_spec"]) and not signature["use_mbarrier"]:
             continue
-        if signature["use_warp_spec"] and not (use_tma or signature["use_cp_async"]):
+        requires_cp_async = signature["use_warp_spec"] or mma_type in (MmaType.WGMMA, MmaType.UMMA)
+        if requires_cp_async and not signature["use_cp_async"]:
             continue
         if compute_config.gemm_type == GemmType.INDEXED:
             tma_values.update(use_tma_a=False, use_tma_as=False, use_tma_as2=False, use_tma_c=False)
