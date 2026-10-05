@@ -95,7 +95,7 @@ steps:
     label: "Base Tests (H200)"
     key: humming-h200-ci
     agents:
-      queue: h200_35gb
+      queue: h200_18gb
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/h200
@@ -128,7 +128,7 @@ steps:
     key: humming-b200-sampled-ci
     concurrency_group: humming/b200-sampled
     depends_on: approve-b200-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
   - input: "Run Large Sampled Tests (DGX Spark)"
     key: approve-dgx-spark-sampled-tests
@@ -138,7 +138,7 @@ steps:
     key: humming-dgx-spark-sampled-ci
     concurrency_group: humming/dgx-spark-sampled
     depends_on: approve-dgx-spark-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
   - input: "Run Large Sampled Tests (L4)"
     key: approve-l4-sampled-tests
@@ -148,7 +148,7 @@ steps:
     key: humming-l4-sampled-ci
     concurrency_group: humming/l4-sampled
     depends_on: approve-l4-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
   - input: "Run Large Sampled Tests (H200)"
     key: approve-h200-sampled-tests
@@ -156,6 +156,8 @@ steps:
   - <<: *h200_tests
     label: "Large Sampled Tests (H200)"
     key: humming-h200-sampled-ci
+    agents:
+      queue: h200_35gb
     concurrency_group: humming/h200-sampled
     depends_on: approve-h200-sampled-tests
-    command: HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
+    command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
