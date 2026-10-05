@@ -39,18 +39,20 @@ DTYPE_MAP = {
     dtypes.float4e0m3: "e2m1",
 }
 
-HIDDEN_FORMAT_DTYPES = (dtypes.float8e3m4, dtypes.float4e0m3)
+UNDOCUMENTED_FP_DTYPES = (dtypes.float8e3m4, dtypes.float4e0m3)
+# Architectures verified to execute the undocumented E3M4/E0M3 encodings. Add an architecture only after
+# testing on hardware: SM107 raises an illegal instruction for them.
+UNDOCUMENTED_FP_SM_VERSIONS = (100, 103, 120, 121)
 
 
-def has_hidden_format_support(sm_version: int) -> bool:
-    # SM107 raises an illegal instruction for the E3M4/E0M3 tensor-core and conversion encodings.
-    return sm_version >= 100 and sm_version != 107
+def supports_undocumented_fp_dtypes(sm_version: int) -> bool:
+    return sm_version in UNDOCUMENTED_FP_SM_VERSIONS
 
 
-def uses_hidden_format_operand(a_dtype: dtypes.DataType, b_dtype: dtypes.DataType | None = None) -> bool:
+def uses_undocumented_fp_operand(a_dtype: dtypes.DataType, b_dtype: dtypes.DataType | None = None) -> bool:
     # Weights narrower than the activation are dequantized in software instead of fed to the tensor core.
-    has_raw_hidden_weight = b_dtype in HIDDEN_FORMAT_DTYPES and b_dtype.num_bits == a_dtype.num_bits
-    return a_dtype in HIDDEN_FORMAT_DTYPES or has_raw_hidden_weight
+    has_raw_undocumented_weight = b_dtype in UNDOCUMENTED_FP_DTYPES and b_dtype.num_bits == a_dtype.num_bits
+    return a_dtype in UNDOCUMENTED_FP_DTYPES or has_raw_undocumented_weight
 
 
 SF_DTYPE_MAP = {

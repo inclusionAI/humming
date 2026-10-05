@@ -2,6 +2,7 @@ import torch
 
 from humming import dtypes, ops
 from humming.config import ActivationType, InputQuantizationMode, ProcessInputLayoutType
+from humming.config.mma import UNDOCUMENTED_FP_DTYPES, supports_undocumented_fp_dtypes
 from humming.utils.math import is_pow_of_two, round_up
 
 ACTIVATION_TYPE_IMPL_TEST_MAP = {
@@ -360,7 +361,7 @@ def skip_if_process_input_unsupported(quant_dtype=None, group_scale_dtype=None):
         if dtype in (dtypes.float8e4m3, dtypes.float8e5m2) and capability < 89:
             pytest.skip(f"{dtype} requires SM89+")
 
-        if dtype in (dtypes.float8e3m4, dtypes.float4e0m3) and capability not in (100, 103, 120, 121):
+        if dtype in UNDOCUMENTED_FP_DTYPES and not supports_undocumented_fp_dtypes(capability):
             pytest.skip(f"{dtype} requires SM100/103/120/121 cubin patching")
 
         if dtype == dtypes.float4e2m1 and capability < 100:
