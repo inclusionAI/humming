@@ -394,6 +394,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           s2r.load_channel(scheduler.slice_id);
           if constexpr (Consumer::kHasChannelData && kSeparateOutputStorage) {
             if (group + 1 == kOutputGroups) {
+              // Order channel reads before the producer's next async overwrite.
+              tma_fence_async_shared();
               ctx.sync_math_threads();
               consumer.arrive(kNumStages);
             }
