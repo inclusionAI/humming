@@ -301,7 +301,8 @@ BLOCK_SCALED_CASES = FORMAT_CASES + ZERO_POINT_CASES + NATIVE_QUANTIZATION_CASES
 def test_block_scaled(test_case):
     config = test_case.layer_config
     assert get_default_mma_type(config) in (MmaType.UMMA, MmaType.MXMMA)
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
+    mma_type = get_default_mma_type(config).value
+    skip_if_unsupported(a_dtype=config.a_dtype, b_dtype=config.b_dtype, mma_type=mma_type)
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)
 
