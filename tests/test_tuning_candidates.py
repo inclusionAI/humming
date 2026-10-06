@@ -515,6 +515,48 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backe
 
 
 @pytest.mark.parametrize(
+    "a_dtype,b_dtype,expected_block_shape",
+    (
+        (dtypes.float8e4m3, dtypes.float8e4m3, (256, 128, 128)),
+        (dtypes.float4e2m1, dtypes.float4e2m1, (128, 256, 128)),
+    ),
+)
+def test_sm107_raw_umma_uses_deep_cooperative_pipeline(a_dtype, b_dtype, expected_block_shape, monkeypatch):
+    from humming.device import current_device
+    from humming.tune.sm107 import Sm107Heuristics
+
+    if current_device.sm_version != 107:
+        pytest.skip(f"Requires SM107, got SM{current_device.sm_version}")
+
+    scale_config = {}
+    if a_dtype == dtypes.float4e2m1:
+        scale_config = dict(
+            as_dtype=dtypes.float8e4m3,
+            bs_dtype=dtypes.float8e4m3,
+            input_scale_group_size=16,
+            weight_scale_group_size=16,
+            input_quant_mode="dynamic_group",
+        )
+    config = LayerConfig(
+        sm_version=107,
+        shape_n=4096,
+        shape_k=4096,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        c_dtype=dtypes.bfloat16,
+        **scale_config,
+    )
+
+    monkeypatch.delenv("HUMMING_TEST_TUNING_SOURCE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tuning = Sm107Heuristics.get_config(config, 4096)
+    assert tuning["block_shape"] == expected_block_shape
+    assert tuning["num_stages"] == 6
+    assert tuning["umma_cta_group_size"] == 2
+    assert tuning["output_chunk_rows"] == 32
+
+
+@pytest.mark.parametrize(
     "sm_version,a_dtype,shape_n,use_f16_accum,expected",
     (
         (103, "bfloat16", 256, False, "umma"),
