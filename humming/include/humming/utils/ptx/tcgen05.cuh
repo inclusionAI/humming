@@ -125,9 +125,11 @@ CUDA_INLINE void tcgen05_mma_i8(uint32_t d, uint64_t a, uint64_t b, bool accumul
 
 
 template <uint32_t kN, uint32_t kAFormat, uint32_t kBFormat, uint32_t kCtaGroupSize = 1>
-CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint32_t a, uint64_t b, bool accumulate) {
+CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint32_t a, uint64_t b, bool accumulate, uint32_t mma_k = 32) {
   constexpr uint32_t input_format = (kAFormat << 7) | (kBFormat << 10);
-  constexpr uint32_t descriptor = (1u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  constexpr uint32_t descriptor_base = (1u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  // Bit 29 selects the dense K64 form; the block-scaled kind uses bit 31 instead.
+  uint32_t descriptor = descriptor_base | (uint32_t(mma_k == 64) << 29);
   if constexpr (kCtaGroupSize == 2) {
     asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
                  "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], [%1], %2, %3, {%5,%5,%5,%5,%5,%5,%5,%5}, p; }" ::"r"(d),
@@ -141,9 +143,11 @@ CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint32_t a, uint64_t b, bool acc
 
 
 template <uint32_t kN, uint32_t kAFormat, uint32_t kBFormat, uint32_t kCtaGroupSize = 1>
-CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint64_t a, uint64_t b, bool accumulate) {
+CUDA_INLINE void tcgen05_mma_f8f6f4(uint32_t d, uint64_t a, uint64_t b, bool accumulate, uint32_t mma_k = 32) {
   constexpr uint32_t input_format = (kAFormat << 7) | (kBFormat << 10);
-  constexpr uint32_t descriptor = (1u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  constexpr uint32_t descriptor_base = (1u << 4) | input_format | ((kN / 8) << 17) | ((8u * kCtaGroupSize) << 24);
+  // Bit 29 selects the dense K64 form; the block-scaled kind uses bit 31 instead.
+  uint32_t descriptor = descriptor_base | (uint32_t(mma_k == 64) << 29);
   if constexpr (kCtaGroupSize == 2) {
     asm volatile("{ .reg .pred p; setp.ne.b32 p, %4, 0; "
                  "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], %1, %2, %3, {%5,%5,%5,%5,%5,%5,%5,%5}, p; }" ::"r"(d),
@@ -218,10 +222,10 @@ CUDA_INLINE void tcgen05_ld_16x128b_x2(uint32_t address, uint32_t *values) {
 
 template <uint32_t kN, uint32_t kWeightFormat, uint32_t kInputFormat, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_mma_mxf8f6f4(uint32_t d, uint32_t a, uint64_t b,
-                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate) {
+                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate, uint32_t mma_k = 32) {
   constexpr uint32_t descriptor_base = (kWeightFormat << 7) | (kInputFormat << 10) |
                                        ((kN / 8) << 17) | (1u << 23) | (kCtaGroupSize << 27);
-  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29);
+  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29) | (uint32_t(mma_k == 64) << 31);
   if constexpr (kCtaGroupSize == 2) {
     asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
                  "tcgen05.mma.cta_group::2.kind::mxf8f6f4.block_scale.block32 "
@@ -238,10 +242,10 @@ CUDA_INLINE void tcgen05_mma_mxf8f6f4(uint32_t d, uint32_t a, uint64_t b,
 
 template <uint32_t kN, uint32_t kWeightFormat, uint32_t kInputFormat, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_mma_mxf8f6f4(uint32_t d, uint64_t a, uint64_t b,
-                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate) {
+                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate, uint32_t mma_k = 32) {
   constexpr uint32_t descriptor_base = (kWeightFormat << 7) | (kInputFormat << 10) |
                                        ((kN / 8) << 17) | (1u << 23) | (kCtaGroupSize << 27);
-  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29);
+  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29) | (uint32_t(mma_k == 64) << 31);
   if constexpr (kCtaGroupSize == 2) {
     asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
                  "tcgen05.mma.cta_group::2.kind::mxf8f6f4.block_scale.block32 "
@@ -324,12 +328,14 @@ CUDA_INLINE void tcgen05_mma_mxf4nvf4(uint32_t d, uint32_t a, uint64_t b,
 template <uint32_t kN, uint32_t kGroupSize, bool kScaleIsE4M3, uint32_t kCtaGroupSize = 1,
           bool kWeightIsE0M3 = false, bool kInputIsE0M3 = false>
 CUDA_INLINE void tcgen05_mma_mxf4nvf4(uint32_t d, uint64_t a, uint64_t b,
-                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate, bool use_k96 = false) {
+                                      uint32_t sfa, uint32_t sfb, uint32_t scale_id, bool accumulate, uint32_t mma_k = 64) {
   static_assert(!(kWeightIsE0M3 || kInputIsE0M3) || kGroupSize == 16, "E0M3 requires block16");
   // Undocumented E0M3 is format 0; the public E2M1 format is 1.
   constexpr uint32_t descriptor_base = (uint32_t(!kWeightIsE0M3) << 7) | (uint32_t(!kInputIsE0M3) << 10) | ((kN / 8) << 17) |
                                        (uint32_t(!kScaleIsE4M3) << 23) | (kCtaGroupSize << 27);
-  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29) | (uint32_t(use_k96) << 31);
+  // Dense K size is {bit 3, bit 31}: 0 = K64, 1 = K96, 2 = K128.
+  uint32_t k_size = (uint32_t(mma_k == 96) << 31) | (uint32_t(mma_k == 128) << 3);
+  uint32_t descriptor = descriptor_base | (scale_id << 4) | (scale_id << 29) | k_size;
   if constexpr (kCtaGroupSize == 2 && kGroupSize == 16) {
     asm volatile("{ .reg .pred p; setp.ne.b32 p, %6, 0; "
                  "tcgen05.mma.cta_group::2.kind::mxf4nvf4.block_scale.block16 "

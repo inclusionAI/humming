@@ -17,7 +17,12 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   static constexpr bool kUseBlockScale = Ctx::kUseBlockScaledMma;
   static constexpr uint32_t kOperandColumns = Ctx::kUseUmmaSs ? 0 : Ctx::kWarpIters * 8;
   static constexpr bool kHasK96 = Ctx::LayerConfig::kSmVersion == 103 || Ctx::LayerConfig::kSmVersion == 107;
-  static constexpr bool kUseK96 = kHasK96 && Ctx::kUseUmmaSs && Ctx::ElementA::kBits == 4 && BlockShape::K % 256 == 0;
+  // SM107 doubles the dense K of FP4 (K128) and FP8 (K64) instructions; used only without mixed precision.
+  static constexpr bool kHasDoubleK = Ctx::LayerConfig::kSmVersion == 107 && Ctx::ElementA::kBits <= 8 &&
+                                      !std::is_same<typename Ctx::ElementA, Int8>::value && !SharedStorage::kExpandUmmaWeight;
+  static constexpr uint32_t kDoubleK = 2 * Ctx::kPartMmaShapeK;
+  static constexpr bool kUseDoubleK = kHasDoubleK && Ctx::kUseUmmaSs && BlockShape::K % kDoubleK == 0;
+  static constexpr bool kUseK96 = kHasK96 && !kUseDoubleK && Ctx::kUseUmmaSs && Ctx::ElementA::kBits == 4 && BlockShape::K % 256 == 0;
   static constexpr bool kUseFp4 = Ctx::ElementA::kBits == 4;
   static constexpr uint32_t kScaleGroupSize = Ctx::LayerConfig::kMmaScaleGroupSize;
   static constexpr uint32_t kScalesPerIter = kUseBlockScale ? Ctx::kPartMmaShapeK / kScaleGroupSize : 1;
@@ -277,15 +282,18 @@ struct UMMA : WMMA<Ctx, ArithClass> {
   CUDA_INLINE void issue(uint32_t stage_id, uint32_t buffer, bool is_first, uint32_t k_block) {
     uint32_t base = tmem_column + ctx.math_group * kGroupColumns;
     uint32_t accumulator = base + kAccumulatorColumn + accumulator_phase * kAccumulatorStride;
-    constexpr uint32_t kIssueIters = kUseK96 ? BlockShape::K / 256 * 3 : Ctx::kWarpIters;
+    constexpr uint32_t kIssueIters = kUseDoubleK ? BlockShape::K / kDoubleK
+                                     : kUseK96   ? BlockShape::K / 256 * 3
+                                                 : Ctx::kWarpIters;
     PRAGMA_UNROLL
     for (uint32_t k = 0; k < kIssueIters; k++) {
       bool use_k96 = kUseK96 && k % 3 != 0;
-      uint32_t k_offset = kUseK96 ? k / 3 * 256 + (k % 3 == 0 ? 0 : (k % 3 == 1 ? 64 : 160))
-                                  : k * Ctx::kPartMmaShapeK;
-      uint32_t mma_k = use_k96 ? 96 : Ctx::kPartMmaShapeK;
+      uint32_t k_offset = kUseDoubleK ? k * kDoubleK
+                          : kUseK96   ? k / 3 * 256 + (k % 3 == 0 ? 0 : (k % 3 == 1 ? 64 : 160))
+                                      : k * Ctx::kPartMmaShapeK;
+      uint32_t mma_k = kUseDoubleK ? kDoubleK : (use_k96 ? 96 : Ctx::kPartMmaShapeK);
       if constexpr (Ctx::kUseUmmaSs && kUseBlockScale) {
-        // A K96 instruction can consume scale words on both sides of a boundary.
+        // A K96 or double-K instruction can consume more than one scale word.
         PRAGMA_UNROLL
         for (uint32_t word = CEIL_DIV(k_offset, 4 * kScaleGroupSize);
              word < CEIL_DIV(k_offset + mma_k, 4 * kScaleGroupSize); word++)
@@ -352,7 +360,7 @@ struct UMMA : WMMA<Ctx, ArithClass> {
                                  std::is_same<ElementB, Float4E0M3>::value,
                                  std::is_same<typename Ctx::ElementA, Float4E0M3>::value>(
                 accumulator, weight_operand, descriptor,
-                weight_scale, input_scale, scale_id, !is_first || k != 0, use_k96);
+                weight_scale, input_scale, scale_id, !is_first || k != 0, mma_k);
           } else {
             tcgen05_mma_mxf4nvf4<WarpShape::M, kScaleGroupSize, kScaleIsE4M3, Ctx::kUmmaCtaGroupSize,
                                  std::is_same<ElementB, Float4E0M3>::value,
@@ -363,14 +371,14 @@ struct UMMA : WMMA<Ctx, ArithClass> {
         } else {
           tcgen05_mma_mxf8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(
               accumulator, weight_operand, descriptor,
-              weight_scale, input_scale, scale_id, !is_first || k != 0);
+              weight_scale, input_scale, scale_id, !is_first || k != 0, mma_k);
         }
       } else if constexpr (kUseInt8) {
         tcgen05_mma_i8<WarpShape::M, Ctx::kUmmaCtaGroupSize>(accumulator,
                                                            weight_operand, descriptor, !is_first || k != 0);
       } else if constexpr (kUseFp8) {
         tcgen05_mma_f8f6f4<WarpShape::M, kWeightFormat, kInputFormat, Ctx::kUmmaCtaGroupSize>(accumulator,
-                                                                                              weight_operand, descriptor, !is_first || k != 0);
+                                                                                              weight_operand, descriptor, !is_first || k != 0, mma_k);
       } else {
         tcgen05_mma_f16<WarpShape::M, kUseBf16, Ctx::kUmmaCtaGroupSize>(accumulator,
                                                                         weight_operand, descriptor, !is_first || k != 0);
