@@ -210,7 +210,7 @@ def test_mxfp4_input_schema_compatibility(checkpoint_format, group_size, monkeyp
 
 
 @pytest.mark.parametrize("sm_version", [89, 90, 100, 103, 107, 110, 120, 121])
-@pytest.mark.parametrize("a_dtype", ["float16", "bfloat16", "float8e4m3", "float8e5m2"])
+@pytest.mark.parametrize("a_dtype", ["float16", "bfloat16", "float8e4m3", "float8e5m2", "float8e3m4"])
 @pytest.mark.parametrize("group_size", [16, 32, 64, 128])
 @pytest.mark.parametrize("bs_dtype", [None, "bfloat16", "float8e4m3", "float8e8m0"])
 @pytest.mark.parametrize("use_group_input_scale", [False, True])
@@ -227,23 +227,39 @@ def test_fp4_weight_schema_compatibility(
         bs_dtype=bs_dtype,
         weight_scale_group_size=group_size,
     )
-    assert inputs.is_compatible_with(weight, torch.bfloat16) == (not has_fp8_activation or group_size >= 32)
+    has_supported_groups = not has_fp8_activation or group_size >= 32
+    has_supported_dtype = a_dtype != "float8e3m4" or sm_version in (100, 103, 120, 121)
+    assert inputs.is_compatible_with(weight, torch.bfloat16) == (has_supported_groups and has_supported_dtype)
 
 
 @pytest.mark.parametrize("sm_version", [89, 90, 100, 103, 107, 110, 120, 121])
+@pytest.mark.parametrize("operand_dtype", ["float4e2m1", "float4e0m3"])
 @pytest.mark.parametrize("bs_dtype", ["bfloat16", "float8e4m3", "float8e8m0"])
 @pytest.mark.parametrize("as_dtype", ["float32", "float8e4m3", "float8e8m0"])
-def test_nvfp4_input_schema_compatibility(sm_version, bs_dtype, as_dtype, monkeypatch):
+def test_nvfp4_input_schema_compatibility(sm_version, operand_dtype, bs_dtype, as_dtype, monkeypatch):
     monkeypatch.setattr("humming.schema.humming.current_device", SimpleNamespace(sm_version=sm_version))
     inputs = HummingInputSchema(
-        a_dtype=dtypes.float4e2m1,
+        a_dtype=operand_dtype,
         input_scale_group_size=16,
         input_scale_dtype=as_dtype,
     )
     weight = HummingWeightSchema(
-        b_dtype=dtypes.float4e2m1,
+        b_dtype=operand_dtype,
         bs_dtype=bs_dtype,
         weight_scale_group_size=16,
     )
-    is_supported = sm_version >= 100 and bs_dtype in ("float8e4m3", "float8e8m0") and as_dtype == bs_dtype
+    has_supported_dtype = sm_version >= 100
+    if operand_dtype == "float4e0m3":
+        has_supported_dtype = sm_version in (100, 103, 120, 121)
+    is_supported = has_supported_dtype and bs_dtype in ("float8e4m3", "float8e8m0") and as_dtype == bs_dtype
     assert inputs.is_compatible_with(weight, torch.bfloat16) == is_supported
+
+
+@pytest.mark.parametrize("sm_version", [89, 90, 100, 103, 107, 110, 120, 121])
+@pytest.mark.parametrize("a_dtype", ["float16", "bfloat16"])
+def test_undocumented_weight_schema_compatibility(sm_version, a_dtype, monkeypatch):
+    monkeypatch.setattr("humming.schema.humming.current_device", SimpleNamespace(sm_version=sm_version))
+    inputs = HummingInputSchema(a_dtype=a_dtype)
+    weight = HummingWeightSchema(b_dtype=dtypes.float8e3m4, weight_scale_group_size=32)
+    # Wider activations use software dequantization, so no undocumented hardware operand is required.
+    assert inputs.is_compatible_with(weight, torch.bfloat16)

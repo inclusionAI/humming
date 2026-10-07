@@ -6,6 +6,7 @@ import torch
 from humming import dtypes
 from humming.config import InputQuantizationMode
 from humming.config.enum import WeightScale2Type, WeightScaleType
+from humming.config.mma import supports_undocumented_fp_dtypes, uses_undocumented_fp_operand
 from humming.device import current_device
 from humming.schema.base import BaseInputSchema, BaseWeightSchema
 from humming.utils.weight import decode_e5m3_scale, dequantize_weight, quantize_weight
@@ -453,12 +454,15 @@ def is_humming_schema_compatible(
         dtypes.int4: 80,
         dtypes.float8e4m3: 89,
         dtypes.float8e5m2: 89,
-        dtypes.float8e3m4: 120,
+        dtypes.float8e3m4: 100,
         dtypes.float4e2m1: 100,
-        dtypes.float4e0m3: 120,
+        dtypes.float4e0m3: 100,
     }
 
     if sm_version < dtype_min_sm_version_map.get(a_dtype, 9999):
+        return False
+
+    if uses_undocumented_fp_operand(a_dtype, b_dtype) and not supports_undocumented_fp_dtypes(sm_version):
         return False
 
     if b_dtype.num_bits > min(8, a_dtype.num_bits):
