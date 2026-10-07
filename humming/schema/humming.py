@@ -507,13 +507,14 @@ def is_humming_schema_compatible(
         if input_group_size != weight_group_size and (not is_mxfp4_weight or sm_version >= 120):
             return False
 
+    uses_fp4_weights = b_dtype in [dtypes.float4e2m1, dtypes.float4e0m3]
     if 0 < weight_group_size < 16:
         return False
     elif a_dtype.num_bits == 8 and (0 < weight_group_size < 32 or 0 < input_group_size < 32):
         return False
     elif a_dtype == dtypes.int4 and (0 < weight_group_size < 64 or 0 < input_group_size < 64):
         return False
-    elif weight_group_size > 0 and b_dtype in [dtypes.float4e2m1, dtypes.float4e0m3]:
+    elif a_dtype.num_bits < 16 and weight_group_size > 0 and uses_fp4_weights:
         as_dtype = input_schema.input_scale_dtype
         if weight_group_size > 0 and bs_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]:
             return False
