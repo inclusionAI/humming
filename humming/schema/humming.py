@@ -454,7 +454,7 @@ def is_humming_schema_compatible(
         dtypes.float8e4m3: 89,
         dtypes.float8e5m2: 89,
         dtypes.float8e3m4: 120,
-        dtypes.float4e2m1: 120,
+        dtypes.float4e2m1: 100,
         dtypes.float4e0m3: 120,
     }
 
@@ -504,8 +504,12 @@ def is_humming_schema_compatible(
         and input_schema.input_scale_dtype in (None, dtypes.float32)
     )
     if input_group_size > 0 and weight_group_size > 0:
-        if input_group_size != weight_group_size and (not is_mxfp4_weight or sm_version >= 120):
-            return False
+        if input_group_size != weight_group_size:
+            if not is_mxfp4_weight or sm_version >= 120:
+                return False
+            has_compatible_input_scale = input_schema.input_scale_dtype == bs_dtype or is_fp8_gs128_mxfp4_gs32
+            if a_dtype.num_bits == 8 and not has_compatible_input_scale:
+                return False
 
     uses_fp4_weights = b_dtype in [dtypes.float4e2m1, dtypes.float4e0m3]
     if 0 < weight_group_size < 16:
@@ -514,22 +518,13 @@ def is_humming_schema_compatible(
         return False
     elif a_dtype == dtypes.int4 and (0 < weight_group_size < 64 or 0 < input_group_size < 64):
         return False
-    elif a_dtype.num_bits < 16 and weight_group_size > 0 and uses_fp4_weights:
+    elif a_dtype.num_bits == 4 and weight_group_size > 0 and uses_fp4_weights:
         as_dtype = input_schema.input_scale_dtype
-        if weight_group_size > 0 and bs_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]:
+        if bs_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]:
             return False
-        if (
-            input_group_size > 0
-            and as_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]
-            and not is_fp8_gs128_mxfp4_gs32
-        ):
+        if input_group_size > 0 and as_dtype not in [dtypes.float8e8m0, dtypes.float8e4m3]:
             return False
-        if (
-            input_group_size > 0
-            and weight_group_size > 0
-            and as_dtype != bs_dtype
-            and not is_fp8_gs128_mxfp4_gs32
-        ):
+        if input_group_size > 0 and as_dtype != bs_dtype:
             return False
 
     return True

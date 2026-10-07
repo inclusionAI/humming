@@ -1,5 +1,7 @@
 """MXFP4 W4A8 coverage with grouped FP8 inputs."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -7,7 +9,7 @@ from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig
 from humming.config.mma import get_default_mma_type
 from humming.schema.compressed_tensors import CompressedTensorsInputSchema
-from humming.schema.humming import HummingWeightSchema
+from humming.schema.humming import HummingInputSchema, HummingWeightSchema
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -188,9 +190,9 @@ def test_mxfp4_case_coverage():
 
 
 @pytest.mark.parametrize("checkpoint_format", ["mxfp4-pack-quantized", "float-quantized"])
-@pytest.mark.parametrize("group_size", [64, 128])
-def test_mxfp4_input_schema_compatibility(checkpoint_format, group_size):
-    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_mxfp4_input_schema_compatibility(checkpoint_format, group_size, monkeypatch):
+    monkeypatch.setattr("humming.schema.humming.current_device", SimpleNamespace(sm_version=90))
     weight = HummingWeightSchema(
         b_dtype=dtypes.float4e2m1,
         bs_dtype=dtypes.float8e8m0,
@@ -204,4 +206,44 @@ def test_mxfp4_input_schema_compatibility(checkpoint_format, group_size):
         group_size=group_size,
     ).to_humming_schema(torch.bfloat16)
     assert inputs.input_scale_dtype is None
-    assert inputs.is_compatible_with(weight, torch.bfloat16) == (group_size == INPUT_GROUP_SIZE)
+    assert inputs.is_compatible_with(weight, torch.bfloat16) == (group_size in (32, INPUT_GROUP_SIZE))
+
+
+@pytest.mark.parametrize("sm_version", [89, 90, 100, 103, 107, 110, 120, 121])
+@pytest.mark.parametrize("a_dtype", ["float16", "bfloat16", "float8e4m3", "float8e5m2"])
+@pytest.mark.parametrize("group_size", [16, 32, 64, 128])
+@pytest.mark.parametrize("bs_dtype", [None, "bfloat16", "float8e4m3", "float8e8m0"])
+@pytest.mark.parametrize("use_group_input_scale", [False, True])
+def test_fp4_weight_schema_compatibility(
+    sm_version, a_dtype, group_size, bs_dtype, use_group_input_scale, monkeypatch
+):
+    monkeypatch.setattr("humming.schema.humming.current_device", SimpleNamespace(sm_version=sm_version))
+    activation_dtype = dtypes.DataType.from_str(a_dtype)
+    has_fp8_activation = activation_dtype.num_bits == 8
+    input_group_size = group_size if has_fp8_activation and use_group_input_scale else 0
+    inputs = HummingInputSchema(a_dtype=activation_dtype, input_scale_group_size=input_group_size)
+    weight = HummingWeightSchema(
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=bs_dtype,
+        weight_scale_group_size=group_size,
+    )
+    assert inputs.is_compatible_with(weight, torch.bfloat16) == (not has_fp8_activation or group_size >= 32)
+
+
+@pytest.mark.parametrize("sm_version", [89, 90, 100, 103, 107, 110, 120, 121])
+@pytest.mark.parametrize("bs_dtype", ["bfloat16", "float8e4m3", "float8e8m0"])
+@pytest.mark.parametrize("as_dtype", ["float32", "float8e4m3", "float8e8m0"])
+def test_nvfp4_input_schema_compatibility(sm_version, bs_dtype, as_dtype, monkeypatch):
+    monkeypatch.setattr("humming.schema.humming.current_device", SimpleNamespace(sm_version=sm_version))
+    inputs = HummingInputSchema(
+        a_dtype=dtypes.float4e2m1,
+        input_scale_group_size=16,
+        input_scale_dtype=as_dtype,
+    )
+    weight = HummingWeightSchema(
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=bs_dtype,
+        weight_scale_group_size=16,
+    )
+    is_supported = sm_version >= 100 and bs_dtype in ("float8e4m3", "float8e8m0") and as_dtype == bs_dtype
+    assert inputs.is_compatible_with(weight, torch.bfloat16) == is_supported
