@@ -574,11 +574,22 @@ def test_sm90_default_backend_supports_activation(a_dtype, expected):
 
 
 @pytest.mark.parametrize(
-    "warp_m,warp_n,group_size,num_ctas,expected",
-    [(176, 16, 128, 4, False), (80, 64, 128, 3, False), (128, 64, 0, 3, False), (32, 16, 128, 2, True)],
+    "warp_m,warp_n,input_group,weight_group,block_k,num_ctas,split_issue_wait,expected",
+    [
+        (176, 16, 128, 128, 128, 4, False, False),
+        (80, 64, 128, 128, 128, 3, False, False),
+        (128, 64, 0, 0, 128, 3, False, False),
+        (32, 16, 128, 128, 128, 2, False, True),
+        # Packed K128 RS needs the full operand tuple live with split issue/wait.
+        (48, 16, 0, 128, 256, 4, True, False),
+        (48, 16, 0, 128, 256, 4, False, True),
+        (48, 16, 0, 128, 256, 3, True, True),
+        (48, 16, 0, 128, 256, 2, True, True),
+        (32, 16, 0, 128, 256, 4, True, True),
+    ],
 )
 def test_sampled_wgmma_accounts_for_all_accumulators(
-    warp_m, warp_n, group_size, num_ctas, expected, monkeypatch
+    warp_m, warp_n, input_group, weight_group, block_k, num_ctas, split_issue_wait, expected, monkeypatch
 ):
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo, current_device
@@ -597,17 +608,18 @@ def test_sampled_wgmma_accounts_for_all_accumulators(
         a_dtype="float8e4m3",
         b_dtype="uint4",
         c_dtype="bfloat16",
-        input_scale_group_size=group_size,
-        weight_scale_group_size=group_size,
+        input_scale_group_size=input_group,
+        weight_scale_group_size=weight_group,
         use_fused_e8m0_scale=False,
     )
     config = dict(
         mma_type="wgmma",
-        block_shape=(warp_m, warp_n * 4, 128),
+        block_shape=(warp_m, warp_n * 4, block_k),
         warp_shape=(warp_m, warp_n, 128),
         num_ctas_per_sm=num_ctas,
         use_warp_spec=False,
-        num_stages=2,
+        num_stages=3,
+        wgmma_split_issue_wait=split_issue_wait,
         use_tma=False,
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE)

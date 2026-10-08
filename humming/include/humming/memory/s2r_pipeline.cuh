@@ -68,8 +68,13 @@ public:
     if constexpr (kHasInputScale2) loader_as2.seek(m_offset);
   }
 
-  template <bool kIsFirst = false, bool kLoadB = true, bool kLoadScales = true>
+  template <bool kIsFirst = false>
   CUDA_INLINE void load_stage_iter(uint32_t stage_id, uint32_t iter_id) {
+    load_stage_iter_data(stage_id, iter_id);
+    load_stage_iter_scales<kIsFirst>(stage_id, iter_id);
+  }
+
+  CUDA_INLINE void load_stage_iter_data(uint32_t stage_id, uint32_t iter_id) {
     stage_id = (stage_id + iter_id / Ctx::kWarpIters) % kNumStages;
     iter_id = iter_id % Ctx::kWarpIters;
     uint32_t buffer_id = iter_id % 2;
@@ -77,16 +82,23 @@ public:
     uint32_t bs_iter_id = Ctx::kUsePackedKLayout && Ctx::kUseFusedE8m0Scale ? iter_id : k_iter_id;
     auto &smem = ctx.smem;
 
-    if constexpr (kLoadB && !(kUseWgmma && Ctx::kUseRawWeight))
+    if constexpr (!(kUseWgmma && Ctx::kUseRawWeight))
       loader_b.load(smem.stages[stage_id].b, mma.regs_qb_as_ptr(buffer_id), iter_id);
-    if constexpr (!kLoadScales) {
-      static_assert(kUseWgmma);
-      return;
-    }
     if constexpr (USE_PPU && !kUseMxmma && kIsGroupOrBlockWeightScale)
       loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), bs_iter_id);
     if constexpr (!kUseWgmma && !Ctx::kUseUmma)
       loader_a.load(smem.stages[stage_id].a, mma.regs_a_as_ptr(buffer_id), iter_id, stage_id);
+  }
+
+  template <bool kIsFirst = false>
+  CUDA_INLINE void load_stage_iter_scales(uint32_t stage_id, uint32_t iter_id) {
+    stage_id = (stage_id + iter_id / Ctx::kWarpIters) % kNumStages;
+    iter_id = iter_id % Ctx::kWarpIters;
+    uint32_t buffer_id = iter_id % 2;
+    uint32_t k_iter_id = Ctx::kUsePackedKLayout ? 0 : iter_id;
+    uint32_t bs_iter_id = Ctx::kUsePackedKLayout && Ctx::kUseFusedE8m0Scale ? iter_id : k_iter_id;
+    auto &smem = ctx.smem;
+
     if constexpr (kUseMxmma) {
       if constexpr (kIsGroupInputScale)
         loader_as.load_sf(smem.stages[stage_id].as, mma.regs_sfa_as_ptr(buffer_id), k_iter_id);

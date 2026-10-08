@@ -117,9 +117,14 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
         instruction_accumulators = warp_m // (4 if use_f16_accum else 2)
         instruction_overhead = 26 if layer_config.use_raw_weight else 30
         instruction_registers = instruction_accumulators + instruction_overhead
+        if layer_config.use_packed_k_layout and tuning_config.wgmma_split_issue_wait:
+            # Split packed-K keeps all RS K slabs live across prefetch. The
+            # per-instruction overhead already includes four operand registers.
+            packed_operand_registers = warp_k * layer_config.a_dtype.num_bits // 64
+            instruction_registers += packed_operand_registers - 4
         if instruction_registers > launch_budget:
             return (
-                "register budget exceeded: WGMMA instruction requires at least "
+                "register budget exceeded: WGMMA issue requires at least "
                 f"{instruction_registers} registers per thread; launch budget {launch_budget:g}"
             )
 
