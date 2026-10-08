@@ -184,6 +184,8 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
             buffer_registers = warp_k * layer_config.a_dtype.num_bits / 64
     if has_group_accumulator:
         accumulator_registers *= 1.25
+        if mma_type == MmaType.WGMMA and tuning_config.wgmma_split_issue_wait:
+            accumulator_registers = max(accumulator_registers, 2 * instruction_accumulators)
     input_scale_registers = 0
     if mma_type == MmaType.WGMMA and layer_config.input_scale_group_size > 0:
         input_scale_registers = math.ceil(warp_m / 16) * 4
