@@ -197,7 +197,7 @@ class Sm90Heuristics(Sm80Heuristics):
                 config["num_stages"],
                 warp_shape=config["warp_shape"],
                 smem_reuse_mode=config.get("smem_reuse_mode", "all_stages"),
-                use_mbarrier=config.get("use_mbarrier", False),
+                use_tma=config.get("use_tma", False),
                 use_warp_spec=config.get("use_warp_spec", False),
                 output_chunk_rows=config.get("output_chunk_rows", 0),
                 mma_accum_bits=16 if use_f16_accum else 32,

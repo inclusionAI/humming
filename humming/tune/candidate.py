@@ -74,7 +74,6 @@ class ScheduleCandidate:
     multi_cast_size_a: int = 1
     use_warp_spec: bool = False
     use_tma: bool = False
-    use_mbarrier: bool = False
     smem_reuse_mode: SmemReuseMode = SmemReuseMode.ALL_STAGES
     _explicit_fields: frozenset[str] = dataclasses.field(default_factory=frozenset, repr=False)
 
@@ -124,12 +123,6 @@ class ScheduleCandidate:
             multi_cast_size_a=_config_positive_int(config, "multi_cast_size_a", 1),
             use_warp_spec=use_warp_spec,
             use_tma=use_tma,
-            use_mbarrier=_config_bool(
-                config,
-                "use_mbarrier",
-                use_tma or use_warp_spec,
-                allow_none=True,
-            ),
             smem_reuse_mode=SmemReuseMode(config.get("smem_reuse_mode", SmemReuseMode.ALL_STAGES)),
             _explicit_fields=frozenset(config),
         )
@@ -436,8 +429,6 @@ def _analyze_execution(
         reasons.append(f"num_threads={num_threads} exceeds the CTA limit 1024")
     if schedule.use_warp_spec and num_math_threads % 128:
         reasons.append(f"warp specialization requires a multiple of 128 math threads, got {num_math_threads}")
-    if (schedule.use_warp_spec or schedule.use_tma) and not schedule.use_mbarrier:
-        reasons.append("warp specialization and TMA require mbarrier synchronization")
     mma_type = schedule.mma_type or get_default_mma_type(problem.layer_config)
     if num_math_threads:
         register_error = get_register_budget_error(
@@ -481,7 +472,7 @@ def _analyze_resources(
         mma_type=schedule.mma_type or get_default_mma_type(problem.layer_config),
         warp_shape=schedule.warp_shape,
         smem_reuse_mode=schedule.smem_reuse_mode,
-        use_mbarrier=schedule.use_mbarrier,
+        use_tma=schedule.use_tma,
         use_warp_spec=schedule.use_warp_spec,
         output_chunk_rows=0,
         mma_accum_bits=16 if problem.use_f16_accum else 32,

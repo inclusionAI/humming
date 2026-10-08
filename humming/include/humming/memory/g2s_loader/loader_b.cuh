@@ -155,8 +155,6 @@ public:
       legacy_load_pred<kUseCpAsync>(gmem_ptr + row * kGlobalRowInt4s + col,
                                     smem_ptr + swizzled_offset, row < BlockShape::N);
     }
-    // WGMMA SS reads through the async proxy after ordinary shared stores.
-    if constexpr (Ctx::kUseWgmma && !kUseCpAsync) tma_fence_async_shared();
   }
 
   CUDA_INLINE

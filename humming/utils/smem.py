@@ -120,7 +120,7 @@ def estimate_smem_size_layer(
     *,
     warp_shape: tuple[int, int, int] | None = None,
     smem_reuse_mode: SmemReuseMode | str | None = None,
-    use_mbarrier: bool = False,
+    use_tma: bool = False,
     use_warp_spec: bool = False,
     use_tma_c: bool = False,
     raster_group_m: int = 1,
@@ -137,7 +137,6 @@ def estimate_smem_size_layer(
 
     smem_reuse_mode = SmemReuseMode(smem_reuse_mode)
     if mma_type == MmaType.UMMA:
-        use_mbarrier = True
         use_warp_spec = True
     block_m, block_n, block_k = block_shape
     is_mxmma = layer_config.use_block_scaled_mma
@@ -219,7 +218,7 @@ def estimate_smem_size_layer(
         if gemm_type == GemmType.GROUPED_CONTIGUOUS:
             add((layer_config.num_experts + 1) * 4, 4)  # expert_offset
 
-    if use_mbarrier:
+    if mma_type == MmaType.UMMA or use_warp_spec or use_tma:
         add((num_stages + 2) * 8, 128)  # load_mbar
     if use_warp_spec:
         num_math_mbarriers = num_stages + 1
@@ -257,7 +256,7 @@ def estimate_smem_size_config(
         mma_type=tuning_config.mma_type or MmaType.MMA,
         warp_shape=tuning_config.warp_shape,
         smem_reuse_mode=tuning_config.smem_reuse_mode,
-        use_mbarrier=bool(tuning_config.use_mbarrier),
+        use_tma=bool(tuning_config.use_tma),
         use_warp_spec=bool(tuning_config.use_warp_spec),
         use_tma_c=bool(tuning_config.use_tma_c),
         raster_group_m=tuning_config.raster_group_m,

@@ -306,19 +306,16 @@ def test_analysis_rejects_more_than_1024_threads():
             "num_stages": 2,
             "use_warp_spec": True,
             "use_tma": True,
-            "use_mbarrier": True,
         },
-        {"use_warp_spec": True, "use_tma": True, "use_mbarrier": False},
         {"multi_cast_size_a": 2},
         {
             "block_shape": (8, 128, 64),
             "warp_shape": (8, 32, 16),
             "use_warp_spec": True,
             "use_tma": True,
-            "use_mbarrier": True,
         },
     ],
-    ids=["pipeline-depth", "mbarrier", "indexed-multicast", "warp-iterations"],
+    ids=["pipeline-depth", "indexed-multicast", "warp-iterations"],
 )
 def test_analysis_rejects_invalid_pipeline_and_transfer_modes(updates):
     analysis = analyze_candidate(_problem(), _candidate(**updates))
@@ -412,8 +409,6 @@ def test_sampled_backends_match_fixed_layout(
     assert {config["mma_type"] for config in configs} == expected
     assert "mma_type" not in layer.to_dict()
     for config in configs:
-        requires_cp_async = config["use_warp_spec"] or config["mma_type"] in ("wgmma", "umma")
-        assert not requires_cp_async or config["use_cp_async"]
         # Exercise the real kernel validators and code generation without compiling.
         tuning_values = tuning.create_tuning_config(config).to_dict()
         kernel = HummingKernel(**(layer.to_dict() | compute.to_dict() | tuning_values))

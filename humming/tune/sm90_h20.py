@@ -49,7 +49,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
                 "num_ctas_per_sm": 1,
                 "use_tma": use_tma,
                 "use_warp_spec": use_tma,
-                "use_mbarrier": use_tma,
             }
             if overlap:
                 config["smem_reuse_mode"] = "last_stage"
@@ -462,7 +461,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
 
         if layer_config.shape_k <= 512 and is_moe and shape_m >= 2048:
             config["use_tma"] = True
-            config["use_mbarrier"] = True
             if gemm_type == GemmType.INDEXED:
                 config["use_tma_a"] = False
                 config["use_tma_c"] = False
@@ -482,7 +480,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
         if use_dense_tma:
             config["use_tma"] = True
             config["use_warp_spec"] = True
-            config["use_mbarrier"] = True
             config["num_stages"] = 3
         elif config["num_stages"] == 4 and block_shape_m <= 32:
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
@@ -503,7 +500,6 @@ class Sm90H20Heuristics(DeviceHeuristics):
             # TODO: check if TMA / cp.async affect batch invariance
             config["use_tma"] = False
             config["use_warp_spec"] = False
-            config["use_mbarrier"] = False
             config["use_stream_k"] = False
 
         if layer_config.use_packed_k_layout:

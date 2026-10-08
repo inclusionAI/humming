@@ -193,7 +193,6 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
     if problem.gemm_type != GemmType.INDEXED:
         config["use_warp_spec"] = True
         config["use_tma"] = True
-        config["use_mbarrier"] = True
         if dense_small_fp4:
             config["num_ctas_per_sm"] = 2
 
@@ -254,7 +253,6 @@ def select_grouped_scale(
                 if problem.gemm_type != GemmType.INDEXED:
                     config["use_warp_spec"] = True
                     config["use_tma"] = True
-                    config["use_mbarrier"] = True
                 if multicast:
                     config["multi_cast_size_a"] = 2
                 candidate = ScheduleCandidate.from_config(

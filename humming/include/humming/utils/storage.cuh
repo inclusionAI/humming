@@ -102,7 +102,7 @@
 #define IF_IS_GROUPED_CONTIGUOUS_GEMM(x)
 #endif
 
-#if HUMMING_USE_MBARRIER
+#if HUMMING_MMA_TYPE_ID == 2 || HUMMING_USE_WARP_SPEC || HUMMING_USE_TMA
 #define IF_USE_MBARRIER(x) x
 #else
 #define IF_USE_MBARRIER(x)
@@ -228,7 +228,6 @@ public:
   static constexpr uint32_t kBiasBytes = kBiasSize * sizeof(int4);
 
   static constexpr bool kUseWarpSpec = TuningConfig::kUseWarpSpec;
-  static constexpr bool kUseMBarrier = TuningConfig::kUseMBarrier;
   struct StageStorage {
     alignas(1024) int4 a[kStageSizeA];
     alignas(LayerConfig::kUseRawWeight ? 1024 : 128) int4 b[kStageSizeB];

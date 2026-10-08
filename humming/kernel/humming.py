@@ -130,7 +130,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         self.use_umma_pipeline = self.mma_type == MmaType.UMMA
         if self.use_umma_pipeline:
             self.use_warp_spec = True
-            self.use_mbarrier = True
         TuningConfig.__post_init__(self)
         if self.use_umma_pipeline:
             self.num_threads = 256 if self.use_umma_ss else 256 + 128 * self.umma_num_dequant_warpgroups
@@ -556,8 +555,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.warp_shape[2] == self.block_shape[2], (
                 "batch-invariant kernels require warp_shape_k == block_shape_k"
             )
-        if self.use_warp_spec or self.use_tma:
-            assert self.use_mbarrier
         if self.use_warp_spec:
             assert self.num_math_threads % 128 == 0
         is_channel_weight_scale = self.is_channel_weight_scale

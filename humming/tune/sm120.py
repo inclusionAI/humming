@@ -321,7 +321,7 @@ class Sm120Heuristics(Sm89Heuristics):
                 num_stages,
                 warp_shape=candidate["warp_shape"],
                 smem_reuse_mode=candidate.get("smem_reuse_mode", "all_stages"),
-                use_mbarrier=True,
+                use_tma=candidate.get("use_tma", False),
                 use_warp_spec=candidate.get("use_warp_spec", False),
                 output_chunk_rows=candidate.get("output_chunk_rows", 0),
             )
@@ -372,7 +372,7 @@ class Sm120Heuristics(Sm89Heuristics):
                 num_stages,
                 warp_shape=config["warp_shape"],
                 smem_reuse_mode=smem_reuse_mode,
-                use_mbarrier=True,
+                use_tma=config.get("use_tma", False),
                 use_warp_spec=config["use_warp_spec"],
                 output_chunk_rows=config.get("output_chunk_rows", 0),
             )

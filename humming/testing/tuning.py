@@ -22,8 +22,6 @@ SAMPLED_TUNING_VALUES = {
     "wgmma_split_issue_wait": (False, True),
     "use_tma": (True, False, 123, 456, 789),
     "use_warp_spec": (True, False),
-    "use_mbarrier": (True, False),
-    "use_cp_async": (True, False),
     "multi_cast_size_a": (1, 2),
     "multi_cast_size_b": (1, 2),
     "use_stream_k": (True, False),
@@ -255,8 +253,6 @@ def _generate_transfer_candidates(
     names = (
         "use_tma",
         "use_warp_spec",
-        "use_mbarrier",
-        "use_cp_async",
         "multi_cast_size_a",
         "multi_cast_size_b",
     )
@@ -266,13 +262,6 @@ def _generate_transfer_candidates(
         signature = {"mma_type": mma_type.value} | signature
         use_tma, tma_values = _resolve_tma_values(signature["use_tma"], seed)
         if sm_version < 90 and (use_tma or signature["use_warp_spec"]):
-            continue
-        if sm_version < 80 and (signature["use_mbarrier"] or signature["use_cp_async"]):
-            continue
-        if (use_tma or signature["use_warp_spec"]) and not signature["use_mbarrier"]:
-            continue
-        requires_cp_async = signature["use_warp_spec"] or mma_type in (MmaType.WGMMA, MmaType.UMMA)
-        if requires_cp_async and not signature["use_cp_async"]:
             continue
         if compute_config.gemm_type == GemmType.INDEXED:
             tma_values.update(use_tma_a=False, use_tma_as=False, use_tma_as2=False, use_tma_c=False)
@@ -287,7 +276,7 @@ def _generate_transfer_candidates(
         if not _is_legal_multicast_transfer(compute_config, sm_version, signature, tma_values):
             continue
         if mma_type == MmaType.UMMA:
-            if not signature["use_warp_spec"] or not signature["use_mbarrier"]:
+            if not signature["use_warp_spec"]:
                 continue
             if signature["multi_cast_size_a"] != 1 or signature["multi_cast_size_b"] != 1:
                 continue

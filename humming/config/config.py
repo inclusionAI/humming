@@ -512,8 +512,6 @@ class TuningConfig(BaseHummingConfig):
     output_chunk_rows: int = 0
 
     use_warp_spec: bool | None = None
-    use_mbarrier: bool | None = None
-    use_cp_async: bool | None = None
 
     use_tma: bool | None = None
     use_tma_a: bool | None = None
@@ -546,7 +544,6 @@ class TuningConfig(BaseHummingConfig):
     _name_map = {
         "wgmma_use_late_as": "kWgmmaUseLateAS",
         "wgmma_split_issue_wait": "kWgmmaSplitIssueWait",
-        "use_mbarrier": "kUseMBarrier",
         "use_tma_as": "kUseTmaAS",
         "use_tma_as2": "kUseTmaAS2",
         "use_tma_bs": "kUseTmaBS",
@@ -594,17 +591,6 @@ class TuningConfig(BaseHummingConfig):
 
         if self.use_tma is None:
             self.use_tma = False
-
-        if self.use_mbarrier is None:
-            self.use_mbarrier = self.use_tma or self.use_warp_spec
-
-        if self.use_cp_async is None:
-            self.use_cp_async = current_device.sm_major >= 8
-
-        if self.use_warp_spec:
-            assert self.use_cp_async, "warp specialization requires cp.async"
-        if self.mma_type in (MmaType.WGMMA, MmaType.UMMA):
-            assert self.use_cp_async, f"{self.mma_type.value} requires cp.async"
 
         self.num_math_threads = math.prod(self.block_shape) // math.prod(self.warp_shape) * 32
         if self.use_warp_spec:

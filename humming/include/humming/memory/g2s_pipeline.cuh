@@ -347,8 +347,7 @@ public:
     if constexpr (kUseMBarrier) {
       if (!pred) return;
       if constexpr (kHasCpAsyncMBarrier) {
-        if constexpr (kUseCpAsync) cp_async_commit_mbarrier(&smem.load_mbar[stage_id]);
-        else mbarrier_arrive(&smem.load_mbar[stage_id]);
+        cp_async_commit_mbarrier(&smem.load_mbar[stage_id]);
       }
     } else if constexpr (kUseCpAsync) {
       cp_async_commit_group();
@@ -433,10 +432,8 @@ public:
     if constexpr (kUseMBarrier) {
       mbarrier_wait(&ctx.smem.load_mbar[stage_id], phases[stage_id], "Humming consumer waiting for load stage");
       phases[stage_id] ^= 1;
-    } else if constexpr (kUseCpAsync) {
-      cp_async_wait_group<kNumStages - 2>();
-      __syncthreads();
     } else {
+      if constexpr (kUseCpAsync) cp_async_wait_group<kNumStages - 2>();
       __syncthreads();
     }
   }
@@ -446,10 +443,8 @@ public:
       if constexpr (kUseMBarrier) {
         mbarrier_wait(&ctx.smem.load_mbar[kNumStages + 1], phases[kNumStages + 1], "Humming consumer waiting for channel data");
         phases[kNumStages + 1] ^= 1;
-      } else if constexpr (kUseCpAsync) {
-        cp_async_wait_group<0>();
-        __syncthreads();
       } else {
+        if constexpr (kUseCpAsync) cp_async_wait_group<0>();
         __syncthreads();
       }
     }

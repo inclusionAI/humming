@@ -21,10 +21,8 @@ def skip_if_unsupported(
     a_dtype=None,
     b_dtype=None,
     mma_type=None,
-    use_cp_async=None,
     use_tma=None,
     use_warp_spec=None,
-    use_mbarrier=None,
 ) -> None:
     """Skip a test whose hardware requirements aren't met by the current GPU."""
     import pytest
@@ -57,12 +55,6 @@ def skip_if_unsupported(
 
     if current_device.is_ppu and a_dtype == dtypes.int4:
         pytest.skip("PPU does not support int4 mma")
-
-    if use_cp_async and sm < 80:
-        pytest.skip(f"cp.async requires SM>=80, current SM is {sm}")
-
-    if use_mbarrier and sm < 80:
-        pytest.skip(f"mbarrier requires SM>=80, current SM is {sm}")
 
     if use_tma and sm < 90:
         pytest.skip(f"TMA requires SM>=90, current SM is {sm}")

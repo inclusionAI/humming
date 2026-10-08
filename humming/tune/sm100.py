@@ -167,7 +167,6 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             mma_type=MmaType.UMMA,
             warp_shape=(block_m, 32, block_k),
             smem_reuse_mode=SmemReuseMode.NONE,
-            use_mbarrier=True,
             use_warp_spec=True,
             umma_cta_group_size=cta_group_size,
             output_chunk_rows=output_chunk_rows,
