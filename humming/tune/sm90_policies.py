@@ -8,6 +8,7 @@ import torch
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.tune.candidate import (
     CandidateAnalysis,
     ScheduleCandidate,
@@ -281,8 +282,8 @@ def select_grouped_scale(
     )
 
 
-# Packed MXFP4 x FP8(GS128) grouped-prefill Hopper schedule. The variable-M
-# tile policy was measured on H200; other SM90 devices use M128.
+# Packed MXFP4 x FP8(GS128) Hopper schedule. M-major grouped inputs size their
+# M tile per expert; that policy was measured on H200, other SM90 devices use M128.
 _W4A8_DEFAULT_TILE_M = 128
 _W4A8_MAX_MODELED_EXPERT_ROWS = 4096
 
@@ -322,7 +323,7 @@ _W4A8_EXPERT_ROW_BOUNDARIES = tuple(
 )
 
 
-def _is_w4a8_moe_layer(layer_config: LayerConfig) -> bool:
+def _is_packed_w4a8_layer(layer_config: LayerConfig) -> bool:
     return (
         layer_config.sm_version == 90
         and layer_config.shape_n % 128 == 0
@@ -335,49 +336,59 @@ def _is_w4a8_moe_layer(layer_config: LayerConfig) -> bool:
         and layer_config.use_packed_k_layout
         and layer_config.input_scale_group_size == 128
         and layer_config.weight_scale_group_size == 32
-        and layer_config.num_experts > 0
     )
 
 
-def _is_grouped_w4a8(
-    layer_config: LayerConfig,
-    use_m_major_input_scale: bool,
-    gemm_type: GemmType,
-) -> bool:
-    return (
-        gemm_type == GemmType.GROUPED_CONTIGUOUS
-        and use_m_major_input_scale
-        and _is_w4a8_moe_layer(layer_config)
-    )
+def _uses_m_major_w4a8_tiles(use_m_major_input_scale: bool, gemm_type: GemmType) -> bool:
+    return gemm_type == GemmType.GROUPED_CONTIGUOUS and use_m_major_input_scale
 
 
-def apply_indexed_w4a8_config(
+# Smallest M tile where the N16 schedule beats the seed schedule, measured on H200.
+_W4A8_MIN_TILE_M = {GemmType.DENSE: 64, GemmType.INDEXED: 64}
+_W4A8_DEFAULT_MIN_TILE_M = 128
+
+
+def _w4a8_n16_tile_m(config: dict, gemm_type: GemmType) -> int | None:
+    block_m = min(config["block_shape"][0], _W4A8_DEFAULT_TILE_M)
+    min_tile_m = _W4A8_MIN_TILE_M.get(gemm_type, _W4A8_DEFAULT_MIN_TILE_M)
+    return block_m if block_m >= min_tile_m else None
+
+
+def _w4a8_dense_stream_k_max_shape_m(layer_config: LayerConfig, block_m: int) -> int:
+    """Largest dense M whose N128 output tiles do not yet fill every SM."""
+    num_n_tiles = layer_config.shape_n // 128
+    num_m_tiles = math.ceil(current_device.sm_count / num_n_tiles)
+    return (num_m_tiles - 1) * block_m
+
+
+def _set_w4a8_n16_config(
     config: dict,
     layer_config: LayerConfig,
     gemm_type: GemmType,
+    shape_m: int,
 ) -> None:
-    """Select the packed GS128 mainloop while preserving indexed row gathering."""
-    if (
-        gemm_type != GemmType.INDEXED
-        or not _is_w4a8_moe_layer(layer_config)
-        or config.get("use_f16_accum", False)
-    ):
+    """Apply the packed N16 schedule shared by every row-major GEMM type."""
+    # Late AS keeps group scales out of the registers live across WGMMA.
+    config["wgmma_use_late_as"] = True
+    block_m = _w4a8_n16_tile_m(config, gemm_type)
+    if block_m is None:
         return
 
-    block_m = min(config["block_shape"][0], 128)
-    # Preserve the small-M schedule, where its wider K stage remains faster.
-    if block_m < 64:
-        return
+    use_stream_k = False
+    if gemm_type == GemmType.DENSE:
+        fills_device = shape_m > _w4a8_dense_stream_k_max_shape_m(layer_config, block_m)
+        use_stream_k = config.get("use_stream_k", False) and not fills_device
     config.update(
         block_shape=(block_m, 128, 128),
         warp_shape=(block_m, 16, 128),
         num_stages=4,
-        use_warp_spec=False,
-        wgmma_use_late_as=True,
         wgmma_split_issue_wait=True,
-        use_tma=False,
-        use_stream_k=False,
+        use_stream_k=use_stream_k,
+        multi_cast_size_a=1,
+        multi_cast_size_b=1,
     )
+    if gemm_type == GemmType.INDEXED:
+        config.update(use_warp_spec=False, use_tma=False)
 
 
 def _w4a8_block_m(layer_config: LayerConfig, shape_m: int) -> int:
@@ -397,47 +408,68 @@ def _set_w4a8_config(config: dict, block_m: int, shape_k: int = 0) -> None:
         use_warp_spec=True,
         use_stream_k=False,
         use_packed_k_layout=True,
+        wgmma_use_late_as=True,
+        # Wider tiles exceed the split issue-wait register budget.
+        wgmma_split_issue_wait=block_m <= 144,
         raster_group_m=16,
         multi_cast_size_a=1,
         multi_cast_size_b=1,
     )
 
 
-def apply_w4a8_config(
+def apply_packed_w4a8_config(
     config: dict,
     layer_config: LayerConfig,
     use_m_major_input_scale: bool,
     gemm_type: GemmType,
     shape_m: int,
 ) -> None:
-    if not _is_grouped_w4a8(layer_config, use_m_major_input_scale, gemm_type):
+    """Select the packed MXFP4 x FP8(GS128) schedule for any GEMM type."""
+    if not _is_packed_w4a8_layer(layer_config) or config.get("use_f16_accum", False):
         return
+    if not _uses_m_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
+        _set_w4a8_n16_config(config, layer_config, gemm_type, shape_m)
+        return
+
     use_h200_policy = _w4a8_uses_variable_m_tiles()
     block_m = _w4a8_block_m(layer_config, shape_m) if use_h200_policy else _W4A8_DEFAULT_TILE_M
     _set_w4a8_config(config, block_m, layer_config.shape_k if use_h200_policy else 0)
 
 
-def specialize_w4a8_ranges(
+def _w4a8_range_boundaries(
+    config: dict,
+    layer_config: LayerConfig,
+    use_m_major_input_scale: bool,
+    gemm_type: GemmType,
+) -> tuple[int, ...]:
+    if _uses_m_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
+        if not _w4a8_uses_variable_m_tiles():
+            return ()
+        return tuple(rows * layer_config.num_experts for rows in _W4A8_EXPERT_ROW_BOUNDARIES)
+
+    block_m = _w4a8_n16_tile_m(config, gemm_type)
+    if gemm_type != GemmType.DENSE or block_m is None:
+        return ()
+    return (_w4a8_dense_stream_k_max_shape_m(layer_config, block_m),)
+
+
+def specialize_packed_w4a8_ranges(
     configs: list,
     layer_config: LayerConfig,
     use_m_major_input_scale: bool,
     gemm_type: GemmType,
 ) -> list:
-    if not _is_grouped_w4a8(layer_config, use_m_major_input_scale, gemm_type):
+    """Split shape-M ranges wherever the packed schedule depends on M."""
+    if not _is_packed_w4a8_layer(layer_config):
         return configs
 
-    if not _w4a8_uses_variable_m_tiles():
-        for _, _, config in configs:
-            _set_w4a8_config(config, _W4A8_DEFAULT_TILE_M)
-        return configs
-
-    boundaries = tuple(rows * layer_config.num_experts for rows in _W4A8_EXPERT_ROW_BOUNDARIES)
-    tuned_configs = []
+    tuned_configs: list = []
     for lower, upper, base_config in configs:
+        boundaries = _w4a8_range_boundaries(base_config, layer_config, use_m_major_input_scale, gemm_type)
         cuts = [lower, *(x for x in boundaries if lower < x < upper), upper]
         for interval_lower, interval_upper in zip(cuts, cuts[1:], strict=False):
             config = dict(base_config)
-            _set_w4a8_config(config, _w4a8_block_m(layer_config, interval_upper), layer_config.shape_k)
+            apply_packed_w4a8_config(config, layer_config, use_m_major_input_scale, gemm_type, interval_upper)
             if tuned_configs and tuned_configs[-1][1] == interval_lower and tuned_configs[-1][2] == config:
                 tuned_configs[-1][1] = interval_upper
             else:

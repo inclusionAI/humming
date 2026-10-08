@@ -152,7 +152,8 @@ With `use_packed_k_layout`, warp K must be 128 and warp N can start at 16. Activ
 when present, must cover warp K. Weight scale groups must also cover warp K unless
 `use_fused_e8m0_scale` is enabled; fused conversion applies each K32 slab's weight
 scale before WGMMA, so GS32 weights can use packed warp K128. Fused packed-K
-remains opt-in; the default layout selection is unchanged.
+is selected by default on SM90 when activation scale groups cover K128 and
+`shape_n` is a multiple of 64, for dense and MoE layers alike.
 
 `raster_group_m` controls M tile grouping for dense and grouped-contiguous GEMMs.
 For grouped-contiguous GEMMs, values greater than 1 automatically use an expert

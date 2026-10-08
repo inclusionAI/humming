@@ -1,3 +1,4 @@
+import dataclasses
 import math
 
 import pytest
@@ -100,7 +101,7 @@ def test_grouped_and_legacy_selection_work_without_a_live_device(monkeypatch):
     monkeypatch.setattr(DeviceInfo, "sm_count", property(fail_device_query))
 
     grouped = Sm90Heuristics.get_config(
-        _layer(6144, 3584, num_experts=0),
+        dataclasses.replace(_layer(6144, 3584, num_experts=0), use_packed_k_layout=False),
         shape_m=32,
         gemm_type=GemmType.DENSE,
     )
@@ -405,3 +406,38 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
         assert config["num_stages"] == expected_stages
     generic = select(layer, shape_m=4096, gemm_type=GemmType.GROUPED_CONTIGUOUS)
     assert generic.get("raster_group_m", 1) == 1
+
+
+@pytest.mark.parametrize(
+    "gemm_type,num_experts,use_m_major",
+    [
+        (GemmType.DENSE, 0, False),
+        (GemmType.DENSE, 0, True),
+        (GemmType.INDEXED, 32, False),
+        (GemmType.GROUPED_CONTIGUOUS, 32, False),
+        (GemmType.GROUPED_MASKED, 32, True),
+    ],
+)
+def test_packed_w4a8_schedule_covers_every_gemm_type(monkeypatch, gemm_type, num_experts, use_m_major):
+    """The packed N16 schedule must not depend on GEMM type or scale layout."""
+    monkeypatch.setattr("humming.tune.get_heuristics_class", lambda **kwargs: Sm90Heuristics)
+    monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: 132))
+    layer = _layer(4096, 6144, num_experts=num_experts)
+    assert layer.use_packed_k_layout
+    select = _get_heuristics_config.__wrapped__
+    kwargs = dict(use_m_major_input_scale=use_m_major, gemm_type=gemm_type)
+
+    ranges = select(layer, **kwargs)
+    assert ranges[0][0] == 0 and ranges[-1][1] == 1 << 30
+    assert all(config["wgmma_use_late_as"] for _, _, config in ranges)
+
+    prefill = ranges[-1][2]
+    assert select(layer, shape_m=1 << 20, **kwargs) == prefill
+    assert prefill["block_shape"] == (128, 128, 128)
+    assert prefill["warp_shape"] == (128, 16, 128)
+    assert prefill["wgmma_split_issue_wait"]
+    assert not prefill["use_stream_k"]
+    if gemm_type == GemmType.DENSE:
+        # Stream-K stays on only while N128 output tiles leave SMs idle.
+        assert select(layer, shape_m=512, **kwargs)["use_stream_k"]
+        assert not select(layer, shape_m=513, **kwargs)["use_stream_k"]
