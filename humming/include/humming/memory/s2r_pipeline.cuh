@@ -64,7 +64,7 @@ public:
 
   CUDA_INLINE void seek(uint32_t m_offset) {
     if constexpr (kHasInputScale) loader_as.seek(m_offset);
-    if constexpr (Ctx::kUseWgmmaLateAS) mma.m_scale_offset = Ctx::kIsGroupedGemm ? m_offset % 4 : 0;
+    if constexpr (Ctx::kWgmmaUseLateAS) mma.m_scale_offset = Ctx::kIsGroupedGemm ? m_offset % 4 : 0;
     if constexpr (kHasInputScale2) loader_as2.seek(m_offset);
   }
 
@@ -103,7 +103,7 @@ public:
       if constexpr (kIsGroupOrBlockWeightScale)
         loader_bs.load_sf(smem.stages[stage_id].bs, mma.regs_sfb_as_ptr(buffer_id), k_iter_id);
     } else if constexpr (!Ctx::kUseBlockScaledMma) {
-      if constexpr (kIsGroupInputScale && !Ctx::kUseWgmmaLateAS)
+      if constexpr (kIsGroupInputScale && !Ctx::kWgmmaUseLateAS)
         loader_as.load(smem.stages[stage_id].as, mma.arith.regs_as_as_ptr(buffer_id), k_iter_id);
       if constexpr (!USE_PPU && kIsGroupOrBlockWeightScale)
         loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), bs_iter_id);

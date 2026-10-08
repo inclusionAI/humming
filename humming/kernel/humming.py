@@ -446,6 +446,8 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.wgmma_use_late_as:
             assert self.mma_type == MmaType.WGMMA, "wgmma_use_late_as requires WGMMA"
             assert self.is_group_input_scale, "wgmma_use_late_as requires per-group input scales"
+        if self.wgmma_split_issue_wait:
+            assert self.mma_type == MmaType.WGMMA, "wgmma_split_issue_wait requires WGMMA"
         register_error = get_register_budget_error(
             self, self, self.use_f16_accum, current_device.max_registers_per_sm
         )

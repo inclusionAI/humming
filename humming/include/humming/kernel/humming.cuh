@@ -136,7 +136,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       if (remaining_iters == 1) producer.load_channel();
       PRAGMA_UNROLL
       for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-        if constexpr (Ctx::kUseWgmmaSplitIssueWait) {
+        if constexpr (Ctx::kWgmmaSplitIssueWait) {
           mma.issue(stage_id, warp_iter_id);
           if constexpr (Ctx::kWarpIters == 1) {
             // Refill a different stage; the current WGMMA stage stays live until wait.

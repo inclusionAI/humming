@@ -186,7 +186,7 @@ public:
     wgmma_wait<0>();
     fence_accumulators(delta_j);
 
-    if constexpr (Ctx::kUseWgmmaLateAS) {
+    if constexpr (Ctx::kWgmmaUseLateAS) {
       // Load AS only when this fragment's partial accumulators are promoted.
       constexpr bool kApplyWeightScaleOnC = !kUseFusedE8m0Scale && (Ctx::kIsGroupWeightScale || Ctx::kIsBlockWeightScale);
       const uint32_t k_end = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? WarpShape::K : (iter_id + 1) * kPartMmaShapeK;

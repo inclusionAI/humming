@@ -204,7 +204,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
           // Keep register operands live until wait_and_promote while prefetching
           // the next stage/fragment and delaying scale loads until promotion.
-          if constexpr (Ctx::kUseWgmmaSplitIssueWait)
+          if constexpr (Ctx::kWgmmaSplitIssueWait)
             mma.issue(stage_id, warp_iter_id);
           else if constexpr (Ctx::kWarpIters == 1)
             mma.run(stage_id, warp_iter_id);
@@ -216,7 +216,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             s2r_pipe.load_stage_iter_data(stage_id, warp_iter_id + 1);
           else
             s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-          if constexpr (Ctx::kUseWgmmaSplitIssueWait)
+          if constexpr (Ctx::kWgmmaSplitIssueWait)
             mma.wait_and_promote(stage_id, warp_iter_id);
           else if constexpr (Ctx::kWarpIters > 1)
             mma.run(stage_id, warp_iter_id);

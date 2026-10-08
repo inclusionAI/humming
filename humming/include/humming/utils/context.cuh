@@ -83,8 +83,6 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kCanBatchWgmmaSsK = WarpShape::K == 128 && kCanBatchWgmmaSsAS;
   static constexpr bool kCanBatchWgmmaSsBS = LayerConfig::kWeightScaleGroupSize == 0 || LayerConfig::kWeightScaleGroupSize >= 128;
   static constexpr bool kUseWgmmaSsKBatch = kUseWgmmaSs && kCanBatchWgmmaSsTypes && kCanBatchWgmmaSsK && kCanBatchWgmmaSsBS;
-  static constexpr bool kUseWgmmaLateAS = TuningConfig::kWgmmaUseLateAS;
-  static constexpr bool kUseWgmmaSplitIssueWait = kUseWgmma && TuningConfig::kWgmmaSplitIssueWait;
 
 
   static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;
@@ -98,9 +96,9 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
 
   // With a single fragment, next-stage prefetch aliases the current scale buffer.
   // Group AS and non-fused BS must survive until accumulator promotion has finished.
-  static constexpr bool kPreserveASForPromotion = LayerConfig::kIsGroupInputScale && !kUseWgmmaLateAS;
+  static constexpr bool kPreserveASForPromotion = LayerConfig::kIsGroupInputScale && !TuningConfig::kWgmmaUseLateAS;
   static constexpr bool kPreserveBSForPromotion = !LayerConfig::kUseFusedE8m0Scale && (LayerConfig::kIsGroupWeightScale || LayerConfig::kIsBlockWeightScale);
-  static constexpr bool kUseWgmmaLateScalePrefetch = kUseWgmmaSplitIssueWait && kWarpIters == 1 && (kPreserveASForPromotion || kPreserveBSForPromotion);
+  static constexpr bool kUseWgmmaLateScalePrefetch = TuningConfig::kWgmmaSplitIssueWait && kWarpIters == 1 && (kPreserveASForPromotion || kPreserveBSForPromotion);
 
   static constexpr uint32_t kUseWarpSpec = TuningConfig_::kUseWarpSpec;
   static constexpr uint32_t kNumThreads = TuningConfig_::kNumThreads;
