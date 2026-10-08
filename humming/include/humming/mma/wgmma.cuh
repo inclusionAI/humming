@@ -188,11 +188,8 @@ public:
 
     if constexpr (Ctx::kUseWgmmaLateAS) {
       // Load AS only when this fragment's partial accumulators are promoted.
-      constexpr bool kApplyWeightScaleOnC = !kUseFusedE8m0Scale &&
-                                            (Ctx::kIsGroupWeightScale || Ctx::kIsBlockWeightScale);
-      const uint32_t k_end = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch)
-                                 ? WarpShape::K
-                                 : (iter_id + 1) * kPartMmaShapeK;
+      constexpr bool kApplyWeightScaleOnC = !kUseFusedE8m0Scale && (Ctx::kIsGroupWeightScale || Ctx::kIsBlockWeightScale);
+      const uint32_t k_end = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? WarpShape::K : (iter_id + 1) * kPartMmaShapeK;
       bool should_promote = k_end == WarpShape::K || k_end % Ctx::kInputScaleGroupSize == 0;
       if constexpr (kApplyWeightScaleOnC) should_promote |= k_end % Ctx::kWeightScaleGroupSize == 0;
       if (should_promote) {
