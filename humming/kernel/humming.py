@@ -443,6 +443,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
                 assert self.a_dtype in allowed_f16_dtypes
 
     def check_config(self):
+        if self.wgmma_use_late_as:
+            assert self.mma_type == MmaType.WGMMA, "wgmma_use_late_as requires WGMMA"
+            assert self.is_group_input_scale, "wgmma_use_late_as requires per-group input scales"
         register_error = get_register_budget_error(
             self, self, self.use_f16_accum, current_device.max_registers_per_sm
         )

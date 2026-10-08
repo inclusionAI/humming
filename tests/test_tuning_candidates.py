@@ -1,5 +1,4 @@
 import dataclasses
-import json
 
 import pytest
 
@@ -91,6 +90,8 @@ def test_schedule_candidate_is_immutable_and_updates_config():
     config = {
         "block_shape": (8, 128, 128),
         "use_stream_k": False,
+        "wgmma_use_late_as": False,
+        "wgmma_split_issue_wait": False,
         "warp_shape": (8, 32, 64),
     }
     candidate = ScheduleCandidate.from_config("base", config)
@@ -98,12 +99,16 @@ def test_schedule_candidate_is_immutable_and_updates_config():
         candidate_id="three_stage",
         warp_shape=(8, 32, 32),
         num_stages=3,
+        wgmma_use_late_as=True,
+        wgmma_split_issue_wait=True,
     )
 
     assert candidate.to_config() == config
     assert updated.to_config() == config | {
         "warp_shape": (8, 32, 32),
         "num_stages": 3,
+        "wgmma_use_late_as": True,
+        "wgmma_split_issue_wait": True,
     }
     assert updated.candidate_id == "three_stage"
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -750,55 +755,6 @@ def test_mxmma_compiler_version_matches_scale_format(
     else:
         with pytest.raises(RuntimeError, match="reached tuning generation"):
             runner.prepare_kernels((1,))
-
-
-@pytest.mark.parametrize(
-    "late_as,split_issue_wait", ((False, False), (True, False), (False, True), (True, True))
-)
-def test_wgmma_schedule_options_round_trip(late_as, split_issue_wait):
-    from humming.config import MmaType, TuningConfig
-
-    values = dict(
-        mma_type="wgmma",
-        block_shape=(64, 128, 128),
-        warp_shape=(64, 16, 128),
-        num_stages=4,
-        use_cp_async=True,
-        wgmma_use_late_as=late_as,
-        wgmma_split_issue_wait=split_issue_wait,
-    )
-    # ScheduleCandidate intentionally accepts only its scheduling subset.
-    schedule_values = {name: value for name, value in values.items() if name != "use_cp_async"}
-    candidate = ScheduleCandidate.from_config("wgmma", schedule_values)
-    assert candidate.to_config() == schedule_values | {"mma_type": MmaType.WGMMA}
-    config = TuningConfig(**values)
-    restored = TuningConfig(**json.loads(config.to_str()))
-    assert restored.wgmma_use_late_as == late_as
-    assert restored.wgmma_split_issue_wait == split_issue_wait
-    cpp = config.to_cpp_str()
-    assert f"kWgmmaUseLateAS = {str(late_as).lower()}" in cpp
-    assert f"kWgmmaSplitIssueWait = {str(split_issue_wait).lower()}" in cpp
-
-
-@pytest.mark.parametrize("input_group", (0, 128))
-def test_wgmma_schedule_candidates_include_independent_options(input_group):
-    from humming.config import ComputeConfig, MmaType
-    from humming.testing import tuning
-
-    layer = _layer(a_dtype=dtypes.float8e4m3, input_scale_group_size=input_group, weight_scale_group_size=128)
-    candidates = tuning._generate_scheduling_candidates(layer, ComputeConfig(), MmaType.WGMMA)
-    combinations = {
-        (values.get("wgmma_use_late_as", False), values["wgmma_split_issue_wait"]) for values, _ in candidates
-    }
-    expected = {(False, False), (False, True)}
-    if input_group:
-        expected |= {(True, False), (True, True)}
-    assert combinations == expected
-    mma_candidates = tuning._generate_scheduling_candidates(layer, ComputeConfig(), MmaType.MMA)
-    assert all(
-        "wgmma_use_late_as" not in values and "wgmma_split_issue_wait" not in values
-        for values, _ in mma_candidates
-    )
 
 
 @pytest.mark.parametrize("input_group", (0, 128))

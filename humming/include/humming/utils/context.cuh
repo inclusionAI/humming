@@ -82,8 +82,7 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
                                             LayerConfig::kInputScaleGroupSize == 128 && ComputeConfig::kUseMMajorInputScale;
   static constexpr bool kUseWgmmaSsKBatch = kCanBatchWgmmaSsK && kUseWgmmaSs &&
                                             (LayerConfig::kWeightScaleGroupSize == 0 || LayerConfig::kWeightScaleGroupSize >= 128);
-  static constexpr bool kUseWgmmaLateAS = kUseWgmma && TuningConfig::kWgmmaUseLateAS &&
-                                          LayerConfig::kIsGroupInputScale;
+  static constexpr bool kUseWgmmaLateAS = TuningConfig::kWgmmaUseLateAS;
   static constexpr bool kUseWgmmaSplitIssueWait = kUseWgmma && TuningConfig::kWgmmaSplitIssueWait;
 
 

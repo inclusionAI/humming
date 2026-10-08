@@ -62,6 +62,29 @@ def _case(
 
 MOE_CASES = (
     _case(
+        "m-major-raw-fp8-group128",
+        GemmType.GROUPED_CONTIGUOUS,
+        use_m_major_input_scale=True,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        input_scale_group_size=128,
+        weight_scale_group_size=128,
+        sm_version=90,
+    ),
+    _case(
+        "m-major-raw-fp8-block128",
+        GemmType.GROUPED_MASKED,
+        use_m_major_input_scale=True,
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.float8e4m3,
+        bs_dtype=dtypes.float32,
+        input_scale_group_size=128,
+        weight_scale_group_size=128,
+        weight_scale_group_size_n=128,
+        weight_scale_type="block",
+        sm_version=90,
+    ),
+    _case(
         "indexed-uint8-zp",
         GemmType.INDEXED,
         b_dtype=dtypes.uint8,

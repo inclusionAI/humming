@@ -165,7 +165,7 @@ advances. A value of 1 uses the existing forward warp scan without the prefix ta
 |-----------|-------------|
 | `num_stages` | Number of pipeline stages. Must be at least 2. Must be at least 3 when using `use_warp_spec` with WGMMA. |
 | `use_warp_spec` | Whether to enable Warp Specialization. Requires SM90+. Required for UMMA. |
-| `wgmma_use_late_as` | Delay per-group input-scale register loads until WGMMA accumulator promotion. Defaults to `False`; has no effect for per-token or per-tensor input scales. |
+| `wgmma_use_late_as` | Delay per-group input-scale register loads until WGMMA accumulator promotion. Defaults to `False`; requires WGMMA with per-group input scales. |
 | `wgmma_split_issue_wait` | Prefetch the next fragment between WGMMA issue and wait. Defaults to `False`; independent of input-scale granularity and `wgmma_use_late_as`. |
 | `use_mbarrier` | Whether to use MBarrier. Requires SM80+. |
 | `use_cp_async` | Whether to use CP Async. Requires SM80+. |
@@ -174,7 +174,8 @@ advances. A value of 1 uses the existing forward warp scan without the prefix ta
 | `output_chunk_rows` | Output rows per shared-memory chunk for every MMA backend. `0` (default) writes a full tile; positive values must be multiples of 32 up to 256 and are clamped to tile M. Partial final chunks are supported. UMMA alternates two buffers; other backends reuse one buffer. Supports TMA and regular stores, Stream-K, and MoE scatter. Replaces `num_write_splits` (use half of tile M to reproduce two splits). |
 
 The two `wgmma_*` options apply only to WGMMA and support both warp-specialized
-and non-warp-specialized kernels. All four combinations are supported. They keep
+and non-warp-specialized kernels. Per-group inputs support all four combinations;
+per-token and per-tensor inputs must leave `wgmma_use_late_as` disabled. They keep
 the existing weight layout and weight-scale consumption order; scale prefetches
 that would overwrite a live scale buffer wait until the current promotion finishes.
 Tune these options together with tile shapes, pipeline stages, and Stream-K.

@@ -194,6 +194,16 @@ SCALE_CASES = (
         input_scale_group_size=64,
         weight_scale_group_size=64,
     ),
+    _case(
+        "fp8-input-group256-weight-group256",
+        a_dtype=dtypes.float8e4m3,
+        b_dtype=dtypes.uint4,
+        bs_dtype=dtypes.bfloat16,
+        input_scale_group_size=256,
+        weight_scale_group_size=256,
+        use_packed_k_layout=True,
+        sm_version=90,
+    ),
 )
 
 
