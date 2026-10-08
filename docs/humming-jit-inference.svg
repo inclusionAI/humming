@@ -1,0 +1,112 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1104" viewBox="0 0 1400 1104" role="img" aria-labelledby="title desc">
+<title id="title">Humming：从标准格式到 JIT 推理</title>
+<desc id="desc">预处理进行参数校验、维度对齐和权重布局转换。其下方依次并列展示 Layer Config、Tuning Config 和 Compute Config，三者共同用于 JIT 编译。Layer Config 描述权重形状、数据类型与量化；Compute Config 描述 GEMM 类型、批次不变性与输入缩放布局；Tuning Config 以两列两行展示计算分块、流水线、访存与 MMA 指令配置，包含 UMMA。预处理后的权重从左侧接入推理，运行时激活从右侧接入。</desc>
+<!-- Sources:
+ humming/layer.py: HummingLayer.transform; humming/transform.py:
+ prepare_layer_config, transform_humming_tensors.
+ humming/kernel/humming.py: _resolve_configs, prepare_kernels, init_kernel.
+ humming/tune/__init__.py: get_heuristics_config.
+ humming/config/config.py: TuningConfig fields summarized in the central panel:
+ block_shape, warp_shape, num_stages, use_warp_spec, use_tma,
+ use_cp_async, num_ctas_per_sm, use_stream_k.
+ humming/jit/runtime.py: _get_compiler, prepare, load_cubin.
+ humming/jit/compiler.py: NVRTCCompiler, NVCCCompiler, Compiler.compile.
+ humming/forward.py and humming/ops/gemm.py: runtime input processing and dispatch.
+ Preprocessed tensor values are inference inputs, not compiler inputs.
+ Compilation and tensor preparation are reusable for subsequent inference calls.
+-->
+<defs>
+ <marker id="blue-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#3E7098" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+ <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#6B7C87" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+ <marker id="teal-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#147D79" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+ <marker id="purple-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#77639E" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+</defs>
+<rect x="0" y="0" width="1400" height="1104" rx="0" fill="white" stroke="none" stroke-width="1" />
+<text x="58" y="59" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="32" fill="#203747" font-weight="700" text-anchor="start">Humming</text>
+<path d="M242 32 V66" fill="none" stroke="#C7D4DA" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+<text x="268" y="60" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="32" fill="#203747" font-weight="700" text-anchor="start">从标准格式到 JIT 推理</text>
+<text x="58" y="101" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#6B7C87" font-weight="400" text-anchor="start">预处理 → 获取调优配置 → 按需编译 → 推理执行</text>
+<g id="diagram-content" transform="translate(0 32)"><text x="220" y="169" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="25" fill="#147D79" font-weight="600" text-anchor="middle">Humming 标准格式</text>
+<text x="220" y="207" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#6B7C87" font-weight="400" text-anchor="middle">量化描述与权重张量</text>
+<path d="M220 225 V242" fill="none" stroke="#C7D4DA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+<text x="548" y="169" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="25" fill="#203747" font-weight="600" text-anchor="middle">Shape</text>
+<text x="548" y="207" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#6B7C87" font-weight="400" text-anchor="middle">N · K / 专家数</text>
+<path d="M548 225 V242" fill="none" stroke="#C7D4DA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+<text x="876" y="169" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="25" fill="#203747" font-weight="600" text-anchor="middle">GEMM Type</text>
+<text x="876" y="207" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#6B7C87" font-weight="400" text-anchor="middle">Dense / Indexed / Grouped</text>
+<path d="M876 225 V242" fill="none" stroke="#C7D4DA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+<text x="1204" y="169" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="25" fill="#203747" font-weight="600" text-anchor="middle">GPU 与计算选项</text>
+<text x="1204" y="207" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#6B7C87" font-weight="400" text-anchor="middle">目标架构 · 计算精度等</text>
+<path d="M1204 225 V242" fill="none" stroke="#C7D4DA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M220 242 H1204" fill="none" stroke="#C7D4DA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M686 242 V276" fill="none" stroke="#147D79" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<rect x="416" y="279" width="540" height="109" rx="12" fill="#EFF7F5" stroke="#A5C5C2" stroke-width="1.5" />
+<text x="686" y="321" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="700" text-anchor="middle">预处理</text>
+<text x="686" y="361" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="400" text-anchor="middle">参数校验 · 维度对齐 · 权重布局转换</text>
+<path d="M686 389 V415" fill="none" stroke="#147D79" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M260.5 415 H1111.5" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M260.5 415 V439" fill="none" stroke="#3E7098" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#blue-arrow)" />
+<path d="M1111.5 415 V439" fill="none" stroke="#77639E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#purple-arrow)" />
+<path d="M686 415 V439" fill="none" stroke="#147D79" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<g transform="translate(52.5 0)">
+<rect x="58" y="442" width="300" height="333" rx="14" fill="white" stroke="#AEC3D5" stroke-width="1.5" />
+<rect x="60" y="444" width="296" height="60" rx="12" fill="#EFF4F9" />
+<rect x="60" y="480" width="296" height="24" fill="#EFF4F9" />
+<text x="208" y="484" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#3E7098" font-weight="700" text-anchor="middle">Layer Config</text>
+<text x="82" y="545" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">权重形状</text>
+<text x="82" y="575" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#3E7098" font-weight="400" text-anchor="start">N · K · 专家数</text>
+<path d="M82 594 H334" fill="none" stroke="#E6ECEC" stroke-width="1" />
+<text x="82" y="627" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">数据类型</text>
+<text x="82" y="657" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#3E7098" font-weight="400" text-anchor="start">输入 · 权重 · 输出</text>
+<path d="M82 676 H334" fill="none" stroke="#E6ECEC" stroke-width="1" />
+<text x="82" y="709" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">量化描述</text>
+<text x="82" y="739" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#3E7098" font-weight="400" text-anchor="start">分组 · 缩放 · 零点</text>
+</g>
+<g transform="translate(-74 0)">
+<rect x="512.5" y="442" width="495" height="333" rx="14" fill="white" stroke="#A5C5C2" stroke-width="1.5" />
+<rect x="514.5" y="444" width="491" height="60" rx="12" fill="#EFF7F5" />
+<rect x="514.5" y="480" width="491" height="24" fill="#EFF7F5" />
+<text x="760" y="484" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="700" text-anchor="middle">Tuning Config</text>
+<path d="M536.5 604 H983.5 M760 524 V685" fill="none" stroke="#E6ECEC" stroke-width="1" />
+<text x="536.5" y="538" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">计算分块</text>
+<text x="536.5" y="573" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#147D79" font-weight="400" text-anchor="start">Block / Warp 分块</text>
+<text x="784" y="538" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">流水线</text>
+<text x="784" y="573" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#147D79" font-weight="400" text-anchor="start">级数 · Warp 分工</text>
+<text x="536.5" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">访存方式</text>
+<text x="536.5" y="669" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#147D79" font-weight="400" text-anchor="start">TMA · 异步拷贝</text>
+<text x="784" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">MMA 指令</text>
+<text x="784" y="669" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#147D79" font-weight="400" text-anchor="start">MMA·WGMMA·UMMA</text>
+<path d="M536.5 701 H983.5" fill="none" stroke="#DCE7E6" stroke-width="1" />
+<text x="760" y="730" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#6B7C87" font-weight="400" text-anchor="middle">参数组合 · 按张量配置 TMA</text>
+<text x="760" y="758" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#147D79" font-weight="500" text-anchor="middle">设备资源启发式调优 · 适配输入规模</text>
+</g>
+<g transform="translate(605.5 0)">
+<rect x="356" y="442" width="300" height="333" rx="14" fill="white" stroke="#C8BED9" stroke-width="1.5" />
+<rect x="358" y="444" width="296" height="60" rx="12" fill="#F4F1F8" />
+<rect x="358" y="480" width="296" height="24" fill="#F4F1F8" />
+<text x="506.0" y="484" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#77639E" font-weight="700" text-anchor="middle">Compute Config</text>
+<text x="380" y="545" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">GEMM 类型</text>
+<text x="380" y="575" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#77639E" font-weight="400" text-anchor="start">Dense / Indexed / Grouped</text>
+<path d="M380 594 H632" fill="none" stroke="#E6ECEC" stroke-width="1" />
+<text x="380" y="627" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">批次不变性</text>
+<text x="380" y="657" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#77639E" font-weight="400" text-anchor="start">Batch-invariant 计算</text>
+<path d="M380 676 H632" fill="none" stroke="#E6ECEC" stroke-width="1" />
+<text x="380" y="709" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="550" text-anchor="start">输入缩放布局</text>
+<text x="380" y="739" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#77639E" font-weight="400" text-anchor="start">M-major 缩放布局</text>
+</g>
+<path d="M260.5 776 V795 H1111.5 V776" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M686 776 V795" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<g transform="translate(0 -40)">
+<path d="M686 835 V853" fill="none" stroke="#147D79" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<text x="686" y="889" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="27" fill="#147D79" font-weight="650" text-anchor="middle">JIT 编译 · NVRTC / NVCC</text>
+<path d="M686 905 V942" fill="none" stroke="#147D79" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<text x="277" y="968" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="550" text-anchor="middle">预处理后的权重</text>
+<path d="M142 986 H413" fill="none" stroke="#147D79" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<path d="M1230 986 H959" fill="none" stroke="#77639E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#purple-arrow)" />
+<text x="1095" y="968" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#77639E" font-weight="550" text-anchor="middle">输入激活 X</text>
+<rect x="416" y="945" width="540" height="82" rx="11" fill="#203747" stroke="none" stroke-width="1" />
+<text x="686" y="996" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="28" fill="#FFFFFF" font-weight="650" text-anchor="middle">推理执行</text>
+<path d="M686 1028 V1060" fill="none" stroke="#6B7C87" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)" />
+<text x="686" y="1086" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="23" fill="#203747" font-weight="550" text-anchor="middle">输出 Y</text>
+</g></g></svg>

@@ -1,0 +1,130 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1212" viewBox="0 0 1400 1212" role="img" aria-labelledby="title desc">
+<title id="title">Humming：统一量化表示与自由参数组合</title>
+<desc id="desc">不同来源的量化方法与存储格式经格式解析、参数映射和张量转换，汇入 Humming 标准格式。标准格式包含通用量化参数和标准化张量。权重数值格式、缩放粒度及分组大小、scale 类型、zero point、二级 scale 可组合，并与激活数据类型及静态或动态量化策略组合。三组配置仅展示标准表示的不同实例，不表示加载时自动改变量化方案。组合须满足数据类型与设备支持条件。统一表示随后用于 Humming 的 Dense 和 MoE 推理。</desc>
+<!-- Source: humming/schema/{__init__,base,humming,awq,gptq,modelopt,mxfp4}.py;
+     humming/config/enum.py; humming/dtypes.py; humming/transform.py.
+     The central representation is HummingWeightSchema + HummingInputSchema
+     with normalized tensors, before architecture-specific kernel packing.
+     Weight fields: b_dtype, bs_dtype, weight_scale_type,
+     weight_scale_group_size, weight_scale_group_size_n,
+     has_zero_point, is_fp_zero_point, weight_scale_2_type.
+     Input fields: a_dtype, input_scale_dtype, input_quant_mode,
+     input_scale_group_size.
+     Options describe composability subject to compatibility checks;
+     they are not an unrestricted Cartesian product.
+-->
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#6B7C87" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+  <marker id="teal-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#147D79" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+</defs>
+<rect x="0" y="0" width="1400" height="1212" rx="0" fill="white" stroke="none" stroke-width="1" />
+<text x="58" y="59" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="32" fill="#203747" font-weight="700" text-anchor="start">Humming</text>
+<path d="M242 32 V66" fill="none" stroke="#C7D4DA" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+<text x="268" y="60" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="32" fill="#203747" font-weight="700" text-anchor="start">统一量化表示</text>
+<text x="58" y="101" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#6B7C87" font-weight="400" text-anchor="start">不同格式归一化，量化参数按需自由组合</text>
+<g id="diagram-content" transform="translate(0 32)"><text x="254" y="152" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="500" text-anchor="middle">量化方法</text>
+<text x="254" y="188" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#203747" font-weight="550" text-anchor="middle">AWQ · GPTQ</text>
+<text x="254" y="221" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="23" fill="#203747" font-weight="500" text-anchor="middle">AutoRound · BitNet</text>
+<path d="M254 236 V249 Q254 258 266 258" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<text x="700" y="152" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="500" text-anchor="middle">低精度格式</text>
+<text x="700" y="188" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#203747" font-weight="550" text-anchor="middle">FP8 · MXFP4</text>
+<text x="700" y="221" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="23" fill="#203747" font-weight="500" text-anchor="middle">NVFP4 · MXFP8</text>
+<path d="M700 236 V249 Q700 258 700 258" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<text x="1146" y="152" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="500" text-anchor="middle">导出格式</text>
+<text x="1146" y="188" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#203747" font-weight="550" text-anchor="middle">compressed-tensors</text>
+<text x="1146" y="221" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="23" fill="#203747" font-weight="500" text-anchor="middle">ModelOpt · Quark</text>
+<path d="M1146 236 V249 Q1146 258 1134 258" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M266 258 H1134" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M700 258 V280" fill="none" stroke="#6B7C87" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)" />
+<rect x="413" y="281" width="574" height="52" rx="10" fill="#F5F8F9" stroke="#D8E1E5" stroke-width="1" />
+<text x="700" y="315" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#203747" font-weight="500" text-anchor="middle">格式解析   →   参数映射   →   张量转换</text>
+<path d="M700 334 V367" fill="none" stroke="#147D79" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<rect x="58" y="369" width="1284" height="669" rx="15" fill="white" stroke="#A5C5C2" stroke-width="1.7" />
+<rect x="60" y="371" width="1280" height="70" rx="13" fill="#EFF7F5" stroke="none" stroke-width="1" />
+<rect x="60" y="411" width="1280" height="30" rx="0" fill="#EFF7F5" stroke="none" stroke-width="1" />
+<text x="88" y="415" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="700" text-anchor="start">Humming 标准格式</text>
+<text x="1310" y="413" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="450" text-anchor="end">通用参数  +  标准化权重 / Scale / Zero point</text>
+<text x="90" y="478" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="650" text-anchor="start">权重参数</text>
+<text x="1310" y="478" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#6B7C87" font-weight="400" text-anchor="end">各维度独立描述、按支持条件组合</text>
+<rect x="91" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="198" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle">数值格式</text>
+<path d="M114 542 H282" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="198" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">INT1–8</text>
+<text x="198" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">FP ≤ 8 bit</text>
+<text x="198" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">指数 / 尾数可配</text>
+<rect x="341" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="448" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle">缩放粒度</text>
+<path d="M364 542 H532" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="448" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">Tensor · Channel</text>
+<text x="448" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">Group · Block</text>
+<text x="448" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">分组大小 K / N</text>
+<rect x="591" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="698" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle">Scale 类型</text>
+<path d="M614 542 H782" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="698" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">FP16 · BF16</text>
+<text x="698" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">E4M3 · E5M2</text>
+<text x="698" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">E8M0 · FP32</text>
+<rect x="841" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="948" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle">Zero point</text>
+<path d="M864 542 H1032" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="948" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">无</text>
+<text x="948" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">INT</text>
+<text x="948" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">FP</text>
+<rect x="1091" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="1198" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle">二级 Scale</text>
+<path d="M1114 542 H1282" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="1198" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">无</text>
+<text x="1198" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">Channel</text>
+<text x="1198" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle">Tensor</text>
+<text x="323" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle">×</text>
+<text x="573" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle">×</text>
+<text x="823" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle">×</text>
+<text x="1073" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle">×</text>
+<path d="M102 666 V675 H1294 V666" fill="none" stroke="#B6CBC8" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M700 675 V684" fill="none" stroke="#B6CBC8" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+<rect x="680" y="684" width="40" height="35" rx="0" fill="white" stroke="none" stroke-width="1" />
+<text x="700" y="711" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="30" fill="#147D79" font-weight="500" text-anchor="middle">×</text>
+<rect x="90" y="727" width="1220" height="106" rx="8" fill="#F5F2F9" stroke="none" stroke-width="1" />
+<text x="112" y="762" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#77639E" font-weight="650" text-anchor="start">激活参数</text>
+<text x="287" y="762" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#203747" font-weight="500" text-anchor="start">FP16 / BF16   ·   INT8 / INT4   ·   FP8 / FP4</text>
+<text x="1287" y="762" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#77639E" font-weight="450" text-anchor="end">Scale 类型 / 分组大小可配</text>
+<text x="287" y="801" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#6B7C87" font-weight="400" text-anchor="start">量化策略：不量化 / 静态 / 动态     粒度：Tensor / Token / Group 及两级组合</text>
+<path d="M90 855 H1310" fill="none" stroke="#DCE6E5" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="90" y="887" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#6B7C87" font-weight="550" text-anchor="start">组合示例</text>
+<text x="1310" y="887" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#147D79" font-weight="500" text-anchor="end">同一套参数，表达不同方案</text>
+<circle cx="101" cy="914" r="3" fill="#147D79" />
+<text x="121" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="600" text-anchor="start">INT4</text>
+<text x="295" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="323" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">Group 128</text>
+<text x="474" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="504" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">BF16 scale</text>
+<text x="833" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="865" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">INT 零点</text>
+<text x="1009" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="1041" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#77639E" font-weight="500" text-anchor="start">BF16 激活</text>
+<circle cx="101" cy="952" r="3" fill="#147D79" />
+<text x="121" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="600" text-anchor="start">FP4 E2M1</text>
+<text x="295" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="323" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">Group 16</text>
+<text x="474" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="504" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">E4M3 scale + Tensor S₂</text>
+<text x="833" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="865" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">无零点</text>
+<text x="1009" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="1041" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#77639E" font-weight="500" text-anchor="start">BF16 激活</text>
+<circle cx="101" cy="990" r="3" fill="#147D79" />
+<text x="121" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="600" text-anchor="start">INT3</text>
+<text x="295" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="323" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">Group 64</text>
+<text x="474" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="504" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">BF16 scale</text>
+<text x="833" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="865" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start">无零点</text>
+<text x="1009" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle">×</text>
+<text x="1041" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#77639E" font-weight="500" text-anchor="start">FP8 激活</text>
+<path d="M700 1039 V1082" fill="none" stroke="#147D79" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<text x="728" y="1068" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="400" text-anchor="start">统一接入</text>
+<rect x="448" y="1085" width="504" height="58" rx="10" fill="#203747" stroke="none" stroke-width="1" />
+<text x="700" y="1123" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#FFFFFF" font-weight="550" text-anchor="middle">Humming 推理   ·   Dense / MoE</text>
+</g></svg>
