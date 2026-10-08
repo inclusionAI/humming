@@ -1,0 +1,130 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1212" viewBox="0 0 1400 1212" role="img" aria-labelledby="title desc" lang="en" xml:lang="en">
+<title id="title">Humming: Unified Quantization Representation and Composable Parameters</title>
+<desc id="desc">Quantization methods, low-precision formats and export formats converge through parsing, parameter mapping and tensor conversion into the Humming standard format. It contains common quantization parameters and normalized tensors. Weight numeric format, scale granularity and group size, scale type, zero point and secondary scale are composable, together with activation formats and static or dynamic quantization strategies. Three example configurations illustrate the shared representation; they do not imply automatic changes to the quantization scheme during loading. Combinations must satisfy data type and device compatibility requirements. The unified representation feeds Humming inference for Dense and MoE workloads.</desc>
+<!-- Source: humming/schema/{__init__,base,humming,awq,gptq,modelopt,mxfp4}.py;
+     humming/config/enum.py; humming/dtypes.py; humming/transform.py.
+     The central representation is HummingWeightSchema + HummingInputSchema
+     with normalized tensors, before architecture-specific kernel packing.
+     Weight fields: b_dtype, bs_dtype, weight_scale_type,
+     weight_scale_group_size, weight_scale_group_size_n,
+     has_zero_point, is_fp_zero_point, weight_scale_2_type.
+     Input fields: a_dtype, input_scale_dtype, input_quant_mode,
+     input_scale_group_size.
+     Options describe composability subject to compatibility checks;
+     they are not an unrestricted Cartesian product.
+-->
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#6B7C87" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+  <marker id="teal-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#147D79" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></marker>
+</defs>
+<rect x="0" y="0" width="1400" height="1212" rx="0" fill="white" stroke="none" stroke-width="1" />
+<text x="58" y="59" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="32" fill="#203747" font-weight="700" text-anchor="start" id="en-text-0">Humming</text>
+<path d="M242 32 V66" fill="none" stroke="#C7D4DA" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+<text x="268" y="60" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="32" fill="#203747" font-weight="700" text-anchor="start" id="en-text-1">Unified Quantization Representation</text>
+<text x="58" y="101" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#6B7C87" font-weight="400" text-anchor="start" id="en-text-2">Normalize diverse formats. Compose quantization parameters as needed.</text>
+<g id="diagram-content" transform="translate(0 32)"><text x="254" y="152" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="500" text-anchor="middle" id="en-text-3">Quantization Methods</text>
+<text x="254" y="188" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#203747" font-weight="550" text-anchor="middle" id="en-text-4">AWQ · GPTQ</text>
+<text x="254" y="221" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="23" fill="#203747" font-weight="500" text-anchor="middle" id="en-text-5">AutoRound · BitNet</text>
+<path d="M254 236 V249 Q254 258 266 258" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<text x="700" y="152" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="500" text-anchor="middle" id="en-text-6">Low-Precision Formats</text>
+<text x="700" y="188" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#203747" font-weight="550" text-anchor="middle" id="en-text-7">FP8 · MXFP4</text>
+<text x="700" y="221" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="23" fill="#203747" font-weight="500" text-anchor="middle" id="en-text-8">NVFP4 · MXFP8</text>
+<path d="M700 236 V249 Q700 258 700 258" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<text x="1146" y="152" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="500" text-anchor="middle" id="en-text-9">Export Formats</text>
+<text x="1146" y="188" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#203747" font-weight="550" text-anchor="middle" id="en-text-10">compressed-tensors</text>
+<text x="1146" y="221" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="23" fill="#203747" font-weight="500" text-anchor="middle" id="en-text-11">ModelOpt · Quark</text>
+<path d="M1146 236 V249 Q1146 258 1134 258" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M266 258 H1134" fill="none" stroke="#C7D4DA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M700 258 V280" fill="none" stroke="#6B7C87" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)" />
+<rect x="382" y="281" width="636" height="52" rx="10" fill="#F5F8F9" stroke="#D8E1E5" stroke-width="1" />
+<text x="700" y="315" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#203747" font-weight="500" text-anchor="middle" id="en-text-12">Parse formats → Map parameters → Convert tensors</text>
+<path d="M700 334 V367" fill="none" stroke="#147D79" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<rect x="58" y="369" width="1284" height="669" rx="15" fill="white" stroke="#A5C5C2" stroke-width="1.7" />
+<rect x="60" y="371" width="1280" height="70" rx="13" fill="#EFF7F5" stroke="none" stroke-width="1" />
+<rect x="60" y="411" width="1280" height="30" rx="0" fill="#EFF7F5" stroke="none" stroke-width="1" />
+<text x="88" y="415" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="700" text-anchor="start" id="en-text-13">Humming Standard Format</text>
+<text x="1310" y="413" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="450" text-anchor="end" id="en-text-14">Common parameters + normalized weights / scales / zero points</text>
+<text x="90" y="478" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="21" fill="#203747" font-weight="650" text-anchor="start" id="en-text-15">Weight Parameters</text>
+<text x="1310" y="478" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#6B7C87" font-weight="400" text-anchor="end" id="en-text-16">Independent dimensions, combined where supported</text>
+<rect x="91" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="198" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle" id="en-text-17">Numeric Format</text>
+<path d="M114 542 H282" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="198" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-18">INT1–8</text>
+<text x="198" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-19">FP ≤ 8 bits</text>
+<text x="198" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-20">Exp. / mantissa bits</text>
+<rect x="341" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="448" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle" id="en-text-21">Scale Granularity</text>
+<path d="M364 542 H532" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="448" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-22">Tensor · Channel</text>
+<text x="448" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-23">Group · Block</text>
+<text x="448" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-24">Group size K / N</text>
+<rect x="591" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="698" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle" id="en-text-25">Scale Type</text>
+<path d="M614 542 H782" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="698" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-26">FP16 · BF16</text>
+<text x="698" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-27">E4M3 · E5M2</text>
+<text x="698" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-28">E8M0 · FP32</text>
+<rect x="841" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="948" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle" id="en-text-29">Zero Point</text>
+<path d="M864 542 H1032" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="948" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-30">None</text>
+<text x="948" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-31">INT</text>
+<text x="948" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-32">FP</text>
+<rect x="1091" y="497" width="214" height="157" rx="7" fill="#F6F9F9" stroke="none" stroke-width="1" />
+<text x="1198" y="528" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#147D79" font-weight="650" text-anchor="middle" id="en-text-33">Secondary Scale</text>
+<path d="M1114 542 H1282" fill="none" stroke="#DDE8E6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="1198" y="572" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-34">None</text>
+<text x="1198" y="603" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-35">Channel</text>
+<text x="1198" y="634" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="middle" id="en-text-36">Tensor</text>
+<text x="323" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle" id="en-text-37">×</text>
+<text x="573" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle" id="en-text-38">×</text>
+<text x="823" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle" id="en-text-39">×</text>
+<text x="1073" y="594" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="29" fill="#147D79" font-weight="500" text-anchor="middle" id="en-text-40">×</text>
+<path d="M102 666 V675 H1294 V666" fill="none" stroke="#B6CBC8" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+<path d="M700 675 V684" fill="none" stroke="#B6CBC8" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+<rect x="680" y="684" width="40" height="35" rx="0" fill="white" stroke="none" stroke-width="1" />
+<text x="700" y="711" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="30" fill="#147D79" font-weight="500" text-anchor="middle" id="en-text-41">×</text>
+<rect x="90" y="727" width="1220" height="106" rx="8" fill="#F5F2F9" stroke="none" stroke-width="1" />
+<text x="112" y="762" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#77639E" font-weight="650" text-anchor="start" id="en-text-42">Activation Parameters</text>
+<text x="390" y="762" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="22" fill="#203747" font-weight="500" text-anchor="start" id="en-text-43">FP16 / BF16   ·   INT8 / INT4   ·   FP8 / FP4</text>
+<text x="1287" y="762" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#77639E" font-weight="450" text-anchor="end" id="en-text-44">Configurable scale type / group size</text>
+<text x="112" y="801" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#6B7C87" font-weight="400" text-anchor="start" id="en-text-45">Quantization: None / Static / Dynamic   ·   Granularity: Tensor / Token / Group + two-level combinations</text>
+<path d="M90 855 H1310" fill="none" stroke="#DCE6E5" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+<text x="90" y="887" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#6B7C87" font-weight="550" text-anchor="start" id="en-text-46">Example Combinations</text>
+<text x="1310" y="887" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="18" fill="#147D79" font-weight="500" text-anchor="end" id="en-text-47">One parameter schema, diverse quantization schemes</text>
+<circle cx="101" cy="914" r="3" fill="#147D79" />
+<text x="121" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="600" text-anchor="start" id="en-text-48">INT4</text>
+<text x="295" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-49">×</text>
+<text x="323" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-50">Group 128</text>
+<text x="474" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-51">×</text>
+<text x="504" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-52">BF16 scale</text>
+<text x="833" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-53">×</text>
+<text x="865" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-54">INT zero point</text>
+<text x="1031" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-55">×</text>
+<text x="1060" y="921" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#77639E" font-weight="500" text-anchor="start" id="en-text-56">BF16 activations</text>
+<circle cx="101" cy="952" r="3" fill="#147D79" />
+<text x="121" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="600" text-anchor="start" id="en-text-57">FP4 E2M1</text>
+<text x="295" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-58">×</text>
+<text x="323" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-59">Group 16</text>
+<text x="474" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-60">×</text>
+<text x="504" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-61">E4M3 scale + Tensor S₂</text>
+<text x="833" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-62">×</text>
+<text x="865" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-63">No zero point</text>
+<text x="1031" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-64">×</text>
+<text x="1060" y="959" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#77639E" font-weight="500" text-anchor="start" id="en-text-65">BF16 activations</text>
+<circle cx="101" cy="990" r="3" fill="#147D79" />
+<text x="121" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#147D79" font-weight="600" text-anchor="start" id="en-text-66">INT3</text>
+<text x="295" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-67">×</text>
+<text x="323" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-68">Group 64</text>
+<text x="474" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-69">×</text>
+<text x="504" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-70">BF16 scale</text>
+<text x="833" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-71">×</text>
+<text x="865" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#203747" font-weight="400" text-anchor="start" id="en-text-72">No zero point</text>
+<text x="1031" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="19" fill="#9FAEAF" font-weight="400" text-anchor="middle" id="en-text-73">×</text>
+<text x="1060" y="997" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="20" fill="#77639E" font-weight="500" text-anchor="start" id="en-text-74">FP8 activations</text>
+<path d="M700 1039 V1082" fill="none" stroke="#147D79" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#teal-arrow)" />
+<text x="728" y="1068" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="17" fill="#6B7C87" font-weight="400" text-anchor="start" id="en-text-75">Unified Integration</text>
+<rect x="448" y="1085" width="504" height="58" rx="10" fill="#203747" stroke="none" stroke-width="1" />
+<text x="700" y="1123" font-family="Noto Sans CJK SC, Microsoft YaHei, PingFang SC, sans-serif" font-size="24" fill="#FFFFFF" font-weight="550" text-anchor="middle" id="en-text-76">Humming Inference   ·   Dense / MoE</text>
+</g></svg>
