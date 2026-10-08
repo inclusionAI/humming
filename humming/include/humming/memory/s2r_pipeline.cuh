@@ -78,14 +78,10 @@ public:
     stage_id = (stage_id + iter_id / Ctx::kWarpIters) % kNumStages;
     iter_id = iter_id % Ctx::kWarpIters;
     uint32_t buffer_id = iter_id % 2;
-    uint32_t k_iter_id = Ctx::kUsePackedKLayout ? 0 : iter_id;
-    uint32_t bs_iter_id = Ctx::kUsePackedKLayout && Ctx::kUseFusedE8m0Scale ? iter_id : k_iter_id;
     auto &smem = ctx.smem;
 
     if constexpr (!(kUseWgmma && Ctx::kUseRawWeight))
       loader_b.load(smem.stages[stage_id].b, mma.regs_qb_as_ptr(buffer_id), iter_id);
-    if constexpr (USE_PPU && !kUseMxmma && kIsGroupOrBlockWeightScale)
-      loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), bs_iter_id);
     if constexpr (!kUseWgmma && !Ctx::kUseUmma)
       loader_a.load(smem.stages[stage_id].a, mma.regs_a_as_ptr(buffer_id), iter_id, stage_id);
   }
@@ -99,6 +95,8 @@ public:
     uint32_t bs_iter_id = Ctx::kUsePackedKLayout && Ctx::kUseFusedE8m0Scale ? iter_id : k_iter_id;
     auto &smem = ctx.smem;
 
+    if constexpr (USE_PPU && !kUseMxmma && kIsGroupOrBlockWeightScale)
+      loader_bs.load(smem.stages[stage_id].bs, mma.arith.regs_bs_as_ptr(buffer_id), bs_iter_id);
     if constexpr (kUseMxmma) {
       if constexpr (kIsGroupInputScale)
         loader_as.load_sf(smem.stages[stage_id].as, mma.regs_sfa_as_ptr(buffer_id), k_iter_id);
