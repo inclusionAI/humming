@@ -211,9 +211,9 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           if (warp_iter_id == Ctx::kWarpIters - 1 && slice_iter + 1 < num_slice_iters) {
             consumer.wait_stage((stage_id + 1) % kNumStages);
           }
-          const bool defer_next_scales = Ctx::kDeferWgmmaPrefetchScales && warp_iter_id == Ctx::kWarpIters - 1;
-          if constexpr (Ctx::kDeferWgmmaPrefetchScales) {
-            if (defer_next_scales)
+          const bool use_late_scale_prefetch = Ctx::kUseWgmmaLateScalePrefetch && warp_iter_id == Ctx::kWarpIters - 1;
+          if constexpr (Ctx::kUseWgmmaLateScalePrefetch) {
+            if (use_late_scale_prefetch)
               s2r_pipe.template load_stage_iter<false, true, false>(stage_id, warp_iter_id + 1);
             else
               s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
@@ -224,8 +224,8 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             mma.wait_and_promote(stage_id, warp_iter_id);
           else if constexpr (Ctx::kWarpIters > 1)
             mma.run(stage_id, warp_iter_id);
-          if constexpr (Ctx::kDeferWgmmaPrefetchScales) {
-            if (defer_next_scales)
+          if constexpr (Ctx::kUseWgmmaLateScalePrefetch) {
+            if (use_late_scale_prefetch)
               s2r_pipe.template load_stage_iter<false, false, true>(stage_id, warp_iter_id + 1);
           }
           mma.transform_b(

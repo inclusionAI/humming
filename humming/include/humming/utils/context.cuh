@@ -99,7 +99,7 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   // Group AS and non-fused BS must survive until accumulator promotion has finished.
   static constexpr bool kPreserveASForPromotion = LayerConfig::kIsGroupInputScale && !kUseWgmmaLateAS;
   static constexpr bool kPreserveBSForPromotion = !LayerConfig::kUseFusedE8m0Scale && (LayerConfig::kIsGroupWeightScale || LayerConfig::kIsBlockWeightScale);
-  static constexpr bool kDeferWgmmaPrefetchScales = kUseWgmmaSplitIssueWait && kWarpIters % 2 == 1 && (kPreserveASForPromotion || kPreserveBSForPromotion);
+  static constexpr bool kUseWgmmaLateScalePrefetch = kUseWgmmaSplitIssueWait && kWarpIters % 2 == 1 && (kPreserveASForPromotion || kPreserveBSForPromotion);
 
   static constexpr uint32_t kUseWarpSpec = TuningConfig_::kUseWarpSpec;
   static constexpr uint32_t kNumThreads = TuningConfig_::kNumThreads;

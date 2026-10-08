@@ -146,13 +146,13 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           }
           if (warp_iter_id == Ctx::kWarpIters - 1 && remaining_iters > 1)
             consumer.wait_stage((stage_id + 1) % kNumStages);
-          const bool defer_next_scales = Ctx::kDeferWgmmaPrefetchScales && warp_iter_id == Ctx::kWarpIters - 1;
-          if (defer_next_scales)
+          const bool use_late_scale_prefetch = Ctx::kUseWgmmaLateScalePrefetch && warp_iter_id == Ctx::kWarpIters - 1;
+          if (use_late_scale_prefetch)
             s2r_pipe.template load_stage_iter<false, true, false>(stage_id, warp_iter_id + 1);
           else
             s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
           mma.wait_and_promote(stage_id, warp_iter_id);
-          if (defer_next_scales)
+          if (use_late_scale_prefetch)
             s2r_pipe.template load_stage_iter<false, false, true>(stage_id, warp_iter_id + 1);
 
           if (Ctx::kWarpIters > 1 && warp_iter_id == Ctx::kWarpIters - 2) {
