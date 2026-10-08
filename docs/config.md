@@ -1,296 +1,420 @@
-# HummingKernel Configuration
+# Humming 配置
 
-HummingKernel configurations are divided into three categories:
+Humming 的 GEMM 配置分为 `LayerConfig`、`ComputeConfig` 和 `TuningConfig` 三部分。
 
-- **LayerConfig**: Parameters that affect weight layout, data types, and shapes.
-- **ComputeConfig**: Parameters that do not directly affect weights but significantly impact kernel behavior or computation precision.
-- **TuningConfig**: Parameters that only affect performance.
+| 配置 | 描述内容 | 主要影响 |
+|---|---|---|
+| `LayerConfig` | 层的形状、数据类型、量化方式与权重布局 | 数据表示、权重预处理，以及可用的计算路径 |
+| `ComputeConfig` | GEMM 类型、精度和计算行为 | 输入组织、累加方式和 batch invariant |
+| `TuningConfig` | kernel 的分块、流水线、数据搬运和调度 | 执行效率与资源占用 |
+
+`LayerConfig` 在权重转换时确定；更改其中影响存储的选项后，需要重新转换权重及相关 scale。
+`ComputeConfig` 和 `TuningConfig` 可以在调用时选择，但必须与已有数据布局兼容。
+例如，切换 `mma_type` 不一定需要重新转换权重，但目标 backend 必须支持现有的权重和 scale 布局。
+
+下文使用 GEMM 的 M/N/K 维度：M 表示输入行数，N 表示输出特征数，K 表示归约维度。
+参数定义见 [config.py](../humming/config/config.py)，组合限制还会在 kernel 初始化时检查。
 
 ## LayerConfig
 
-| Parameter | Description |
-|-----------|-------------|
-| `a_dtype`, `b_dtype` | Activation and weight data types. See the project README for supported combinations. |
-| `c_dtype` | Output matrix data type. Only `float16` and `bfloat16` are supported. |
-| `bs_dtype` | Weight scale data type. Supports `float16` / `bfloat16` / `float8e8m0` / `float8e4m3` / `float8e5m2` / `float8e5m3`. |
-| `shape_n`, `shape_k` | The N and K dimensions of the GEMM after padding. |
-| `pad_shape_n`, `pad_shape_k` | Humming pads the weight matrix to a suitable shape (e.g., `shape_n` is typically padded to a multiple of 256, `shape_k` to a multiple of 128). These parameters specify the size of the padded portion, i.e., the actual effective weight shape is `shape_n - pad_shape_n` and `shape_k - pad_shape_k`. Note that the last dimension of input and output matrices should match the unpadded shape. |
-| `num_experts` | Number of experts for MoE. Set to `0` or `None` for non-MoE. |
-| `input_scale_group_size` | Group size for activation quantization. Not applicable when using FP16/BF16. Must be a power of 2 and greater than the minimum group size requirement for the activation type. Set to `0` for channelwise/tokenwise quantization. |
-| `weight_scale_type` | Supports several modes: `group`, `channel`, `block`, `tensor`, `group_tensor`. `group_tensor` means both groupwise scale and tensorwise scale (global scale) are present. |
-| `weight_scale_group_size` | For groupwise or blockwise, this specifies the quantization group size along the K dimension. Ignored for channelwise or tensorwise. |
-| `weight_scale_group_size_n` | Only used for blockwise quantization. Specifies the quantization group size along the N dimension. |
-| `use_int_weight_scale` | Whether to use integer-type scale. Only applicable for INT8 or INT4 activations with `weight_scale_group_size > 0`. Used to accelerate computation in certain cases. The weight scale must be preprocessed as follows: |
-| `has_zero_point` | Whether to enable zero point. When enabled, the dequantization changes from `x * scale` to `(x - zp) * scale`. Humming supports two zero point types (see below). |
-| `is_fp_zero_point` | Whether to use FP-type zero point. See `has_zero_point` for details. |
-| `has_bias` | Whether to use fused bias addition. |
-| `use_fused_e8m0_scale` | Fuse E8M0 group scales into MXFP4-to-FP8/INT8 weight conversion. Weight preprocessing extracts a secondary scale. |
-| `use_packed_k_layout` | Pack K slabs for WGMMA with 8-bit activations and even-bit weights. Can be explicitly enabled together with `use_fused_e8m0_scale`; transformed weights must use the same setting as the kernel. |
+`LayerConfig` 描述一层数据的表示方式。同一组转换后的权重可以服务于不同 M 的输入，但其数据类型、N/K 形状、量化参数和布局保持固定。
 
-Ordinary E4M3/E5M2 scales use the software dequantization path before SM89 and
-native `cvt` conversions on SM89 and newer (via FP16 when needed).
-Unsigned E5M3 scales are stored as `torch.uint8` and use software dequantization.
-Their exponent bits retain the existing conversion semantics: exponent 31 is
-finite in BF16/FP32 and maps to Inf/NaN in FP16.
+### 形状与目标设备
 
-For ordinary FP16 layers, E8M0 scales are rebased from bias 127 to bias 15 and
-packed as E5M0 in the high five bits of a byte; the low three bits are zero and
-ignored. Scales within `[2^-14, 2^15]` need no extra secondary scale. Weight
-preprocessing extracts a tensorwise `weight_scale_2` only when this range is
-exceeded, merging it with an existing secondary scale. When both ends cannot
-fit, it preserves the largest scales and lets the smallest scales underflow.
-Native block-scaled MMA and fused E8M0 weight paths retain their own formats.
+#### `sm_version`
 
-Weight preprocessing is independent of the tuning backend. `use_block_scaled_mma`
-and `use_native_dequant` are derived from the architecture, data types, quantization
-parameters, and (for native dequantization) compiler support.
+目标 GPU 的 SM 版本，例如 `90` 表示 SM90。省略时使用当前设备。
 
-Equal-bit-width A/B operands retain K-contiguous packed B rows, with padding and
-integer encoding conversion where needed. MMA/MXMMA load these rows into swizzled
-shared memory and use `ldmatrix`; WGMMA and UMMA use SS operands. Native E2M1,
-E3M2, and E2M3 weights paired with FP8 inputs on SM10x/SM11x automatically use raw rows when
-the data types and quantization parameters support UMMA. These weights require
-the UMMA SS TMA expansion path. Other mixed-width operands use repacking.
-`use_umma_ss` is now derived by the kernel and is not a layer configuration option.
-UMMA SS requires `use_tma_b=True`.
+它参与决定 weight layout、反量化方式和可用指令。转换后的层需在相同 SM 版本上使用；跨架构部署时，应分别准备对应的层配置与权重。
 
-Ordinary mixed-width weights use the same MMA repack layout across backends,
-including SM90. WGMMA adapts the register order during dequantization, including
-integer zero points. Weight transformation no longer takes `use_wgmma`.
-Re-transform ordinary weights previously repacked with the WGMMA mini-block order.
-Packed-K weights retain their existing layout and require WGMMA. Ordinary
-per-group scales use the shared layout described below; block scales and fused
-E8M0 scales have separate storage rules. A tuning override must be compatible
-with all stored tensors, including the scales.
+#### `shape_n`、`shape_k` 与 `pad_shape_n`、`pad_shape_k`
 
-`umma` requires SM10x/SM11x GPUs and CUDA 12.9+, with FP16/BF16 outputs and FP32
-accumulation. TS continues to handle repacked mixed-width operands. Native SS
-uses 256 threads and retains dense/MoE, Stream-K and cooperative CTA scheduling.
-SS keeps the input-scale global-memory layout unchanged. It rearranges scales
-in the existing AS shared-memory storage when the M tile is 128-row aligned,
-and uses scratch storage otherwise. Scale copies and MMA instructions share
-one issuer and one TMEM scale buffer. With separate TMA loading warps, AS has
-its own completion barrier. When scales can be prepared without reading B/BS,
-two-CTA SS loads publish A/B completion to the issuer through cooperative TMA;
-the scale warp can prepare AS before those operands finish loading. Indexed SS
-keeps all activation-loading threads on cp.async and tracks TMA weight completion
-separately, so scale preparation can overlap B/BS loading.
+`shape_n` 和 `shape_k` 是 **padding 后** 的 N/K；`pad_shape_n` 和 `pad_shape_k` 是补齐的元素数，默认均为 `0`。
 
-With 32-row chunked output, separate output storage and non-indexed scheduling, SS
-uses the available TMEM capacity for an overlapping accumulator pair. The
-epilogue reads overlapping rows first so the next tile can begin computing.
-Native FP4 SS stages whose K size is a multiple of 256 use K64+96+96 issues
-per 256 elements. Other stage sizes retain the standard instruction shape.
-Indexed SS also overlaps 32-row chunked output with the next accumulator tile; row-index
-buffers are released separately after output scatter finishes. MoE selection
-accounts for SS's single scale buffer, chunked output, and cooperative CTA pairs.
-It retains whole-tile output for small M tiles and uses sampled expert sizes and
-available work to avoid underfilled tiles and short cooperative pipelines.
-These optimizations are selected internally; TS keeps its existing schedule.
-SS is selected from the fixed weight layout and the tuning backend.
+- 实际输出特征数为 `shape_n - pad_shape_n`。
+- 实际输入特征数为 `shape_k - pad_shape_k`。
+- 输入和输出 tensor 使用实际特征数，转换后的权重使用 padding 后的形状。
 
-**`use_int_weight_scale` preprocessing:**
+例如，`shape_n=1024`、`pad_shape_n=24` 表示实际输出有 1000 个 channel。
+Padding 用于满足布局和 kernel 的对齐要求，也会增加存储量及部分计算量；应使用权重转换流程确定的值，不能仅修改配置而不调整存储。
 
-```python
-dtype = weight_scale.dtype
-assert dtype in [torch.bfloat16, torch.float16]
-weight_scale = (weight_scale / weight_scale.max() * 2048).round()
-weight_scale = weight_scale.to(torch.int16).view(dtype)
-```
+#### `num_experts`
 
-**Zero point types (`has_zero_point`):**
+MoE 的 expert 数量，普通 GEMM 使用 `0`。它决定权重及相关参数的 expert 维度。
 
-- **INT type**: Only supports INT-type quantized weights, with the same bit width as the quantization bit width.
-- **FP type**: FP16/BF16 type, only supported when using FP16/BF16 as the activation type.
+该参数不表示 top-k，也不决定每个 expert 的实际 token 数；这些信息由调用时的输入和 routing 数据提供。
+
+### 数据类型
+
+#### `a_dtype`、`b_dtype`
+
+分别指定 GEMM kernel 使用的 activation 和 weight 类型，影响量化精度、存储大小、反量化成本以及可用 backend。
+
+- `a_dtype` 指量化后送入 GEMM 的 activation 类型，调用方原始输入可以先经过 input quantization。
+- `b_dtype` 与转换后的 weight 表示匹配，低位宽数据通常以 packed 形式存储。
+- 支持组合还取决于 SM 版本、scale 和 zero point；参见 [README](../README.md)。
+
+#### `c_dtype`
+
+输出类型，支持 `float16` / `bfloat16`。它与 accumulator 精度是两个不同的选项；输出为 FP16 不代表中间累加也使用 FP16。
+
+#### `as_dtype`、`bs_dtype`
+
+分别描述 activation scale 与 weight scale 的类型。在 group quantization 中，它们决定 group scale 的存储精度与格式。
+
+- `as_dtype` 通常自动推导：没有 input scale 时为 `None`；普通路径通常使用 FP32；block-scaled 路径根据量化格式选择 E8M0 或 E4M3 等类型。
+- `bs_dtype` 默认使用 `c_dtype`。指定低精度 scale 时，需要同时满足量化格式和 backend 的要求。
+- 同时使用 activation 和 weight group scale 的 block-scaled 路径要求两者的 scale dtype 一致。
+
+Scale dtype 不直接决定输出 dtype。减小 scale 的位宽可以降低 scale 存储量，但也会改变可表示的范围和量化误差。
+
+### 输入量化
+
+#### `input_quant_mode`
+
+指定输入量化方式，以及 input scale 的组织形式。
+
+| 值 | Scale 组织 |
+|---|---|
+| `none` | 不进行输入量化，用于 FP16/BF16 activation。 |
+| `static_tensor` | 使用预先给定的 tensor scale。 |
+| `dynamic_token` | 每个 token 动态计算一个 scale。 |
+| `dynamic_group` | 每个 token 的每个 K group 动态计算 scale。 |
+| `static_tensor_dynamic_group` | static tensor scale 与 dynamic group scale 组合。 |
+| `dynamic_group_token` | dynamic group scale 与 secondary token scale 组合。 |
+
+省略时，16-bit activation 使用 `none`；低精度 activation 在 `input_scale_group_size > 0` 时使用 `dynamic_group`，否则使用 `dynamic_token`。
+
+带 secondary input scale 的两种组合模式要求 block-scaled MMA。
+`dynamic_group_token` 用于支持的 FP4 activation，要求 group size 为 `16`，group scale 为 E4M3。
+
+#### `input_scale_group_size`
+
+每个 token 沿 K 的量化 group 大小；无 group scale 时为 `0`。
+例如 K=4096、group size=128 时，每个 token 有 32 个 K group，各自使用一个 group scale。
+
+较小的 group 通常能更细致地适应数值分布，但会增加 scale 数量和处理开销。取值还需满足量化格式、backend 和 tile 的对齐要求。
+同时使用 activation 和 weight group scale 的 block-scaled 路径要求两者的 group size 一致。
+
+### 权重量化
+
+#### `weight_scale_type`
+
+指定 primary weight scale 的共享范围。下表以逻辑 weight 矩阵 `[N, K]` 为例；MoE 中每个 expert 分别使用对应的 scale。
+
+| 值 | Scale 组织 |
+|---|---|
+| `group` | 每个输出 channel 沿 K 分组，每组一个 scale。 |
+| `block` | 沿 N/K 分块，一个 scale 由整个 block 共享。 |
+| `channel` | 每个输出 channel 一个 scale。 |
+| `tensor` | 整个 weight 矩阵一个 scale。 |
+
+省略时，`weight_scale_group_size_n > 1` 推导为 `block`；否则根据 K group size 是否为 `0`，选择 `channel` 或 `group`。
+这些模式描述 scale 的逻辑含义；转换后的物理存储还可能经过 packing 或重排。
+
+#### `weight_scale_group_size`、`weight_scale_group_size_n`
+
+分别指定 scale 沿 K 和 N 的共享范围。
+
+- `group` / `block` 要求 `weight_scale_group_size > 0`。
+- `channel` / `tensor` 要求 `weight_scale_group_size=0`。
+- `weight_scale_group_size_n` 用于 block scale，描述有多少个相邻输出 channel 共享 scale。
+
+例如 `block` 模式下 N/K group size 分别为 128/128，表示每个逻辑 `[128, 128]` weight block 使用一个 scale。
+Group size 属于已有量化权重的格式，不能作为普通 tuning 参数直接修改。
+
+#### `weight_scale_2_type`
+
+Secondary weight scale 的类型，支持 `none`、`channel`、`tensor`，默认 `none`。
+它与 primary scale 组合使用，表达额外的 channel 或 tensor 级缩放。
+
+支持的组合包括：
+
+- `group` primary scale，加 `channel` 或 `tensor` secondary scale。
+- `channel` primary scale，加 `tensor` secondary scale。
+
+部分预处理路径会自动提取 secondary scale，因此最终配置可能与最初传入值不同。调用时应使用转换后的完整参数集合。
+
+#### `has_zero_point`、`is_fp_zero_point`
+
+`has_zero_point` 控制是否在反量化中进行 zero-point 修正，默认 `False`。启用后需要提供相应的 zero-point tensor。
+
+`is_fp_zero_point` 决定 zero point 的表示：
+
+- `False`：使用与量化位宽一致的 integer zero point，仅用于 integer weight。
+- `True`：使用 FP16/BF16 zero point，要求 FP16/BF16 activation。
+
+Zero point 的类型和布局需要与 weight quantization 及预处理结果一致；这两个选项不能只在 kernel 调用时切换。
+
+### 预处理与其他选项
+
+#### `use_int_weight_scale`
+
+将 group weight scale 转换为整数表示，以加速部分 INT8/INT4 activation 路径。该转换可能引入额外的 scale 舍入误差，并提取 secondary scale。
+
+通常保留自动选择。主要限制是使用 group weight scale、没有 input group scale，且不能与 channel secondary weight scale 组合。
+转换后的 scale 采用特殊存储表示，应由对应预处理流程生成。
+
+#### `use_fused_e8m0_scale`
+
+在 FP4 weight 转换为 FP8/INT8 的过程中融合 E8M0 group scale，并提取 secondary scale，减少单独处理 group scale 的工作。
+
+通常自动选择，用于支持的 8-bit activation 与 E2M1 weight 路径。它会改变 scale 的预处理和消费方式，需要与转换后的权重参数保持一致。
+
+#### `use_packed_k_layout`
+
+使用 packed-K weight layout，将 K 方向的数据组织成适合 WGMMA 的形式。
+
+- 要求 SM90、8-bit activation、even-bit weight，且不是 raw weight 路径。
+- 转换后的权重要求使用 WGMMA，并满足对应的 warp K 与 scale group 限制。
+- 省略时根据量化参数和层形状自动选择；改变它需要重新进行权重转换。
+
+通常保留自动选择。它决定数据布局，不属于可以在同一份权重上随意切换的 backend tuning 开关。
+
+#### `has_bias`
+
+是否在 epilogue 中融合 bias addition，默认 `False`。启用时需提供与实际输出 channel 对应的 bias；MoE 中使用对应 expert 的 bias。
 
 ## ComputeConfig
 
-| Parameter | Description |
-|-----------|-------------|
-| `gemm_type` | Supports `dense`, `indexed`, `grouped_contiguous`, `grouped_masked`. |
-| `use_f16_accum` | Whether to use FP16 accumulator for MMA. Applicable when activation type is `fp16` / `float8e4m3` and output type is `float16`. |
-| `use_batch_invariant` | Whether to enable batch invariance support. |
+### `gemm_type`
+
+选择 GEMM 的输入组织与调度形式。
+
+| 值 | 使用方式 |
+|---|---|
+| `dense` | 普通矩阵乘法，输入行共享同一组权重。 |
+| `indexed` | 根据 routing 索引读取输入，并将结果写回对应位置。 |
+| `grouped_contiguous` | 各 expert 的输入沿行方向连续存储，使用 expert 边界描述分组。 |
+| `grouped_masked` | 各 expert 使用固定容量的存储区域，并提供实际有效行数。 |
+
+普通层可以自动选择 `dense`；MoE 需明确指定类型，并提供该类型要求的 routing 或 expert layout 数据。
+这些类型对 TMA、tile 对齐和输出方式的支持不同，切换时也需要调整输入组织。
+
+### `use_f16_accum`
+
+使用 FP16 accumulator，默认 `False`。它控制中间累加精度，而不是输出 tensor 的类型。
+
+- 在支持的路径中可减少 accumulator 存储及部分计算开销。
+- 相比 FP32 accumulation，舍入误差和溢出风险更高；K 较长或数据范围较大时尤其需要检查精度。
+- 仅支持特定 activation/backend 组合；UMMA、MXMMA 及 block-scaled 路径的精度限制需同时满足。
+
+### `use_batch_invariant`
+
+启用 batch invariant 支持，约束归约与调优选择，避免 batch 大小改变计算组织后产生不同的数值结果。默认 `False`。
+
+要求关闭 Stream-K，满足 `warp_shape_k == block_shape_k`，并在不同 batch 大小下固定使用同一种 `mma_type`。启用后 heuristic 会配合调整配置；手动 tuning 时也需要遵守这些限制，可能牺牲部分性能。
+
+### `use_m_major_input_scale`
+
+使用 M-major input scale 布局，默认 `False`。对于 group scale，可以将其理解为让同一 K group 的不同 token scale 沿 M 方向连续排列。
+
+输入预处理和 GEMM 必须使用相同布局；仅修改 GEMM 配置不会自动转换已有 scale tensor。
+`indexed` GEMM 不支持该选项；启用 `use_tma_as` 时要求它为 `True`。
 
 ## TuningConfig
 
-`mma_type` selects `mma`, `wgmma`, `umma`, or `mxmma`. Heuristics resolve it per
-shape; explicit tuning configurations can override it without changing LayerConfig
-or transforming weights again, provided the selected backend supports the fixed
-weight and scale layouts. Block-scaled layers require UMMA on SM10x/SM11x or MXMMA
-on SM12x. Move `mma_type` from old layer dictionaries into tuning dictionaries and
-re-transform weights created with the old packing convention.
+建议从 heuristic 生成的配置开始，只调整目标 workload 中可能有收益的参数。
+以下候选值是尝试方向，仍需满足 backend、量化格式、对齐和资源限制；性能以实际测量为准。
 
-On NVIDIA GPUs, ordinary per-group weight scales use the WGMMA layout for both
-MMA and WGMMA. For low-bit activations, MMA loads even and odd N channels into
-separate register sequences and applies the converted values to the corresponding
-accumulators. FP32 and integer accumulation need no intermediate scale repacking;
-FP16 accumulation assembles half2 pairs when applying scales. These MMA group-scale
-configurations require block N >= 64, matching the scale packing block.
+### 计算后端
 
-Re-transform group scales previously stored in the MMA layout. Fused E8M0, native
-block-scaled, channel, tensor, and block-scale layouts are unchanged.
+#### `mma_type`
 
-### Block and Warp Shapes
+选择使用的 MMA backend。它决定计算指令以及对应的线程、数据加载和 accumulator 组织方式。
 
-`block_shape` and `warp_shape` are 3D tuples representing the M/N/K dimensions, with the following constraints:
+| 值 | 主要适用范围 |
+|---|---|
+| `mma` | 普通 MMA 路径，具体 dtype 支持取决于架构。 |
+| `wgmma` | SM90 上的 WGMMA 路径。 |
+| `umma` | 支持的 SM10x/SM11x 配置，要求 CUDA 12.9+。 |
+| `mxmma` | 支持的 SM12x block-scaled 配置。 |
 
-- `block_shape[i]` must be a power-of-2 multiple of `warp_shape[i]`.
-- `block_shape_n` must be at least 64.
-- When using WGMMA, `block_shape_n` must be at least 4x `warp_shape_n`.
-- When using UMMA, block M/K must equal warp M/K, warp N is 32, M is a multiple of 8 in [8, 256], and K is a power of two of at least 32. Block N can be 128, 256, or 512; the tile must fit SMEM and TMEM.
-- For indexed GEMMs, align `sorted_ids` and `expert_ids` to each projection's `block_shape_m`.
-- `warp_shape_m` must be a multiple of MMA shape M.
-- Valid values for `warp_shape_n` and `warp_shape_k` depend on the activation type:
+Block-scaled 层必须使用对应架构的 UMMA 或 MXMMA；packed-K 布局要求 WGMMA。
+通常保留 heuristic 选择；同一布局支持多个 backend 时，可以比较其性能，但切换时需要同时使用该 backend 支持的 tile 和 pipeline 配置。
 
-| Activation Type | `warp_shape_n` | `warp_shape_k` |
-|----------------|----------------|----------------|
-| `float16` / `bfloat16` | 32, 64 | 32, 64 |
-| `float8e4m3` / `float8e5m2` / `int8` | 16, 32, 64 | 64, 128 |
-| `float4e2m1` / `int4` | 16, 32, 64 | 128, 256 |
+### 分块与线程组织
 
-With `use_packed_k_layout`, warp K must be 128 and warp N can start at 16. Activation scale groups,
-when present, must cover warp K. Weight scale groups must also cover warp K unless
-`use_fused_e8m0_scale` is enabled; fused conversion applies each K32 slab's weight
-scale before WGMMA, so GS32 weights can use packed warp K128. Fused packed-K
-remains opt-in; the default layout selection is unchanged.
+#### `block_shape`
 
-`raster_group_m` controls M tile grouping for dense and grouped-contiguous GEMMs.
-For grouped-contiguous GEMMs, values greater than 1 automatically use an expert
-tile prefix table and binary lookup, allowing M tile IDs to move backwards as N
-advances. A value of 1 uses the existing forward warp scan without the prefix table.
+CTA 的 `(M, N, K)` tile，影响数据复用、并行度与 SMEM/register 占用。
 
-### Pipeline and Synchronization
+- **M**：小 batch 或每个 expert 行数较少时，优先使用较小的 tile M，减少 padding 和无效计算；行数充足时可增大以复用 weight。
+- **N**：较大的 tile N 可以复用 activation，但会增加 accumulator 和 weight tile 的资源需求。
+- **K**：增大后可减少 stage 迭代次数，但每个 stage 更大，可能压缩可用 stage 数或 CTA 并发。
 
-| Parameter | Description |
-|-----------|-------------|
-| `num_stages` | Number of pipeline stages. Must be at least 2. Must be at least 3 when using `use_warp_spec` with WGMMA. |
-| `use_warp_spec` | Whether to enable Warp Specialization. Requires SM90+. Required for UMMA. |
-| `wgmma_use_late_as` | Delay per-group input-scale register loads until WGMMA accumulator promotion. Defaults to `False`; requires WGMMA with per-group input scales. |
-| `wgmma_split_issue_wait` | Prefetch the next fragment between WGMMA issue and wait. Defaults to `False`; independent of input-scale granularity and `wgmma_use_late_as`. |
-| `use_mbarrier` | Whether to use MBarrier. Requires SM80+. |
-| `use_cp_async` | Whether to use CP Async. Requires SM80+. |
-| `num_ctas_per_sm` | Number of CTAs (Cooperative Thread Arrays / Thread Blocks) launched per SM. |
-| `umma_cta_group_size` | `1` (default) or `2`. With `2`, a cluster of two CTAs cooperatively executes UMMA for adjacent N tiles. This is independent of CTA residency and TMA multicast. |
-| `output_chunk_rows` | Output rows per shared-memory chunk for every MMA backend. `0` (default) writes a full tile; positive values must be multiples of 32 up to 256 and are clamped to tile M. Partial final chunks are supported. UMMA alternates two buffers; other backends reuse one buffer. Supports TMA and regular stores, Stream-K, and MoE scatter. Replaces `num_write_splits` (use half of tile M to reproduce two splits). |
+调优时先在 heuristic 配置附近调整；较大的 tile 还会减少独立输出 tile 的数量，小矩阵可能因此无法充分利用所有 SM。
 
-The two `wgmma_*` options apply only to WGMMA and support both warp-specialized
-and non-warp-specialized kernels. Per-group inputs support all four combinations;
-per-token and per-tensor inputs must leave `wgmma_use_late_as` disabled. They keep
-the existing weight layout and weight-scale consumption order; scale prefetches
-that would overwrite a live scale buffer wait until the current promotion finishes.
-Tune these options together with tile shapes, pipeline stages, and Stream-K.
+#### `warp_shape`
 
-### TMA (Tensor Memory Accelerator)
+warp 的 `(M, N, K)` 计算分块；WGMMA 由四个 warp 协作，UMMA 则使用该字段表达其特定线程组织约束。
+在普通 MMA/WGMMA 路径中，block 与 warp 各维度的比值共同决定计算线程数，因此减小 warp tile 不一定会减少整个 CTA 的资源占用。
 
-| Parameter | Description |
-|-----------|-------------|
-| `use_tma` | Whether to use TMA. Requires SM90+. When set to `True`, all parameters use TMA by default. Fine-grained control is available via the parameters below. |
-| `use_tma_a` | Enable TMA for matrix A loading. |
-| `use_tma_b` | Enable TMA for matrix B loading. |
-| `use_tma_c` | Enable TMA for output matrix storing. |
-| `use_tma_bs` | Enable TMA for weight scale loading. |
-| `use_tma_bzp` | Enable TMA for zero point loading. |
-| `use_tma_bias` | Enable TMA for bias loading. |
-| `multi_cast_size_a` | When greater than 1, enables TMA MultiCast for matrix A. Currently only supports Dense GEMM. Only one of `multi_cast_size_a` and `multi_cast_size_b` can be greater than 1. |
-| `multi_cast_size_b` | When greater than 1, enables TMA MultiCast for matrix B. Only one of `multi_cast_size_a` and `multi_cast_size_b` can be greater than 1. |
+通常保留 backend 推荐值。Register 压力较大时可尝试减小 warp M/N；增加 K 方向的 warp 数可提高归约并行度，但需要额外的部分结果归约。
 
-### UMMA pipeline and cooperative output
+主要 shape 限制：
 
-Both one-CTA and two-CTA execution use the same continuous stage ring and three
-warp groups per CTA. WG0 contains two loading warps, an issuing warp (active only
-in the leader CTA for cooperative execution), and an activation readiness warp.
-For cp.async activation tiles of at least 12 KiB, WG0 instead uses three loading
-warps and one issuing warp. Dequantization's combined load barrier supplies A
-readiness in this case. The choice depends on bytes per tile, not token count.
-WG1 writes output; WG2 converts the weights. Accumulator ready/free barriers
-separate issuing from output. Indexed loading retires the preceding tile before
-reusing its row-index buffer. With two CTAs, each loads half of A and its own N
-tile of B. Both CTAs retain the existing compressed weight
-layout and register-to-TMEM conversion. MMA completion releases operands in both
-CTAs through multicast barrier commits; this does not enable TMA multicast.
+- 普通 MMA/WGMMA 的 block 各维度需为 warp 对应维度的 power-of-two 倍数，并满足指令、量化 group 和布局的对齐要求。
+- WGMMA 要求 N 方向组成完整的四-warp group，即 `block_shape_n / warp_shape_n` 为 `4` 的倍数。
+- UMMA 要求 block M/K 等于 warp M/K，warp N 为 `32`，block N 为 `128`、`256` 或 `512`；每行 activation 的 block K 数据至少为 64 bytes。
+- packed-K 要求 warp K 为 `128`；input group scale 必须覆盖 warp K，非 fused E8M0 的 weight group scale 也需覆盖 warp K。
+- `indexed` GEMM 的 `sorted_ids`、`expert_ids` 需按对应 projection 的 block M 对齐。
 
-Chunked output supports dense, indexed, and grouped GEMMs, TMA or ordinary
-stores, and all `smem_reuse_mode` values. Block N can be 128, 256, or 512;
-block M is a multiple of 8 for one CTA, or 16 for two CTAs, subject to SMEM and
-TMEM capacity. The two-CTA M alignment comes from the transposed `tcgen05.mma`
-instruction's N dimension. Indexed output uses ordinary stores and preserves
-row indices until all chunks have been written. Grouped TMA output uses the
-existing per-CTA descriptor buffer and expert row offset.
+### 流水线与并发
 
-Positive output chunk heights are multiples of 32, clamped to block M.
-The TMA box retains that height. When it does not divide block M, the per-CTA
-descriptor's global M boundary is updated for each tile so excess tail rows are
-masked. Updates wait for outstanding stores and publish the descriptor through
-the tensor-map proxy fences. Dense tiles with evenly dividing chunks need no updates.
-When the actual output N (excluding padding) is divisible by 64, a 3D descriptor
-combines 64-column SMEM slabs into one store. UMMA chunked output combines 128
-columns per partition; other output paths combine the entire block N. Otherwise,
-2D stores retain exact N bounds and mask padded columns. Stream-K uses matching
-3D or 2D reduction stores.
-Each N partition writes only its own columns; the accumulator is released only
-after the last partition has been read. Reusing stage SMEM waits for output
-completion before loading the next tile, reducing load/epilogue overlap.
+#### `num_stages`
 
-Two-CTA execution requires N divisible by twice block N,
-and `num_ctas_per_sm=1`. Both TMA and cp.async stage loads are supported,
-including indexed A gathers. Each CTA loads only its own half of A; both CTAs
-publish operand readiness before the leader issues UMMA.
-Cooperative instructions support FP16/BF16, ordinary FP8 with FP8/FP6/FP4
-weights, and MXFP8 with MXFP8/MXFP6/MXFP4 weights and group-32 E8M0 scales.
-FP4 activations use native `mxf4nvf4` instructions with packed FP4 weights:
-MXFP4 uses group-32 E8M0, while group-16 supports E8M0 or E4M3 (NVFP4).
-Both one-CTA and two-CTA execution support these formats. The SM100 dispatcher
-also selects UMMA for supported FP4 activation configurations.
+流水线缓冲 stage 数，通常至少为 `2`，WGMMA 至少为 `3`。更多 stage 允许提前准备后续计算的数据，但每增加一个 stage 都需要额外的 SMEM。
 
-TS also supports lower-bit integer weights, such as INT2 with MXFP4 or NVFP4
-activations, through the existing register conversion and TMEM store path.
-Hardware group scales must be nonnegative (E8M0 or unsigned E4M3).
-Either operand may omit group scales: its hardware scales are filled with one,
-while tensor/token activation scales and tensor/channel weight scales are applied
-in the epilogue. This includes tokenwise FP4 with channelwise FP4 in TS and SS.
+K 较长时可尝试从 `2` / `3` 增至 `4` 或更多以隐藏访存延迟；K 较短或 SMEM 限制并发时，优先减少 stage。应结合 `block_shape_k` 判断实际有多少次迭代可以利用这些缓冲。
 
-SM100-family UMMA also supports the undocumented `float8e3m4` and
-`float4e0m3` formats. E3M4 supports ordinary FP8 and group-32 E8M0 scaling;
-E0M3 requires group-16 E8M0 or E4M3 scales (group-32 faults in hardware).
-Activation and weight formats may differ, including E3M4 with ordinary
-FP8/FP6/FP4 weights and E0M3 with E2M1 weights, in either FP4 operand.
-UMMA selects these formats directly in its instruction descriptor. Input
-quantization uses the existing F2FP cubin patcher, extended to SM100/103;
-SM120/121 MMA patching remains unchanged.
+#### `num_ctas_per_sm`
 
-Tensor/token activation scales and MX activation scales use the existing
-loaders. `static_tensor_dynamic_group` applies the secondary tensor scale in
-the UMMA epilogue; NVFP4 `dynamic_group_token` similarly applies the secondary
-per-token scale before output conversion. Input-scale GMEM layout is unchanged.
-The TMEM scale allocation pads small M tiles to keep successive K scale words
-aligned. The resource estimator accounts for the scale group size and padding.
-Channel weight scales, channel secondary scales,
-bias, and channel/group zero points reuse the existing loaders and arithmetic.
-Channel parameters are released once all consuming threads have read them.
-Both output paths support Stream-K: the first slice stores each chunk, later
-slices reduce into it, and partial writes complete before releasing the output
-lock. Bias is applied only by the first slice.
+每个 SM 的 CTA 调度数量，也参与 launch bounds 和资源预算；不代表硬件保证的实际 occupancy。
+增大后，每个 CTA 可用的 register 和 SMEM 预算会更紧，可能需要配合减小 tile 或 stage 数。
 
-SM100 FP16/BF16 dense heuristics select two CTAs with six stages when the tile is suitable,
-K is long enough to amortize the pipeline, and the estimated shared-memory
-allocation fits. The existing Stream-K decision is preserved for CTA pairs.
-Without Stream-K, underfilled output waves retain single-CTA execution. Chunked
-output remains opt-in for single-CTA execution because it did not improve the
-measured large dense cases by itself. FP8/FP4 cooperative execution is currently
-explicitly configured with `umma_cta_group_size=2`; automatic cooperative selection
-remains limited to FP16/BF16. All output chunk heights, including full-tile output,
-are supported. The heuristics use `output_chunk_rows=32`, which also enables
-overlapping accumulator reuse when the tile and scheduling support it.
+通常从 `1` 开始，小 tile 且资源充足时可尝试 `2` 以提高并发；大 tile 或较深流水线通常保留 `1`。
 
-### SM100 MoE tile selection
+#### `use_warp_spec`
 
-UMMA MoE selection samples expert row counts from total routed rows (including
-top-k), the expert count, and the configured probability CV (default 0.25).
-It scores M/N tiles with Stream-K already included, balancing scheduled work
-against padded rows. A small fixed per-tile cost accounts for activation loading
-and synchronization shared by wider N tiles. Stream-K must predict at least a
-50% reduction in work, including its startup allowance, before it is selected.
-The candidate pipeline has at least three stages unless K has fewer than three
-iterations. These are conservative heuristic choices, not kernel restrictions;
-explicit configurations may still use two stages. No token-specific or
-weight-dtype-specific tuning cases are used in this rule.
+使用 warp specialization，让加载与计算由不同线程分工；要求对应架构及 backend 支持，UMMA 使用该方式。
+
+在 SM90 上可比较 `True` / `False`：较长流水线可能受益，但额外线程会占用资源，小 workload 未必划算。
+
+### 数据搬运与同步
+
+数据搬运与同步中，以下行为由 kernel 自动决定，不提供配置开关：
+
+- SM80+ 自动启用 cp.async，其他架构关闭。
+- UMMA、warp specialization 或 TMA 路径自动启用 MBarrier，其他情况关闭。
+
+#### `use_tma`
+
+TMA（Tensor Memory Accelerator）总开关，要求 SM90+，默认 `False`。
+
+- `use_tma=False` 时，不能将任一 `use_tma_*` 显式设为 `True`。
+- `use_tma=True` 时，未指定的张量级开关通常继承总开关；`use_tma_as` 是例外，默认仍为 `False`。
+- Kernel 还会根据 tensor 是否存在、scale 粒度和 GEMM 类型调整实际使用的 TMA 路径。
+
+规则且较大的 tile 可优先尝试 `True`；较小或不规则的数据搬运可比较普通加载方式。TMA 有 descriptor 和同步开销，开启总开关后也可以按 tensor 分别比较。
+
+#### `use_tma_a`、`use_tma_b`
+
+分别控制 activation 和 weight 的 TMA load。
+
+连续且对齐的大块数据可优先开启；indexed A gather 等不支持的路径需关闭对应开关。UMMA SS 要求 `use_tma_b=True`。
+
+#### `use_tma_c`
+
+控制输出的 TMA store。
+
+规则的连续输出可尝试 `True`；indexed scatter 使用普通 store。小输出需比较 TMA 设置与同步开销。
+
+#### `use_tma_as`、`use_tma_as2`
+
+分别控制 input scale 与 secondary input scale 的 TMA load。
+`use_tma_as` 默认关闭，启用时要求 `use_m_major_input_scale=True`；`indexed` GEMM 不支持这两个 TMA scale 开关。
+Scale 布局满足要求且搬运量较大时再尝试开启。Tensor scale 等路径不使用对应 TMA load。
+
+#### `use_tma_bs`、`use_tma_bs2`
+
+分别控制 weight scale 与 secondary weight scale 的 TMA load。
+
+Group/channel scale 较多时可尝试开启；secondary scale 的 TMA 路径用于 channel scale，tensor scale 不需要这种搬运方式。
+
+#### `use_tma_bzp`、`use_tma_bias`
+
+分别控制 zero point 和 bias 的 TMA load。
+
+通常跟随 `use_tma`；这些参数搬运量较小时可以尝试关闭，减少同步开销。没有对应张量时不生效。
+
+### 输出与共享内存
+
+#### `output_chunk_rows`
+
+每次通过 SMEM 输出的行数，默认 `0`。
+
+- `0`：按整个 tile 输出。
+- 正值：必须是 `32` 的倍数且不超过 `256`，实际 chunk 高度不超过 tile M；末尾不足一个 chunk 的行也支持输出。
+
+它改变输出的分块方式，不改变输出 tensor 的逻辑形状。
+SMEM 压力较大时可尝试 `32` 或 `64`；分块可减少输出缓冲需求，并在部分路径中改善重叠，但也可能增加同步和 store 开销。
+
+#### `smem_reuse_mode`
+
+输出缓冲对流水线 SMEM 的复用方式。
+
+| 值 | 存储安排 |
+|---|---|
+| `none` | 输出缓冲独立分配，不复用 stage 存储。 |
+| `last_stage` | 输出缓冲从最后一个 stage 的存储位置开始复用。 |
+| `all_stages` | 输出缓冲与整个 stage 存储区域复用。 |
+
+默认 UMMA 使用 `none`，其他 backend 使用 `all_stages`。
+SMEM 紧张时尝试 `last_stage` 或 `all_stages`；资源充足时尝试 `none`，减少加载与输出相互等待。可配合 `output_chunk_rows` 缩小输出缓冲，比较是否仍需要复用。
+
+### 工作调度与数据复用
+
+#### `use_stream_k`
+
+沿 K 划分工作，让多个 CTA 分担同一输出 tile 的计算，改善输出 tile 不足或 wave 不均衡时的负载分配。部分结果需要通过额外的归约和同步合并。
+
+启用后，循环迭代次数会从编译期常量变为运行时变量，可能限制编译器对循环的优化，因此在部分情况下反而会变慢。
+
+M/N 较小而 K 较长时可尝试 `True`；tile 已足够多或 K 较短时可尝试 `False`，避免部分结果归约和同步开销。启用 batch invariant 时要求关闭。
+
+#### `raster_group_m`
+
+控制 dense / grouped-contiguous GEMM 的 M tile 分组遍历顺序。
+
+默认 `1`；相邻 M tile 可复用 weight 数据时，可尝试 `2`、`4`、`8` 改善 cache locality。较大的分组也会改变 A 的复用，grouped-contiguous 路径还会增加 expert tile lookup 开销。
+
+#### `multi_cast_size_a`、`multi_cast_size_b`
+
+TMA multicast 的共享 CTA 数，默认 `1`，表示关闭 multicast。
+
+- `multi_cast_size_a` 在不同 N tile 之间共享相同的 activation 数据。
+- `multi_cast_size_b` 在不同 M tile 之间共享相同的 weight 数据；当前 kernel 要求 B multicast 使用 dense GEMM。
+- 两者不能同时大于 `1`。需要启用对应 tensor 的 TMA load 和 warp specialization，并满足 cluster 与 tile 的对齐要求；UMMA 当前要求两者均为 `1`。
+
+多个 CTA 重复读取相同 A/B tile 时，可在支持的 backend 上尝试 `2`；复用不足时保留 `1`，避免 cluster 调度约束。
+
+### 后端专用选项
+
+#### `wgmma_use_late_as`
+
+将 input group scale 的 register load 延后至 accumulator promotion，默认 `False`，仅适用于带 input group scale 的 WGMMA。
+
+Register 压力较高时可尝试 `True`，但延后加载也可能增加 scale 等待时间。
+
+#### `wgmma_split_issue_wait`
+
+在 WGMMA issue 与 wait 之间预取下一个 fragment，默认 `False`。它与 `wgmma_use_late_as` 可以独立选择，均适用于带或不带 warp specialization 的 WGMMA 路径。
+
+希望增加加载与计算重叠时可尝试 `True`。它会延长部分 operand 和 accumulator 的存活时间；register 预算紧张时优先关闭，或配合减小 tile、减少 CTA 内的计算线程数，再与 stage 数一起比较。
+
+#### `umma_num_dequant_warpgroups`
+
+UMMA TS 中负责 weight dequantization 的 warp group 数，支持 `1` / `2`。
+
+通常使用 `1`；weight 转换成为瓶颈时可尝试 `2`，代价是更多线程和资源占用。Raw weight 的 SS 路径无需增加此值。
+
+#### `umma_cta_group_size`
+
+UMMA 协作 CTA 数，支持 `1` / `2`，默认 `1`。设为 `2` 时，两个 CTA 协作计算相邻的 N tile；它与 TMA multicast 和 CTA residency 是不同概念。
+
+两-CTA 模式要求：
+
+- block M 为 `16` 的倍数。
+- N 能被两倍 block N 整除。
+- `num_ctas_per_sm=1`，并满足对应数据类型和资源限制。
+
+较大的规则矩阵、较长 K 可尝试 `2`；小 workload 优先 `1`，避免协作开销。可以同时比较输出 chunk 大小，调整协作计算与输出的重叠。
+
+### Kernel 间调度
+
+#### `use_pdl`
+
+启用 Programmatic Dependent Launch，默认 `False`。
+
+在调用链支持 PDL、相邻 kernel 有可重叠工作时尝试 `True`，并测量端到端延迟；孤立的 GEMM benchmark 通常保留 `False`。
