@@ -50,6 +50,9 @@ public:
 
   CUDA_INLINE
   void call(uint32_t *regs_c_ptr) {
+    // Issuing threads drain the previous tile before any math thread reuses its output storage.
+    if constexpr (Ctx::kUseWarpSpec && Ctx::kUseTmaC && Ctx::kSmemReuseMode == SmemReuseMode::NONE)
+      tma_wait_store_group<0, true>();
     ctx.sync_math_threads();
     if constexpr (BlockShape::K > WarpShape::K) smem_reducer.reduce(regs_c_ptr);
     if (slice_count > 1) acquire_gmem_barrier();

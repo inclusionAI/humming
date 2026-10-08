@@ -148,10 +148,10 @@ block-scaled, channel, tensor, and block-scale layouts are unchanged.
 | `float8e4m3` / `float8e5m2` / `int8` | 16, 32, 64 | 64, 128 |
 | `float4e2m1` / `int4` | 16, 32, 64 | 128, 256 |
 
-With `use_packed_k_layout`, warp N must be at least 32. Activation scale groups,
+With `use_packed_k_layout`, warp K must be 128 and warp N can start at 16. Activation scale groups,
 when present, must cover warp K. Weight scale groups must also cover warp K unless
 `use_fused_e8m0_scale` is enabled; fused conversion applies each K32 slab's weight
-scale before WGMMA, so GS32 weights can use warp K64 or K128. Fused packed-K
+scale before WGMMA, so GS32 weights can use packed warp K128. Fused packed-K
 remains opt-in; the default layout selection is unchanged.
 
 `raster_group_m` controls M tile grouping for dense and grouped-contiguous GEMMs.
@@ -165,11 +165,19 @@ advances. A value of 1 uses the existing forward warp scan without the prefix ta
 |-----------|-------------|
 | `num_stages` | Number of pipeline stages. Must be at least 2. Must be at least 3 when using `use_warp_spec` with WGMMA. |
 | `use_warp_spec` | Whether to enable Warp Specialization. Requires SM90+. Required for UMMA. |
+| `wgmma_use_late_as` | Delay per-group input-scale register loads until WGMMA accumulator promotion. Defaults to `False`; has no effect for per-token or per-tensor input scales. |
+| `wgmma_split_issue_wait` | Prefetch the next fragment between WGMMA issue and wait. Defaults to `False`; independent of input-scale granularity and `wgmma_use_late_as`. |
 | `use_mbarrier` | Whether to use MBarrier. Requires SM80+. |
 | `use_cp_async` | Whether to use CP Async. Requires SM80+. |
 | `num_ctas_per_sm` | Number of CTAs (Cooperative Thread Arrays / Thread Blocks) launched per SM. |
 | `umma_cta_group_size` | `1` (default) or `2`. With `2`, a cluster of two CTAs cooperatively executes UMMA for adjacent N tiles. This is independent of CTA residency and TMA multicast. |
 | `output_chunk_rows` | Output rows per shared-memory chunk for every MMA backend. `0` (default) writes a full tile; positive values must be multiples of 32 up to 256 and are clamped to tile M. Partial final chunks are supported. UMMA alternates two buffers; other backends reuse one buffer. Supports TMA and regular stores, Stream-K, and MoE scatter. Replaces `num_write_splits` (use half of tile M to reproduce two splits). |
+
+The two `wgmma_*` options apply only to WGMMA and support both warp-specialized
+and non-warp-specialized kernels. All four combinations are supported. They keep
+the existing weight layout and weight-scale consumption order; scale prefetches
+that would overwrite a live scale buffer wait until the current promotion finishes.
+Tune these options together with tile shapes, pipeline stages, and Stream-K.
 
 ### TMA (Tensor Memory Accelerator)
 

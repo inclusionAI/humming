@@ -501,6 +501,10 @@ class TuningConfig(BaseHummingConfig):
 
     use_stream_k: bool = True
 
+    # WGMMA mainloop scheduling; independent of the packed weight layout.
+    wgmma_use_late_as: bool = False
+    wgmma_split_issue_wait: bool = False
+
     num_stages: int = 2
     num_ctas_per_sm: int = 1
     umma_num_dequant_warpgroups: int = 1
@@ -540,6 +544,8 @@ class TuningConfig(BaseHummingConfig):
     )
 
     _name_map = {
+        "wgmma_use_late_as": "kWgmmaUseLateAS",
+        "wgmma_split_issue_wait": "kWgmmaSplitIssueWait",
         "use_mbarrier": "kUseMBarrier",
         "use_tma_as": "kUseTmaAS",
         "use_tma_as2": "kUseTmaAS2",

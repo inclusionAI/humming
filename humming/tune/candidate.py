@@ -65,6 +65,8 @@ class ScheduleCandidate:
     block_shape: tuple[int, int, int]
     warp_shape: tuple[int, int, int]
     mma_type: MmaType | None = None
+    wgmma_use_late_as: bool = False
+    wgmma_split_issue_wait: bool = False
     use_stream_k: bool = True
     use_f16_accum: bool = False
     num_stages: int = 2
@@ -113,6 +115,8 @@ class ScheduleCandidate:
             mma_type=MmaType(config["mma_type"]) if config.get("mma_type") else None,
             block_shape=_positive_shape(config["block_shape"], "block_shape"),
             warp_shape=_positive_shape(config["warp_shape"], "warp_shape"),
+            wgmma_use_late_as=_config_bool(config, "wgmma_use_late_as", False),
+            wgmma_split_issue_wait=_config_bool(config, "wgmma_split_issue_wait", False),
             use_stream_k=_config_bool(config, "use_stream_k", True),
             use_f16_accum=_config_bool(config, "use_f16_accum", False),
             num_stages=_config_positive_int(config, "num_stages", 2),

@@ -202,20 +202,26 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         debug_kernel_timeout_check(debug_start_clock);
         PRAGMA_UNROLL
         for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-          // Packed N16 keeps B live until wait_and_promote, but can prefetch
-          // the next quantized weights while the current WGMMA is in flight.
-          if constexpr (Ctx::kUsePackedLateAS)
+          // Keep register operands live until wait_and_promote while prefetching
+          // the next stage/fragment and delaying scale loads until promotion.
+          if constexpr (Ctx::kUseWgmmaSplitIssueWait)
             mma.issue(stage_id, warp_iter_id);
           else if constexpr (Ctx::kWarpIters == 1)
             mma.run(stage_id, warp_iter_id);
           if (warp_iter_id == Ctx::kWarpIters - 1 && slice_iter + 1 < num_slice_iters) {
             consumer.wait_stage((stage_id + 1) % kNumStages);
           }
-          s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-          if constexpr (Ctx::kUsePackedLateAS)
+          const bool defer_next_scales = Ctx::kDeferWgmmaPrefetchScales && warp_iter_id == Ctx::kWarpIters - 1;
+          if (defer_next_scales)
+            s2r_pipe.template load_stage_iter<false, true, false>(stage_id, warp_iter_id + 1);
+          else
+            s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
+          if constexpr (Ctx::kUseWgmmaSplitIssueWait)
             mma.wait_and_promote(stage_id, warp_iter_id);
           else if constexpr (Ctx::kWarpIters > 1)
             mma.run(stage_id, warp_iter_id);
+          if (defer_next_scales)
+            s2r_pipe.template load_stage_iter<false, false, true>(stage_id, warp_iter_id + 1);
           mma.transform_b(
               ((warp_iter_id + 1) % Ctx::kWarpIters) % 2,
               (warp_iter_id + 1) % Ctx::kWarpIters);
@@ -243,12 +249,17 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
       if constexpr (kCanOverlapEpilogue) consumer.arrive(kNumStages);
       epilogue.call(mma.final_regs_c_as_ptr());
-      if constexpr (TuningConfig::kUseTmaC) tma_wait_store_group<0, true>();
+      // Separate output storage is drained at the next epilogue entry, before reuse.
+      if constexpr (TuningConfig::kUseTmaC && kSmemReuseMode != SmemReuseMode::NONE) tma_wait_store_group<0, true>();
       if constexpr (!kCanOverlapEpilogue) consumer.arrive(kNumStages);
       if constexpr (Ctx::kIsIndexedGemm) ctx.row_index_buffer ^= 1;
     }
   }
 
+  // The final tile has no following epilogue entry to drain its TMA reads.
+  if constexpr (TuningConfig::kUseTmaC && kSmemReuseMode == SmemReuseMode::NONE) {
+    if (ctx.is_math_thread()) tma_wait_store_group<0, true>();
+  }
   __syncthreads();
   if constexpr (TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB > 1) {
     asm volatile("barrier.cluster.arrive;\n");

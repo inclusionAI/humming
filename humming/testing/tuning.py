@@ -18,6 +18,8 @@ TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
 SAMPLED_TUNING_VALUES = {
     "mma_type": tuple(mma_type.value for mma_type in MmaType),
     "num_stages": (2, 3, 4, 5, 6, 8),
+    "wgmma_use_late_as": (False, True),
+    "wgmma_split_issue_wait": (False, True),
     "use_tma": (True, False, 123, 456, 789),
     "use_warp_spec": (True, False),
     "use_mbarrier": (True, False),
@@ -316,6 +318,10 @@ def _generate_scheduling_candidates(
         "smem_reuse_mode",
         "output_chunk_rows",
     )
+    if mma_type == MmaType.WGMMA:
+        names += ("wgmma_split_issue_wait",)
+        if layer_config.is_group_input_scale:
+            names += ("wgmma_use_late_as",)
     if mma_type == MmaType.UMMA:
         names += ("umma_num_dequant_warpgroups", "umma_cta_group_size")
     for signature in _generate_cartesian(*names):

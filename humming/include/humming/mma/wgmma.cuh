@@ -1,5 +1,6 @@
 #pragma once
 
+#include <humming/memory/s2r_loader/loader_as.cuh>
 #include <humming/utils/all.cuh>
 
 
@@ -129,7 +130,7 @@ public:
     const uint32_t smem_base = cast_smem_ptr_to_uint(&ctx.smem);
     constexpr uint32_t kItersPerHalf = kUsePackedKLayout ? 1 : kWarpIters;
     constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
-    constexpr uint32_t kRunKLoop = kUsePackedKLayout ? kNumKSlabs : kPackedKFactor;
+    constexpr uint32_t kRunKLoop = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? kNumKSlabs : kPackedKFactor;
 
     uint32_t delta_m = kUsePackedKLayout ? iter_id : 0;
     uint32_t delta_j = final_regs_c_index() == 0 ? delta_m : 0;
@@ -139,7 +140,7 @@ public:
 
     PRAGMA_UNROLL
     for (uint32_t k = 0; k < kRunKLoop; k++) {
-      uint32_t k_slab = kUsePackedKLayout ? k : ((iter_id % kItersPerHalf) * kPackedKFactor + k);
+      uint32_t k_slab = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? k : ((iter_id % kItersPerHalf) * kPackedKFactor + k);
       uint32_t smem_addr = smem_base + offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
       smem_addr += k_slab * 2 * sizeof(int4) + smem_offset;
       uint64_t desc = make_wgmma_smem_desc<kSwizzleBytes>(smem_addr);
@@ -179,27 +180,27 @@ public:
   CUDA_INLINE
   void wait_and_promote(uint32_t stage_id, uint32_t iter_id) {
     constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
-    constexpr uint32_t kRunKLoop = kUsePackedKLayout ? kNumKSlabs : kPackedKFactor;
+    constexpr uint32_t kRunKLoop = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? kNumKSlabs : kPackedKFactor;
     uint32_t delta_m = kUsePackedKLayout ? iter_id : 0;
     uint32_t delta_j = final_regs_c_index() == 0 ? delta_m : 0;
     wgmma_wait<0>();
     fence_accumulators(delta_j);
 
-    if constexpr (Ctx::kUsePackedLateAS) {
-      // Read each scale only when promoting its accumulator, keeping AS out of
-      // the live register set during weight conversion and WGMMA.
-      constexpr uint32_t kScaleBlockM = BlockShape::M + (Ctx::kIsGroupedGemm ? 4 : 0);
-      const uint32_t base = ctx.k_warp_offset() / 128 * kScaleBlockM +
-                            ctx.m_warp_offset() + m_scale_offset + (ctx.lane_id() % 4) * 2;
-      const float *scale = reinterpret_cast<const float *>(ctx.smem.stages[stage_id].as);
-      float2 *partial = reinterpret_cast<float2 *>(regs_c[0][0][0]);
-      float2 *final = reinterpret_cast<float2 *>(regs_c[1][0][0]);
-      PRAGMA_UNROLL
-      for (uint32_t index = 0; index < MmaShape::M / 4; ++index) {
-        final[index].x += scale[base + index / 2 * 8] * partial[index].x;
-        final[index].y += scale[base + index / 2 * 8 + 1] * partial[index].y;
+    if constexpr (Ctx::kUseWgmmaLateAS) {
+      // Load AS only when this fragment's partial accumulators are promoted.
+      constexpr bool kApplyWeightScaleOnC = !kUseFusedE8m0Scale &&
+                                            (Ctx::kIsGroupWeightScale || Ctx::kIsBlockWeightScale);
+      const uint32_t k_end = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch)
+                                 ? WarpShape::K
+                                 : (iter_id + 1) * kPartMmaShapeK;
+      bool should_promote = k_end == WarpShape::K || k_end % Ctx::kInputScaleGroupSize == 0;
+      if constexpr (kApplyWeightScaleOnC) should_promote |= k_end % Ctx::kWeightScaleGroupSize == 0;
+      if (should_promote) {
+        const uint32_t scale_iter = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? 0 : iter_id;
+        S2RMemoryLoaderAS<Ctx> loader(ctx);
+        loader.seek(m_scale_offset);
+        loader.load(ctx.smem.stages[stage_id].as, arith.regs_as_as_ptr(iter_id % 2), scale_iter);
       }
-      return;
     }
 
     PRAGMA_UNROLL
