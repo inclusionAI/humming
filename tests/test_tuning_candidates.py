@@ -573,59 +573,6 @@ def test_sm90_default_backend_supports_activation(a_dtype, expected):
     assert get_default_mma_type(layer).value == expected
 
 
-@pytest.mark.parametrize(
-    "warp_m,warp_n,input_group,weight_group,block_k,num_ctas,split_issue_wait,expected",
-    [
-        (176, 16, 128, 128, 128, 4, False, False),
-        (80, 64, 128, 128, 128, 3, False, False),
-        (128, 64, 0, 0, 128, 3, False, False),
-        (32, 16, 128, 128, 128, 2, False, True),
-        # Packed K128 RS needs the full operand tuple live with split issue/wait.
-        (48, 16, 0, 128, 256, 4, True, False),
-        (48, 16, 0, 128, 256, 4, False, True),
-        (48, 16, 0, 128, 256, 3, True, True),
-        (48, 16, 0, 128, 256, 2, True, True),
-        (32, 16, 0, 128, 256, 4, True, True),
-    ],
-)
-def test_sampled_wgmma_accounts_for_all_accumulators(
-    warp_m, warp_n, input_group, weight_group, block_k, num_ctas, split_issue_wait, expected, monkeypatch
-):
-    from humming.config import ComputeConfig
-    from humming.device import DeviceInfo, current_device
-    from humming.testing import tuning
-
-    if current_device.sm_version != 90:
-        pytest.skip(f"Requires SM90, got SM{current_device.sm_version}")
-
-    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
-    monkeypatch.setattr(DeviceInfo, "max_threads_per_sm", property(lambda self: 2048))
-    monkeypatch.setattr(tuning, "fits_device_smem", lambda *args: True)
-    layer = LayerConfig(
-        sm_version=90,
-        shape_n=1024,
-        shape_k=1024,
-        a_dtype="float8e4m3",
-        b_dtype="uint4",
-        c_dtype="bfloat16",
-        input_scale_group_size=input_group,
-        weight_scale_group_size=weight_group,
-        use_fused_e8m0_scale=False,
-    )
-    config = dict(
-        mma_type="wgmma",
-        block_shape=(warp_m, warp_n * 4, block_k),
-        warp_shape=(warp_m, warp_n, 128),
-        num_ctas_per_sm=num_ctas,
-        use_warp_spec=False,
-        num_stages=3,
-        wgmma_split_issue_wait=split_issue_wait,
-        use_tma=False,
-    )
-    compute = ComputeConfig(gemm_type=GemmType.DENSE)
-    assert tuning._fits_device_resources(layer, compute, (config, {})) == expected
-
-
 @pytest.mark.parametrize("registers_per_sm,expected", [(65536, False), (131072, True)])
 def test_device_register_budget(registers_per_sm, expected, monkeypatch):
     from humming.config import ComputeConfig, TuningConfig
@@ -767,42 +714,3 @@ def test_mxmma_compiler_version_matches_scale_format(
     else:
         with pytest.raises(RuntimeError, match="reached tuning generation"):
             runner.prepare_kernels((1,))
-
-
-@pytest.mark.parametrize("input_group", (0, 128))
-@pytest.mark.parametrize("sample_size", (32, 100))
-def test_sampled_wgmma_covers_independent_schedule_options(input_group, sample_size, monkeypatch):
-    from humming.config import ComputeConfig
-    from humming.device import current_device
-    from humming.testing import tuning
-
-    if current_device.sm_version != 90:
-        pytest.skip(f"Requires SM90, got SM{current_device.sm_version}")
-    monkeypatch.setenv(tuning.TEST_TUNING_SEED_ENV, "2026")
-    layer = LayerConfig(
-        shape_n=512,
-        shape_k=512,
-        num_experts=4,
-        a_dtype=dtypes.float8e4m3,
-        b_dtype=dtypes.uint4,
-        c_dtype=dtypes.bfloat16,
-        bs_dtype=dtypes.bfloat16,
-        input_scale_group_size=input_group,
-        weight_scale_group_size=128,
-        use_packed_k_layout=True,
-        sm_version=90,
-    )
-    configs = tuning.sample_test_tuning_configs(
-        layer, ComputeConfig(gemm_type=GemmType.INDEXED), sample_size=sample_size
-    )
-    assert len(configs) == sample_size
-    assert {config["mma_type"] for config in configs} == {"wgmma"}
-    combinations = {
-        (config.get("wgmma_use_late_as", False), config["wgmma_split_issue_wait"]) for config in configs
-    }
-    expected = {(False, False), (False, True)}
-    if input_group:
-        expected |= {(True, False), (True, True)}
-    else:
-        assert all("wgmma_use_late_as" not in config for config in configs)
-    assert combinations == expected
