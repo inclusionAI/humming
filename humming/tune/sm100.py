@@ -616,6 +616,11 @@ class Sm100Heuristics(Sm100MmaHeuristics):
         # All supported UMMA N tiles are multiples of 128.
         if layer_config.shape_n % 128:
             return True
+        a_dtype = layer_config.a_dtype
+        if a_dtype.is_floating_point_type and a_dtype.num_bits < 16:
+            # FP8/FP4 measurements favor UMMA at every M, dense and MoE,
+            # whenever K divides into UMMA stages.
+            return layer_config.shape_k % (512 // a_dtype.num_bits) != 0
         effective_m = float(shape_m)
         if layer_config.num_experts:
             counts = Sm100UmmaHeuristics._sample_expert_rows(
