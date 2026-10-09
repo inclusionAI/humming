@@ -265,6 +265,53 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         return best if best_score < baseline_score * 0.9 else config
 
     @classmethod
+    def _select_low_bit_m_tile(cls, layer_config, shape_m, config, use_m_major_input_scale=False):
+        a_dtype = layer_config.a_dtype
+        if a_dtype.num_bits == 16 or not a_dtype.is_floating_point_type:
+            return config
+        stage_k = 1024 // a_dtype.num_bits
+        k_iters = layer_config.shape_k // stage_k
+        # Every M tile re-reads the weights; long K keeps the Stream-K tile.
+        if layer_config.shape_k % stage_k or k_iters >= 64:
+            return config
+
+        num_sms = current_device.sm_count
+        n_blocks = layer_config.shape_n // 128
+        full_m = round_up(math.ceil(shape_m / math.ceil(shape_m / 256)), 8)
+        if math.ceil(shape_m / full_m) * n_blocks >= num_sms:
+            return config
+
+        # Halve M while one data-parallel wave still holds every tile.
+        block_m = full_m
+        candidate_m = full_m
+        while candidate_m > 16:
+            candidate_m = round_up(math.ceil(candidate_m / 2), 8)
+            if math.ceil(shape_m / candidate_m) * n_blocks > num_sms:
+                break
+            block_m = candidate_m
+
+        # Short stages leave the tensor cores idle between loads: double K when four stages fit.
+        for block_k, num_stages in ((2 * stage_k, 4), (stage_k, 4), (stage_k, 3), (stage_k, 2)):
+            if layer_config.shape_k % block_k:
+                continue
+            block_shape = (block_m, 128, block_k)
+            fits_resources = cls._fits_resources(
+                layer_config, block_shape, num_stages, 1, use_m_major_input_scale=use_m_major_input_scale
+            )
+            if fits_resources:
+                return config | {
+                    "block_shape": block_shape,
+                    "warp_shape": (block_m, 32, block_k),
+                    "num_stages": num_stages,
+                    "num_ctas_per_sm": 1,
+                    "use_stream_k": False,
+                    "use_tma": True,
+                    "use_tma_a": True,
+                    "use_tma_c": True,
+                }
+        return config
+
+    @classmethod
     def _select_cooperative_ctas(cls, layer_config, shape_m, config, use_m_major_input_scale=False):
         activation_bits = layer_config.a_dtype.num_bits
         is_low_bit = activation_bits < 16
@@ -434,6 +481,10 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                         config = cls._select_m_tile(
                             layer_config, shape_m, config, use_batch_invariant, use_m_major_input_scale
                         )
+                        if not use_batch_invariant:
+                            config = cls._select_low_bit_m_tile(
+                                layer_config, shape_m, config, use_m_major_input_scale
+                            )
                         config = cls._select_cooperative_ctas(
                             layer_config, shape_m, config, use_m_major_input_scale
                         )

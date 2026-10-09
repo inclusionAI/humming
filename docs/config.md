@@ -284,6 +284,12 @@ chunk heights, including full-tile output, are supported. The heuristics use
 `output_chunk_rows=32`, which also enables overlapping accumulator reuse when
 the tile and scheduling support it.
 
+For FP8/FP4 activations with fewer than 64 K stages, SM100 dense heuristics fill
+an underfilled grid by halving the M tile while one data-parallel wave still
+holds every tile. Such tiles use N128, one resident CTA and no Stream-K, and
+double the stage K when four stages fit. Longer K keeps the Stream-K tile,
+because every M tile reads the weights again.
+
 SM100 dense heuristics use two dequantization warpgroups for weights that are
 dequantized in registers, except for N128 tiles with two resident CTAs. Raw
 weights, natively converted weights, and 1/2/4/8-bit integers that fit the
