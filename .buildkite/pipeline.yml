@@ -98,6 +98,8 @@ steps:
     agents:
       queue: mithril-h100-pool
     concurrency_group: humming/h100
+    env:
+      HUMMING_COMPILER: nvcc
     plugins:
       # Match vLLM ci-infra's single-GPU H100 Kubernetes preset.
       - kubernetes:
