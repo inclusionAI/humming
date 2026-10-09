@@ -267,7 +267,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
     @classmethod
     def _select_low_bit_m_tile(cls, layer_config, shape_m, config, use_m_major_input_scale=False):
         a_dtype = layer_config.a_dtype
-        if a_dtype.num_bits == 16 or not a_dtype.is_floating_point_type:
+        if a_dtype.num_bits == 16:
             return config
         stage_k = 1024 // a_dtype.num_bits
         k_iters = layer_config.shape_k // stage_k
@@ -275,9 +275,14 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         if layer_config.shape_k % stage_k or k_iters >= 64:
             return config
 
+        def align_m(rows):
+            # INT8 UMMA needs M divisible by 16 above M32.
+            alignment = 16 if a_dtype == dtypes.int8 and rows > 32 else 8
+            return round_up(rows, alignment)
+
         num_sms = current_device.sm_count
         n_blocks = layer_config.shape_n // 128
-        full_m = round_up(math.ceil(shape_m / math.ceil(shape_m / 256)), 8)
+        full_m = align_m(math.ceil(shape_m / math.ceil(shape_m / 256)))
         if math.ceil(shape_m / full_m) * n_blocks >= num_sms:
             return config
 
@@ -285,7 +290,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         block_m = full_m
         candidate_m = full_m
         while candidate_m > 16:
-            candidate_m = round_up(math.ceil(candidate_m / 2), 8)
+            candidate_m = align_m(math.ceil(candidate_m / 2))
             if math.ceil(shape_m / candidate_m) * n_blocks > num_sms:
                 break
             block_m = candidate_m
@@ -680,13 +685,16 @@ class Sm100Heuristics(Sm100MmaHeuristics):
 
     @classmethod
     def _should_use_mma(cls, layer_config: LayerConfig, shape_m: int) -> bool:
+        # INT8 UMMA exists on SM100/SM110 only; other layers without UMMA use MMA.
+        if not layer_config.is_umma_supported:
+            return True
         # All supported UMMA N tiles are multiples of 128.
         if layer_config.shape_n % 128:
             return True
         a_dtype = layer_config.a_dtype
-        if a_dtype.is_floating_point_type and a_dtype.num_bits < 16:
+        if a_dtype.num_bits < 16:
             # FP8/FP4 measurements favor UMMA at every M, dense and MoE,
-            # whenever K divides into UMMA stages.
+            # whenever K divides into UMMA stages. INT8 follows FP8.
             return layer_config.shape_k % (512 // a_dtype.num_bits) != 0
         effective_m = float(shape_m)
         if layer_config.num_experts:

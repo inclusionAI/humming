@@ -510,6 +510,8 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backe
 
     monkeypatch.delenv("HUMMING_TEST_TUNING_SOURCE", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    if a_dtype == dtypes.int8:
+        small_m_backend = expected.value
     for shape_m, backend in ((17, small_m_backend), (257, expected.value)):
         tuning = Sm100Heuristics.get_config(config, shape_m)
         assert tuning["mma_type"] == backend
