@@ -470,6 +470,7 @@ def test_output_chunk_rows_rejects_invalid_heights(output_chunk_rows):
     "a_dtype,b_dtype,small_m_backend",
     (
         (dtypes.bfloat16, dtypes.uint4, "mma"),
+        (dtypes.float16, dtypes.uint4, "mma"),
         (dtypes.int8, dtypes.int8, "mma"),
         (dtypes.float8e4m3, dtypes.float8e4m3, "umma"),
         (dtypes.float8e4m3, dtypes.float4e2m1, "umma"),
