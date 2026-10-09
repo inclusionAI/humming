@@ -266,23 +266,19 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
 
     @classmethod
     def _select_cooperative_ctas(cls, layer_config, shape_m, config, use_m_major_input_scale=False):
-        if layer_config.a_dtype.num_bits != 16:
+        activation_bits = layer_config.a_dtype.num_bits
+        is_low_bit = activation_bits < 16
+        # Low-bit cooperative instructions take native operands only.
+        if is_low_bit and not layer_config.use_raw_weight:
             return config
         block_m, block_n, block_k = config["block_shape"]
         has_cooperative_tile = block_m >= 128 and block_m % 32 == 0
-        has_cooperative_tile &= block_n == 128 and block_k == 64
+        has_cooperative_tile &= block_n == 128 and block_k == 1024 // activation_bits
         has_cooperative_tile &= layer_config.shape_n % (2 * block_n) == 0
         uses_tma = config["use_tma"] and config["use_tma_a"] and config["use_tma_c"]
         if not has_cooperative_tile or not uses_tma or config["num_ctas_per_sm"] != 1:
             return config
-
-        has_input_scale = layer_config.has_input_scale or layer_config.has_input_scale_2
-        if has_input_scale or layer_config.is_block_weight_scale:
-            return config
-
-        num_stages = 6
-        k_iters = layer_config.shape_k // block_k
-        if k_iters < 4 * num_stages:
+        if layer_config.is_block_weight_scale:
             return config
 
         # Stream-K balances partial waves across CTA pairs. Without it, retain
@@ -295,25 +291,36 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         if not config["use_stream_k"] and output_tiles < 0.8 * scheduled_tiles:
             return config
 
-        smem_size = estimate_smem_size_layer(
-            layer_config,
-            config["block_shape"],
-            GemmType.DENSE,
-            num_stages,
-            mma_type=MmaType.UMMA,
-            warp_shape=config["warp_shape"],
-            smem_reuse_mode=SmemReuseMode.NONE,
-            umma_cta_group_size=2,
-            output_chunk_rows=32,
-            use_m_major_input_scale=use_m_major_input_scale,
-        )
-        if smem_size > cls.max_smem_size:
-            return config
-        return config | {
-            "umma_cta_group_size": 2,
-            "output_chunk_rows": 32,
-            "num_stages": num_stages,
-        }
+        # Wider low-bit stages may not fit six; FP16 keeps its measured depth.
+        min_stages = 4 if is_low_bit else 6
+        k_iters = layer_config.shape_k // block_k
+        pipeline_iters = k_iters
+        if is_low_bit and config["use_stream_k"]:
+            # An underfilled Stream-K grid gives each CTA only a slice of K.
+            pipeline_iters = min(k_iters, output_tiles * k_iters // num_sms)
+        for num_stages in range(6, min_stages - 1, -1):
+            if pipeline_iters < 4 * num_stages:
+                continue
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                config["block_shape"],
+                GemmType.DENSE,
+                num_stages,
+                mma_type=MmaType.UMMA,
+                warp_shape=config["warp_shape"],
+                smem_reuse_mode=SmemReuseMode.NONE,
+                umma_cta_group_size=2,
+                output_chunk_rows=32,
+                use_m_major_input_scale=use_m_major_input_scale,
+            )
+            tmem_columns = cls._get_tmem_columns(layer_config, config["block_shape"], num_stages, 1, 2)
+            if smem_size <= cls.max_smem_size and (not is_low_bit or tmem_columns <= 512):
+                return config | {
+                    "umma_cta_group_size": 2,
+                    "output_chunk_rows": 32,
+                    "num_stages": num_stages,
+                }
+        return config
 
     @classmethod
     def get_config(
