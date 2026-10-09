@@ -370,6 +370,21 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         return config
 
     @classmethod
+    def _select_stream_k(cls, layer_config, shape_m, config):
+        if not config["use_stream_k"]:
+            return config
+        block_m, block_n, _ = config["block_shape"]
+        cta_group_size = config.get("umma_cta_group_size", 1)
+        resident_ctas = (current_device.sm_count // cta_group_size) * config["num_ctas_per_sm"]
+        output_tiles = math.ceil(shape_m / block_m) * (layer_config.shape_n // (block_n * cta_group_size))
+        num_waves = math.ceil(output_tiles / resident_ctas)
+        last_wave_tiles = output_tiles % resident_ctas or resident_ctas
+        # Many waves with a nearly full tail leave Stream-K little idle time to recover.
+        if num_waves > 10 and last_wave_tiles > 0.75 * resident_ctas:
+            return config | {"use_stream_k": False}
+        return config
+
+    @classmethod
     def _select_dequant_warpgroups(cls, layer_config, shape_m, config):
         # Native conversion keeps up with one warpgroup; register dequantization does not.
         if layer_config.use_raw_weight or layer_config.use_native_dequant:
@@ -488,6 +503,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                         config = cls._select_cooperative_ctas(
                             layer_config, shape_m, config, use_m_major_input_scale
                         )
+                        config = cls._select_stream_k(layer_config, shape_m, config)
                         return cls._select_dequant_warpgroups(layer_config, shape_m, config)
 
         raise ValueError("no resource-feasible dense UMMA tile for this layer")

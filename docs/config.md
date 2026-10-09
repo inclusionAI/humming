@@ -290,6 +290,9 @@ holds every tile. Such tiles use N128, one resident CTA and no Stream-K, and
 double the stage K when four stages fit. Longer K keeps the Stream-K tile,
 because every M tile reads the weights again.
 
+SM100 dense heuristics turn Stream-K off for the final tile when it spans more
+than ten waves and the last wave is more than three quarters full.
+
 SM100 dense heuristics use two dequantization warpgroups for weights that are
 dequantized in registers, except for N128 tiles with two resident CTAs. Raw
 weights, natively converted weights, and 1/2/4/8-bit integers that fit the
