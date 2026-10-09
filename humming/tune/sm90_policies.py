@@ -400,6 +400,79 @@ def _w4a8_uses_variable_m_tiles() -> bool:
     return "H200" in torch.cuda.get_device_name()
 
 
+# Row-major grouped-contiguous sizes its M tile per expert too. The generic seed
+# sizes tiles from total rows, which leaves seed-schedule holes and M128 tiles that
+# split unevenly routed experts. At most this many rows per expert, both scale layouts
+# use the seed schedule with an M tile sized for one expert.
+_W4A8_SMALL_EXPERT_ROWS = 96
+# Without TMA for row-major AS, M176 only pays off while one tile covers the expert.
+_W4A8_ROW_MAJOR_MAX_SINGLE_TILE_ROWS = 176
+
+
+def _w4a8_row_major_tile_m(rows_per_expert: int) -> int | None:
+    if rows_per_expert <= _W4A8_SMALL_EXPERT_ROWS:
+        return None
+    block_m = _w4a8_tile_m_for_expert_rows(rows_per_expert)
+    if block_m <= 160:
+        return block_m
+    return 176 if rows_per_expert <= _W4A8_ROW_MAJOR_MAX_SINGLE_TILE_ROWS else _W4A8_DEFAULT_TILE_M
+
+
+def _w4a8_small_expert_tile_m(rows_per_expert: int) -> int:
+    """Seed-schedule M tile for small experts: one expert plus one standard deviation of routing."""
+    return max(8, math.ceil((rows_per_expert + math.sqrt(rows_per_expert)) / 8) * 8)
+
+
+_W4A8_SMALL_EXPERT_ROW_BOUNDARIES = tuple(
+    rows
+    for rows in range(1, _W4A8_SMALL_EXPERT_ROWS)
+    if _w4a8_small_expert_tile_m(rows) != _w4a8_small_expert_tile_m(rows + 1)
+)
+
+
+def _w4a8_rows_per_expert(layer_config: LayerConfig, shape_m: int) -> int:
+    return (shape_m + layer_config.num_experts - 1) // layer_config.num_experts
+
+
+def _set_w4a8_small_expert_config(config: dict, layer_config: LayerConfig, rows_per_expert: int) -> bool:
+    """Keep the seed schedule but size its M tile for one small expert."""
+    # The seed sizes its tile from total rows, about twice the rows of one small expert.
+    if rows_per_expert > _W4A8_SMALL_EXPERT_ROWS or layer_config.shape_n % 256:
+        return False
+    block_m = _w4a8_small_expert_tile_m(rows_per_expert)
+    config.update(block_shape=(block_m, 256, 128), warp_shape=(block_m, 32, 128), wgmma_use_late_as=True)
+    return True
+
+
+def _uses_row_major_w4a8_tiles(use_m_major_input_scale: bool, gemm_type: GemmType) -> bool:
+    return (
+        gemm_type == GemmType.GROUPED_CONTIGUOUS
+        and not use_m_major_input_scale
+        and _w4a8_uses_variable_m_tiles()
+    )
+
+
+def _set_w4a8_row_major_config(config: dict, layer_config: LayerConfig, shape_m: int) -> None:
+    config["wgmma_use_late_as"] = True
+    rows_per_expert = _w4a8_rows_per_expert(layer_config, shape_m)
+    block_m = _w4a8_row_major_tile_m(rows_per_expert)
+    if block_m is None:
+        _set_w4a8_small_expert_config(config, layer_config, rows_per_expert)
+        return
+    config.update(
+        block_shape=(block_m, 128, 128),
+        warp_shape=(block_m, 16, 128),
+        num_stages=4,
+        use_warp_spec=True,
+        use_tma=True,
+        use_stream_k=False,
+        wgmma_split_issue_wait=block_m <= 160,
+        multi_cast_size_a=1,
+        multi_cast_size_b=1,
+    )
+    config.pop("raster_group_m", None)
+
+
 def _set_w4a8_config(config: dict, block_m: int, shape_k: int = 0) -> None:
     config.update(
         block_shape=(block_m, 128, 128),
@@ -427,11 +500,18 @@ def apply_packed_w4a8_config(
     """Select the packed MXFP4 x FP8(GS128) schedule for any GEMM type."""
     if not _is_packed_w4a8_layer(layer_config) or config.get("use_f16_accum", False):
         return
+    if _uses_row_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
+        _set_w4a8_row_major_config(config, layer_config, shape_m)
+        return
     if not _uses_m_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
         _set_w4a8_n16_config(config, layer_config, gemm_type, shape_m)
         return
 
     use_h200_policy = _w4a8_uses_variable_m_tiles()
+    if use_h200_policy and _set_w4a8_small_expert_config(
+        config, layer_config, _w4a8_rows_per_expert(layer_config, shape_m)
+    ):
+        return
     block_m = _w4a8_block_m(layer_config, shape_m) if use_h200_policy else _W4A8_DEFAULT_TILE_M
     _set_w4a8_config(config, block_m, layer_config.shape_k if use_h200_policy else 0)
 
@@ -445,7 +525,16 @@ def _w4a8_range_boundaries(
     if _uses_m_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
         if not _w4a8_uses_variable_m_tiles():
             return ()
-        return tuple(rows * layer_config.num_experts for rows in _W4A8_EXPERT_ROW_BOUNDARIES)
+        rows = {*_W4A8_SMALL_EXPERT_ROW_BOUNDARIES, *_W4A8_EXPERT_ROW_BOUNDARIES, _W4A8_SMALL_EXPERT_ROWS}
+        return tuple(sorted(row * layer_config.num_experts for row in rows))
+    if _uses_row_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
+        rows = {
+            *_W4A8_SMALL_EXPERT_ROW_BOUNDARIES,
+            *_W4A8_EXPERT_ROW_BOUNDARIES,
+            _W4A8_SMALL_EXPERT_ROWS,
+            _W4A8_ROW_MAJOR_MAX_SINGLE_TILE_ROWS,
+        }
+        return tuple(sorted(row * layer_config.num_experts for row in rows))
 
     block_m = _w4a8_n16_tile_m(config, gemm_type)
     if gemm_type != GemmType.DENSE or block_m is None:
