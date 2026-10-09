@@ -187,10 +187,10 @@ public:
                                                     BlockShape::N >= 128 && BlockShape::K % (4 * MAX(1u, kGroupSizeB)) == 0;
   static constexpr uint32_t kUmmaWeightScaleScratchRows = kIsGroupWeightScale && !kUseUmmaDirectWeightScale ? kUmmaWeightScaleRows : 0;
   static constexpr uint32_t kUmmaInputScaleRows = CEIL_DIV(BlockShape::M, 128) * 128;
-  // Keep contiguous scale vectors intact during indexed cp.async gathers.
-  // Only the stage layout changes; the input tensor keeps its original layout.
-  static constexpr bool kUseUmmaRowMajorSmemInputScale = TuningConfig::kUseUmmaSs && kIsIndexedGemm && kIsGroupInputScale &&
-                                                         BlockShape::K % (16 * MAX(1u, kGroupSizeA)) == 0;
+  static constexpr bool kHasRowMajorInputScale = kIsGroupInputScale && !ComputeConfig::kUseMMajorInputScale;
+  static constexpr bool kHasWholeInputScaleWords = BlockShape::K % (4 * MAX(1u, kGroupSizeA)) == 0;
+  static constexpr bool kUseUmmaRowMajorSmemInputScale = TuningConfig::kMmaType == MmaType::UMMA && kHasRowMajorInputScale && kHasWholeInputScaleWords;
+  static constexpr bool kUseUmmaWideRowInputScale = kUseUmmaRowMajorSmemInputScale && kUmmaScaleWords < 4;
   static constexpr bool kUseUmmaInplaceInputScale = TuningConfig::kUseUmmaSs && kIsGroupInputScale &&
                                                     BlockShape::M % 128 == 0;
   static constexpr uint32_t kUmmaInputScaleScratchRows = kIsGroupInputScale && !kUseUmmaInplaceInputScale ? kUmmaInputScaleRows : 0;
@@ -200,9 +200,10 @@ public:
   static constexpr uint32_t kWeightStageN = TuningConfig::kUseUmmaSs ? MAX(BlockShape::N, 128) : BlockShape::N;
   static constexpr uint32_t kStageSizeB = kWeightStageK * kWeightStageN * kWeightSmemBits / 128;
   static constexpr uint32_t kNumGroupsAStorage = CEIL_DIV(kNumGroupsA, 4) * 4;
-  static constexpr uint32_t kStageSizeAS = kUseBlockScaledMma
-                                               ? CEIL_DIV(kNumGroupsAStorage * kScaleBlockM, sizeof(int4))
-                                               : kNumGroupsA * kScaleBlockM / 4;
+  static constexpr uint32_t kBlockScaledStageSizeAS = CEIL_DIV(kNumGroupsAStorage * kScaleBlockM, sizeof(int4));
+  static constexpr uint32_t kGroupStageSizeAS = kNumGroupsA * kScaleBlockM / 4;
+  static constexpr uint32_t kPackedStageSizeAS = kUseBlockScaledMma ? kBlockScaledStageSizeAS : kGroupStageSizeAS;
+  static constexpr uint32_t kStageSizeAS = kUseUmmaWideRowInputScale ? kScaleBlockM : kPackedStageSizeAS;
   static constexpr uint32_t kStageSizeBS = kUseBlockScaledMma && TuningConfig::kMmaType == MmaType::UMMA
                                                ? CEIL_DIV(kNumGroupsB, 4) * MAX(BlockShape::N, 128) / 4
                                                : kNumGroupsB * kSmemStrideBS;

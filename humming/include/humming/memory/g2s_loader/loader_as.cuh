@@ -101,20 +101,30 @@ public:
   }
 
   CUDA_INLINE void load_mx_legacy_row_major(void *smem_ptr) {
-    constexpr uint32_t kNumVectors = BlockShape::K / (sizeof(int4) * kGroupSize);
-    constexpr uint32_t kGmemStride = ProblemShape::K / (sizeof(int4) * kGroupSize);
-    auto *destination = reinterpret_cast<int4 *>(smem_ptr);
-    const auto *source = reinterpret_cast<const int4 *>(gmem_ptr);
+    constexpr uint32_t kRowWords = BlockShape::K / (sizeof(uint32_t) * kGroupSize);
+    constexpr uint32_t kGmemStrideWords = CEIL_DIV(kProblemNumGroups, 4);
+    constexpr bool kHasAlignedRows = kGmemStrideWords % 4 == 0;
+    constexpr bool kUseWideRows = SharedStorage::kUseUmmaWideRowInputScale;
+    constexpr uint32_t kSlotWords = kUseWideRows ? 4 : kRowWords;
+    constexpr uint32_t kLoadWords = kHasAlignedRows && kSlotWords % 4 == 0 ? 4 : 1;
+    using RowLoadType = typename LoadTypeChooser<kLoadWords * 4>::Type;
+    // cp.async bypasses L1 only for 16-byte loads: load the aligned vector holding this stage.
+    const uint32_t vector_word = kUseWideRows ? (col_offset / 4) % 4 : 0;
+    const uint32_t source_shift = kLoadWords == 4 ? vector_word : 0;
+    const uint32_t slot_shift = kLoadWords == 4 ? 0 : vector_word;
+    constexpr uint32_t kRowLoads = (kLoadWords == 4 ? kSlotWords : kRowWords) / kLoadWords;
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kRowLoadIters; i++) {
       uint32_t row = i * kNumLoadThreads + ctx.load_thread_id();
-      uint32_t source_row = load_row_index[i];
+      uint32_t source_row = kIsIndexedGemm ? load_row_index[i] : row;
+      bool is_valid_row = kIsIndexedGemm ? (row < BlockShape::M && source_row < shape_m) : (row < block_shape_m);
+      const uint32_t *source_words = gmem_ptr + source_row * kGmemStrideWords - source_shift;
+      uint32_t *slot_words = reinterpret_cast<uint32_t *>(smem_ptr) + row * kSlotWords + slot_shift;
+      const auto *source = reinterpret_cast<const RowLoadType *>(source_words);
+      auto *destination = reinterpret_cast<RowLoadType *>(slot_words);
       PRAGMA_UNROLL
-      for (uint32_t vector = 0; vector < kNumVectors; vector++) {
-        legacy_load_pred<kUseCpAsync>(
-            source + source_row * kGmemStride + vector,
-            destination + row * kNumVectors + vector,
-            row < BlockShape::M && source_row < shape_m);
+      for (uint32_t part = 0; part < kRowLoads; part++) {
+        legacy_load_pred<kUseCpAsync>(source + part, destination + part, is_valid_row);
       }
     }
   }

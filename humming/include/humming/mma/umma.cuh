@@ -182,7 +182,8 @@ struct UMMA : WMMA<Ctx, ArithClass> {
             uint32_t row = m;
             if constexpr (Ctx::kIsGroupedGemm && Ctx::kUseMMajorInputScale) row += m_offset % 4;
             uint32_t index;
-            if constexpr (SharedStorage::kUseUmmaRowMajorSmemInputScale) index = row * kScaleWords + word;
+            if constexpr (SharedStorage::kUseUmmaWideRowInputScale) index = row * 4 + (k_block * kScaleWords) % 4 + word;
+            else if constexpr (SharedStorage::kUseUmmaRowMajorSmemInputScale) index = row * kScaleWords + word;
             else index = word * SharedStorage::kScaleBlockM + row;
             packed = scales[index] >> (phase * 8);
           }
