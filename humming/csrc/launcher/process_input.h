@@ -152,8 +152,7 @@ inline std::tuple<int64_t, std::string> register_process_input_kernel(const std:
   }
   ASSERT_CHECK(!kernel_name.empty(), "no process-input kernel found in ", cubin_path);
 
-  int64_t kernel_id = manual_crc32(cubin_path);
-  kernel_id = (kernel_id << 30) + manual_crc32(kernel_name);
+  int64_t kernel_id = get_kernel_registration_id(cubin_path, kernel_name);
   ProcessInputKernelData metadata = {
       reader.getUint32("NUM_THREADS"),
       reader.getUint32("SOURCE_DTYPE_ID"),

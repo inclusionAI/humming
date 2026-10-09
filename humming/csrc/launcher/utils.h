@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <cuda.h>
 #include <string>
 
@@ -69,27 +71,33 @@ inline CUstream get_current_cuda_stream(int64_t dev) {
 #endif
 }
 
-uint32_t manual_crc32(const std::string &data) {
-  static uint32_t table[256];
-  static bool table_computed = false;
-
-  if (!table_computed) {
-    for (uint32_t i = 0; i < 256; i++) {
-      uint32_t c = i;
+uint64_t manual_crc64(const std::string &data) {
+  // CRC-64/ECMA-182: non-reflected, with zero initial value and final XOR.
+  static const auto table = [] {
+    std::array<uint64_t, 256> values{};
+    for (uint64_t i = 0; i < values.size(); i++) {
+      uint64_t crc = i << 56;
       for (int j = 0; j < 8; j++) {
-        if (c & 1) c = 0xEDB88320L ^ (c >> 1);
-        else c = c >> 1;
+        if (crc & (1ULL << 63)) crc = (crc << 1) ^ 0x42F0E1EBA9EA3693ULL;
+        else crc <<= 1;
       }
-      table[i] = c;
+      values[i] = crc;
     }
-    table_computed = true;
-  }
+    return values;
+  }();
 
-  uint32_t crc = 0xFFFFFFFFL;
+  uint64_t crc = 0;
   for (unsigned char b : data) {
-    crc = table[(crc ^ b) & 0xFF] ^ (crc >> 8);
+    crc = table[(crc >> 56) ^ b] ^ (crc << 8);
   }
-  return crc ^ 0xFFFFFFFFL;
+  return crc;
+}
+
+int64_t get_kernel_registration_id(const std::string &cubin_path, const std::string &kernel_name) {
+  std::string key = cubin_path;
+  key.push_back('\0');
+  key.append(kernel_name);
+  return static_cast<int64_t>(manual_crc64(key) & 0x7FFFFFFFFFFFFFFFULL);
 }
 
 uint32_t get_dtype_num_bits(uint32_t dtype_id) {

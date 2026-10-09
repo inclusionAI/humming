@@ -339,8 +339,7 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
   auto path_it = g_path_ids.find(cubin_path);
   if (path_it != g_path_ids.end()) return path_it->second;
 
-  int64_t hash_id = manual_crc32(cubin_path);
-  hash_id = (hash_id << 30) + manual_crc32(kernel_name);
+  int64_t hash_id = get_kernel_registration_id(cubin_path, kernel_name);
   auto kernel_it = g_registered_kernels.find(hash_id);
   bool no_collision = kernel_it == g_registered_kernels.end() || kernel_it->second.cubin_path == cubin_path;
   ASSERT_CHECK(no_collision, "kernel id collision for ", cubin_path);
