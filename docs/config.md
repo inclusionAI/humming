@@ -286,7 +286,8 @@ the tile and scheduling support it.
 
 SM100 dense heuristics use two dequantization warpgroups for weights that are
 dequantized in registers, except for N128 tiles with two resident CTAs. Raw
-weights and natively converted weights keep one.
+weights, natively converted weights, and 1/2/4/8-bit integers that fit the
+FP16/BF16 mantissa without a group or block scale keep one.
 
 ### SM100 MoE tile selection
 

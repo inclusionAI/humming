@@ -327,6 +327,13 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         # Native conversion keeps up with one warpgroup; register dequantization does not.
         if layer_config.use_raw_weight or layer_config.use_native_dequant:
             return config
+        # Aligned integers convert to FP16/BF16 with one logic op and one subtraction.
+        a_dtype, b_dtype = layer_config.a_dtype, layer_config.b_dtype
+        is_aligned_integer = b_dtype.is_integer_type and b_dtype.num_bits in (1, 2, 4, 8)
+        fits_mantissa = a_dtype.num_bits == 16 and b_dtype.num_bits <= a_dtype.mantissa_bits
+        has_stage_scale = layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
+        if is_aligned_integer and fits_mantissa and not has_stage_scale:
+            return config
         # Two resident CTAs on a single output group already contend for the SM.
         has_narrow_resident_pair = config["block_shape"][1] == 128 and config["num_ctas_per_sm"] == 2
         if has_narrow_resident_pair:
