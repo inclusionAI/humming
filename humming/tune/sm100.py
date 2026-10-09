@@ -323,6 +323,17 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         return config
 
     @classmethod
+    def _select_dequant_warpgroups(cls, layer_config, shape_m, config):
+        # Native conversion keeps up with one warpgroup; register dequantization does not.
+        if layer_config.use_raw_weight or layer_config.use_native_dequant:
+            return config
+        # Two resident CTAs on a single output group already contend for the SM.
+        has_narrow_resident_pair = config["block_shape"][1] == 128 and config["num_ctas_per_sm"] == 2
+        if has_narrow_resident_pair:
+            return config
+        return config | {"umma_num_dequant_warpgroups": 2}
+
+    @classmethod
     def get_config(
         cls,
         layer_config: LayerConfig,
@@ -416,9 +427,10 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                         config = cls._select_m_tile(
                             layer_config, shape_m, config, use_batch_invariant, use_m_major_input_scale
                         )
-                        return cls._select_cooperative_ctas(
+                        config = cls._select_cooperative_ctas(
                             layer_config, shape_m, config, use_m_major_input_scale
                         )
+                        return cls._select_dequant_warpgroups(layer_config, shape_m, config)
 
         raise ValueError("no resource-feasible dense UMMA tile for this layer")
 

@@ -271,16 +271,22 @@ Both output paths support Stream-K: the first slice stores each chunk, later
 slices reduce into it, and partial writes complete before releasing the output
 lock. Bias is applied only by the first slice.
 
-SM100 FP16/BF16 dense heuristics select two CTAs with six stages when the tile is suitable,
+SM100 dense heuristics select two cooperative CTAs when the tile is suitable,
 K is long enough to amortize the pipeline, and the estimated shared-memory
-allocation fits. The existing Stream-K decision is preserved for CTA pairs.
-Without Stream-K, underfilled output waves retain single-CTA execution. Chunked
-output remains opt-in for single-CTA execution because it did not improve the
-measured large dense cases by itself. FP8/FP4 cooperative execution is currently
-explicitly configured with `umma_cta_group_size=2`; automatic cooperative selection
-remains limited to FP16/BF16. All output chunk heights, including full-tile output,
-are supported. The heuristics use `output_chunk_rows=32`, which also enables
-overlapping accumulator reuse when the tile and scheduling support it.
+allocation fits. FP16/BF16 uses six stages. Native FP8/FP4 operands use the
+deepest pipeline of six to four stages that fits; on an underfilled Stream-K
+grid, their K length is measured on the slice each CTA receives. Repacked
+low-bit weights keep independent CTAs. The existing Stream-K decision is
+preserved for CTA pairs. Without Stream-K, underfilled output waves retain
+single-CTA execution. Chunked output remains opt-in for single-CTA execution
+because it did not improve the measured large dense cases by itself. All output
+chunk heights, including full-tile output, are supported. The heuristics use
+`output_chunk_rows=32`, which also enables overlapping accumulator reuse when
+the tile and scheduling support it.
+
+SM100 dense heuristics use two dequantization warpgroups for weights that are
+dequantized in registers, except for N128 tiles with two resident CTAs. Raw
+weights and natively converted weights keep one.
 
 ### SM100 MoE tile selection
 
