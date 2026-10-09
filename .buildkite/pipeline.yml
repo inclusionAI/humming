@@ -95,30 +95,23 @@ steps:
     label: "Base Tests (H200)"
     key: humming-h200-ci
     agents:
-      queue: h200_18gb
+      queue: H200
     timeout_in_minutes: 180
     concurrency: 1
     concurrency_group: humming/h200
-    env:
-      # The agent environment hook pulls the image before Docker plugin setup.
-      BUILDKITE_PLUGIN_DOCKER_IMAGE: *test_image
     command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
     artifact_paths:
       - "test-results/pytest.xml"
     plugins:
-      # Use the GPU visibility assigned by the MIG agent, as in vLLM ci-infra.
+      # Match vLLM ci-infra's whole-GPU H200 Docker preset.
       - docker#v5.2.0:
           image: *test_image
           always-pull: true
           propagate-environment: true
           propagate-uid-gid: true
-          environment:
-            - CUDA_VISIBLE_DEVICES
-            - NVIDIA_VISIBLE_DEVICES
-            - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+          gpus: all
           volumes:
             - /dev/shm:/dev/shm
-            - /dev/nvidiactl:/dev/nvidiactl
 
   - input: "Run Large Sampled Tests (B200)"
     key: approve-b200-sampled-tests
@@ -156,8 +149,6 @@ steps:
   - <<: *h200_tests
     label: "Large Sampled Tests (H200)"
     key: humming-h200-sampled-ci
-    agents:
-      queue: h200_35gb
     concurrency_group: humming/h200-sampled
     depends_on: approve-h200-sampled-tests
     command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
