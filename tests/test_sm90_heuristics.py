@@ -3,7 +3,8 @@ import math
 import pytest
 
 from humming import dtypes
-from humming.config import GemmType, LayerConfig
+from humming.config import GemmType, LayerConfig, TuningConfig
+from humming.config.mma import get_register_budget_error
 from humming.device import DeviceInfo
 from humming.tune import _get_heuristics_config
 from humming.tune.sm90 import Sm90Heuristics
@@ -385,6 +386,14 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
         assert lower == previous_upper and lower < upper
         assert config["use_packed_k_layout"]
         assert config["warp_shape"][1:] == (16, 128)
+        assert config["wgmma_use_late_as"]
+        assert config["wgmma_split_issue_wait"] == (config["warp_shape"][0] <= 160)
+        tuning_keys = ("mma_type", "block_shape", "warp_shape", "num_stages", "use_warp_spec")
+        tuning = TuningConfig(
+            **{key: config[key] for key in tuning_keys},
+            wgmma_split_issue_wait=config["wgmma_split_issue_wait"],
+        )
+        assert get_register_budget_error(layer, tuning, registers_per_sm=65536) is None
         for shape_m in (lower + 1, min(upper, lower + num_experts * 2048)):
             assert select(layer, shape_m=shape_m, **kwargs) == config
         previous_upper = upper

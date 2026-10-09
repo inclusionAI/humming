@@ -397,6 +397,8 @@ def _set_w4a8_config(config: dict, block_m: int, shape_k: int = 0) -> None:
         use_warp_spec=True,
         use_stream_k=False,
         use_packed_k_layout=True,
+        wgmma_use_late_as=True,
+        wgmma_split_issue_wait=block_m <= 160,
         raster_group_m=16,
         multi_cast_size_a=1,
         multi_cast_size_b=1,
