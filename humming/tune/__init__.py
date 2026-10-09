@@ -127,6 +127,7 @@ def _get_heuristics_config(
             use_f16_accum=use_f16_accum,
             use_batch_invariant=use_batch_invariant,
             gemm_type=gemm_type,
+            use_m_major_input_scale=use_m_major_input_scale,
         )
         config.setdefault("mma_type", get_default_mma_type(layer_config).value)
         _apply_m_major_input_scale(config, use_m_major_input_scale, layer_config, gemm_type)
@@ -141,6 +142,7 @@ def _get_heuristics_config(
             use_f16_accum=use_f16_accum,
             use_batch_invariant=use_batch_invariant,
             gemm_type=gemm_type,
+            use_m_major_input_scale=use_m_major_input_scale,
         )
         for entry in configs:
             entry[2].setdefault("mma_type", get_default_mma_type(layer_config).value)

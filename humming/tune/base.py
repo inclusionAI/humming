@@ -61,6 +61,7 @@ class DeviceHeuristics:
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         compute_bound_min_shape_m = _estimate_compute_bound_threshold(layer_config, use_f16_accum)
 
@@ -306,6 +307,7 @@ class DeviceHeuristics:
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         a_dtype = layer_config.a_dtype
         if a_dtype.num_bits == 16:
@@ -348,6 +350,7 @@ class DeviceHeuristics:
                 use_f16_accum=use_f16_accum,
                 use_batch_invariant=use_batch_invariant,
                 gemm_type=gemm_type,
+                use_m_major_input_scale=use_m_major_input_scale,
             )
             config_str = str(config)
 

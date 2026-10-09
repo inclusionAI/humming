@@ -117,6 +117,7 @@ class Sm120Heuristics(Sm89Heuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         config = super().get_config(
             layer_config,
@@ -124,6 +125,7 @@ class Sm120Heuristics(Sm89Heuristics):
             use_f16_accum,
             use_batch_invariant,
             gemm_type,
+            use_m_major_input_scale,
         )
         if use_batch_invariant:
             return config

@@ -24,6 +24,7 @@ class PPUSm80Heuristics(DeviceHeuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         max_block_m = 128
         if layer_config.a_dtype.num_bits != 16 and not layer_config.use_fused_e8m0_scale:
