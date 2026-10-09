@@ -555,6 +555,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
 class Sm100Heuristics(Sm100MmaHeuristics):
     b8_allowed_dtypes = [*Sm100MmaHeuristics.b8_allowed_dtypes, dtypes.float8e3m4]
     b4_allowed_dtypes = [dtypes.float4e2m1, dtypes.float4e0m3]
+    umma_heuristics: type[Sm100UmmaHeuristics] = Sm100UmmaHeuristics
 
     @classmethod
     def _should_use_mma(cls, layer_config: LayerConfig, shape_m: int) -> bool:
@@ -610,7 +611,7 @@ class Sm100Heuristics(Sm100MmaHeuristics):
                 raise ValueError("native mixed weight layout requires UMMA with FP32 accumulation")
             keep_umma = requires_umma or prefer_umma or not cls._should_use_mma(layer_config, shape_m)
             if not use_f16_accum and keep_umma:
-                return Sm100UmmaHeuristics.get_config(
+                return cls.umma_heuristics.get_config(
                     layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type
                 )
         config = Sm100MmaHeuristics.get_config(
@@ -621,4 +622,4 @@ class Sm100Heuristics(Sm100MmaHeuristics):
     @classmethod
     def get_umma_config(cls, layer_config: LayerConfig, shape_m: int, gemm_type: GemmType):
         # Explicit UMMA entry point bypasses automatic backend selection.
-        return Sm100UmmaHeuristics.get_config(layer_config, shape_m, gemm_type=gemm_type)
+        return cls.umma_heuristics.get_config(layer_config, shape_m, gemm_type=gemm_type)
