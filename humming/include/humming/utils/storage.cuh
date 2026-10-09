@@ -220,6 +220,8 @@ public:
   // TMA expansion reports the packed source bytes, not the padded SMEM bytes.
   static constexpr uint32_t kStageLoadBytesB = kWeightStageK * kWeightStageN * ElementB::kBits / 8;
   static constexpr uint32_t kStageBytesAS = kStageSizeAS * sizeof(int4);
+  // A row-major TMA box holds exactly the tile's rows, without the grouped padding rows.
+  static constexpr uint32_t kStageTmaBytesAS = kUseUmmaRowMajorSmemInputScale ? kStageBytesAS / kScaleBlockM * BlockShape::M : kStageBytesAS;
   static constexpr uint32_t kStageBytesBS = kStageSizeBS * sizeof(int4);
   static constexpr uint32_t kStageBytesBZP = kStageSizeBZP * sizeof(int4);
   static constexpr uint32_t kChannelBytesAS = kChannelSizeAS * sizeof(int4);

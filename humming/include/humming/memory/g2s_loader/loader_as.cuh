@@ -48,7 +48,9 @@ private:
   static constexpr uint32_t kScaleBlockM = BlockShape::M + (kIsGroupedGemm ? kScaleMAlignment : 0);
   static constexpr uint32_t kScaleBlockMVecs = kScaleBlockM / kScaleMAlignment;
   static_assert(BlockShape::M % kScaleMAlignment == 0);
-  static_assert(!kUseTma || kScaleBlockM <= 256);
+  // A TMA box holds at most 256 elements per dimension: wider M-major tiles use 64-bit elements.
+  static constexpr bool kUseWideTmaElements = kUseTma && kUseMxScale && kMMajorInputScale && kScaleBlockM > 256;
+  static_assert(!kUseTma || kScaleBlockM <= 256 || kUseMxScale);
 
   // One uint4 gather per routed row covers four single-group stages. Stream-K is
   // excluded so every tile starts on a vector boundary; the plain smem stores
@@ -203,6 +205,8 @@ public:
     }
   }
 
+  CUDA_INLINE uint32_t m_major_tma_row() { return kUseWideTmaElements ? load_row_offset / 2 : load_row_offset; }
+
   CUDA_INLINE uint32_t row_major_tma_column() {
     return SharedStorage::kUseUmmaWideRowInputScale ? col_offset / 16 * 4 : col_offset / 4;
   }
@@ -211,7 +215,7 @@ public:
     static_assert(!kIsIndexedGemm);
     constexpr uint32_t kLoadThread = Ctx::kUseUmmaSplitLoads ? 32 : 0;
     if (ctx.load_thread_id() != kLoadThread) return;
-    if constexpr (kMMajorInputScale) tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
+    if constexpr (kMMajorInputScale) tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, m_major_tma_row(), col_offset / 4);
     else tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, row_major_tma_column(), load_row_offset);
   }
 
@@ -219,7 +223,7 @@ public:
     if constexpr (kUseTma) {
       if (ctx.load_thread_id() == 0) {
         if constexpr (kUseRowMajorTma) tma_prefetch_2d(tensor_map_ptr, row_major_tma_column(), load_row_offset);
-        else if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset / 4);
+        else if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, m_major_tma_row(), col_offset / 4);
         else if constexpr (kIsChannelScale) tma_prefetch_1d(tensor_map_ptr, load_row_offset);
         else tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset);
       }

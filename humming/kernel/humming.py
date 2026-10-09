@@ -584,7 +584,10 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.use_tma_as = False
             self.use_tma_as2 = False
         if self.is_grouped_gemm and self.block_shape[0] + 4 > 256:
-            self.use_tma_as = False
+            # UMMA group scales address the padded M-major rows as 64-bit pairs,
+            # and row-major boxes hold no padding rows.
+            if self.mma_type != MmaType.UMMA or not self.is_group_input_scale:
+                self.use_tma_as = False
             self.use_tma_as2 = False
         # UMMA preloads secondary scales directly into epilogue registers.
         if self.mma_type == MmaType.UMMA or not self.has_input_scale_2 or self.is_tensor_input_scale_2:

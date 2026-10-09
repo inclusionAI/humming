@@ -63,17 +63,13 @@ def get_heuristics_class(device: int | torch.device | None = None) -> type[Devic
     return heuristics_map[sm_version_base]
 
 
-def _can_load_row_major_input_scale_with_tma(
-    config: dict, layer_config: LayerConfig, gemm_type: GemmType
-) -> bool:
+def _can_load_row_major_input_scale_with_tma(config: dict, layer_config: LayerConfig) -> bool:
     if config.get("mma_type") != MmaType.UMMA.value or not layer_config.is_group_input_scale:
         return False
     scale_words = 4 * layer_config.input_scale_group_size
-    block_m, _, block_k = config["block_shape"]
+    block_k = config["block_shape"][2]
     row_words = math.ceil((layer_config.shape_k - layer_config.pad_shape_k) / scale_words)
-    is_grouped = gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED)
-    fits_tma_box = block_m + (4 if is_grouped else 0) <= 256
-    return block_k % scale_words == 0 and row_words % 4 == 0 and fits_tma_box
+    return block_k % scale_words == 0 and row_words % 4 == 0
 
 
 def _apply_input_scale_tma(
@@ -85,9 +81,7 @@ def _apply_input_scale_tma(
     use_tma = config.get("use_tma", False)
     if not use_tma or layer_config.input_scale_group_size == 0 or gemm_type == GemmType.INDEXED:
         return
-    can_use_tma = use_m_major_input_scale or _can_load_row_major_input_scale_with_tma(
-        config, layer_config, gemm_type
-    )
+    can_use_tma = use_m_major_input_scale or _can_load_row_major_input_scale_with_tma(config, layer_config)
     if can_use_tma:
         config["use_tma_as"] = True
 
