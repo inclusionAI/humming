@@ -91,27 +91,29 @@ steps:
                   medium: Memory
                   sizeLimit: 24Gi
 
-  - &h200_tests
-    label: "Base Tests (H200)"
-    key: humming-h200-ci
+  - &h100_tests
+    <<: *b200_tests
+    label: "Base Tests (H100)"
+    key: humming-h100-ci
     agents:
-      queue: H200
-    timeout_in_minutes: 180
-    concurrency: 1
-    concurrency_group: humming/h200
-    command: HUMMING_TEST_TUNING_SOURCE=heuristic+batch_invariant bash .buildkite/run-tests.sh
-    artifact_paths:
-      - "test-results/pytest.xml"
+      queue: mithril-h100-pool
+    concurrency_group: humming/h100
     plugins:
-      # Match vLLM ci-infra's whole-GPU H200 Docker preset.
-      - docker#v5.2.0:
-          image: *test_image
-          always-pull: true
-          propagate-environment: true
-          propagate-uid-gid: true
-          gpus: all
-          volumes:
-            - /dev/shm:/dev/shm
+      # Match vLLM ci-infra's single-GPU H100 Kubernetes preset.
+      - kubernetes:
+          podSpec:
+            containers:
+              - image: *test_image
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                volumeMounts:
+                  - name: devshm
+                    mountPath: /dev/shm
+            volumes:
+              - name: devshm
+                emptyDir:
+                  medium: Memory
 
   - input: "Run Large Sampled Tests (B200)"
     key: approve-b200-sampled-tests
@@ -143,12 +145,12 @@ steps:
     depends_on: approve-l4-sampled-tests
     command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
 
-  - input: "Run Large Sampled Tests (H200)"
-    key: approve-h200-sampled-tests
+  - input: "Run Large Sampled Tests (H100)"
+    key: approve-h100-sampled-tests
 
-  - <<: *h200_tests
-    label: "Large Sampled Tests (H200)"
-    key: humming-h200-sampled-ci
-    concurrency_group: humming/h200-sampled
-    depends_on: approve-h200-sampled-tests
+  - <<: *h100_tests
+    label: "Large Sampled Tests (H100)"
+    key: humming-h100-sampled-ci
+    concurrency_group: humming/h100-sampled
+    depends_on: approve-h100-sampled-tests
     command: HUMMING_TEST_TUNING_SEED=20261005 HUMMING_TEST_TUNING_SOURCE=sampled32 bash .buildkite/run-tests.sh tests/kernels/humming/
