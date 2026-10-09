@@ -1,9 +1,10 @@
 import functools
+import math
 import os
 
 import torch
 
-from humming.config import GemmType, LayerConfig
+from humming.config import GemmType, LayerConfig, MmaType
 from humming.config.mma import get_default_mma_type
 from humming.device import DeviceInfo, get_device_index
 from humming.tune.base import DeviceHeuristics
@@ -62,16 +63,32 @@ def get_heuristics_class(device: int | torch.device | None = None) -> type[Devic
     return heuristics_map[sm_version_base]
 
 
-def _apply_m_major_input_scale(
+def _can_load_row_major_input_scale_with_tma(
+    config: dict, layer_config: LayerConfig, gemm_type: GemmType
+) -> bool:
+    if config.get("mma_type") != MmaType.UMMA.value or not layer_config.is_group_input_scale:
+        return False
+    scale_words = 4 * layer_config.input_scale_group_size
+    block_m, _, block_k = config["block_shape"]
+    row_words = math.ceil((layer_config.shape_k - layer_config.pad_shape_k) / scale_words)
+    is_grouped = gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED)
+    fits_tma_box = block_m + (4 if is_grouped else 0) <= 256
+    return block_k % scale_words == 0 and row_words % 4 == 0 and fits_tma_box
+
+
+def _apply_input_scale_tma(
     config: dict,
     use_m_major_input_scale: bool,
     layer_config: LayerConfig,
     gemm_type: GemmType,
 ) -> None:
-    if not use_m_major_input_scale:
-        return
     use_tma = config.get("use_tma", False)
-    if use_tma and layer_config.input_scale_group_size > 0 and gemm_type != GemmType.INDEXED:
+    if not use_tma or layer_config.input_scale_group_size == 0 or gemm_type == GemmType.INDEXED:
+        return
+    can_use_tma = use_m_major_input_scale or _can_load_row_major_input_scale_with_tma(
+        config, layer_config, gemm_type
+    )
+    if can_use_tma:
         config["use_tma_as"] = True
 
 
@@ -130,7 +147,7 @@ def _get_heuristics_config(
             use_m_major_input_scale=use_m_major_input_scale,
         )
         config.setdefault("mma_type", get_default_mma_type(layer_config).value)
-        _apply_m_major_input_scale(config, use_m_major_input_scale, layer_config, gemm_type)
+        _apply_input_scale_tma(config, use_m_major_input_scale, layer_config, gemm_type)
         _disable_indexed_input_scale_tma(config, gemm_type)
         _apply_raster_group_m(config, layer_config, gemm_type)
         apply_w4a8_config(config, layer_config, use_m_major_input_scale, gemm_type, shape_m)
@@ -146,7 +163,7 @@ def _get_heuristics_config(
         )
         for entry in configs:
             entry[2].setdefault("mma_type", get_default_mma_type(layer_config).value)
-            _apply_m_major_input_scale(entry[2], use_m_major_input_scale, layer_config, gemm_type)
+            _apply_input_scale_tma(entry[2], use_m_major_input_scale, layer_config, gemm_type)
             _disable_indexed_input_scale_tma(entry[2], gemm_type)
             _apply_raster_group_m(entry[2], layer_config, gemm_type)
             apply_indexed_w4a8_config(entry[2], layer_config, gemm_type)

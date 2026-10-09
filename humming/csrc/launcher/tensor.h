@@ -120,7 +120,7 @@ inline void check_tensor_as(std::optional<Tensor> &tensor, KernelData &kernel_da
   int64_t m_pad = (shape_m + input_scale_m_alignment - 1) / input_scale_m_alignment * input_scale_m_alignment;
   if (kernel_data.use_block_scaled_mma && group_size > 0) {
     std::vector<int64_t> expected_shape;
-    if (kernel_data.use_tma_as || kernel_data.use_m_major_input_scale) {
+    if (kernel_data.use_m_major_input_scale) {
       expected_shape = {(int64_t)CEIL_DIV(num_groups, 4), m_pad};
     } else {
       expected_shape = {shape_m, (int64_t)CEIL_DIV(num_groups, 4)};
@@ -341,7 +341,9 @@ inline CUtensorMap make_tma_desc_as(std::optional<Tensor> &tensor_, KernelData &
   auto tensor = tensor_.value();
   if (kernel_data.use_block_scaled_mma && group_size > 0) {
     tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-    return make_tma_desc(tensor, {block_shape_m, CEIL_DIV(num_groups, 4)}, 0, "as");
+    uint32_t stage_words = CEIL_DIV(num_groups, 4);
+    if (kernel_data.use_m_major_input_scale) return make_tma_desc(tensor, {block_shape_m, stage_words}, 0, "as");
+    return make_tma_desc(tensor, {std::max(stage_words, 4u), block_shape_m}, 0, "as");
   }
   if (group_size == 0) {
     tensor = torch_view_shape(tensor, {-1});

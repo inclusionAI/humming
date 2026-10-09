@@ -33,6 +33,8 @@ private:
   static constexpr bool kUseTma = kConfiguredUseTma && kHasInputScale && !kIsIndexedGemm;
   static_assert(!kConfiguredUseTma || !kIsTensorScale);
   static_assert(!kUseTma || kMMajorInputScale || kIsChannelScale || kUseBlockScaledMma);
+  static constexpr bool kUseRowMajorTma = kUseTma && kUseMxScale && !kMMajorInputScale;
+  static_assert(!kUseRowMajorTma || SharedStorage::kUseUmmaRowMajorSmemInputScale);
   static constexpr uint32_t kGroupSize = kIsGroupScale ? Ctx::kInputScaleGroupSize : ProblemShape::K;
 
   static_assert(ProblemShape::K == kGroupSize || (ProblemShape::K - PadShape::K) % kGroupSize == 0);
@@ -201,16 +203,23 @@ public:
     }
   }
 
+  CUDA_INLINE uint32_t row_major_tma_column() {
+    return SharedStorage::kUseUmmaWideRowInputScale ? col_offset / 16 * 4 : col_offset / 4;
+  }
+
   CUDA_INLINE void load_mx_tma(void *smem_ptr, void *mbar_ptr) {
-    static_assert(kMMajorInputScale && !kIsIndexedGemm);
+    static_assert(!kIsIndexedGemm);
     constexpr uint32_t kLoadThread = Ctx::kUseUmmaSplitLoads ? 32 : 0;
-    if (ctx.load_thread_id() == kLoadThread) tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
+    if (ctx.load_thread_id() != kLoadThread) return;
+    if constexpr (kMMajorInputScale) tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
+    else tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, row_major_tma_column(), load_row_offset);
   }
 
   CUDA_INLINE void prefetch_tma() {
     if constexpr (kUseTma) {
       if (ctx.load_thread_id() == 0) {
-        if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset / 4);
+        if constexpr (kUseRowMajorTma) tma_prefetch_2d(tensor_map_ptr, row_major_tma_column(), load_row_offset);
+        else if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset / 4);
         else if constexpr (kIsChannelScale) tma_prefetch_1d(tensor_map_ptr, load_row_offset);
         else tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset);
       }
