@@ -247,6 +247,34 @@ class Sm90H20Heuristics(DeviceHeuristics):
         config.update(num_stages=num_stages, num_ctas_per_sm=num_ctas_per_sm, num_sms=max(1, num_sms))
 
     @classmethod
+    def _tune_large_mxfp4_grouped_contiguous(
+        cls,
+        layer_config: LayerConfig,
+        gemm_type: GemmType,
+        config: dict,
+    ) -> None:
+        """Use higher CTA residency once expert tiles are sufficiently full."""
+        block_m = config["block_shape"][0]
+        if (
+            gemm_type != GemmType.GROUPED_CONTIGUOUS
+            or not layer_config.use_fused_e8m0_scale
+            or layer_config.shape_k <= 1024
+            or layer_config.shape_n % 128
+            or layer_config.shape_k % 64
+            or block_m < 48
+        ):
+            return
+
+        config.update(
+            block_shape=(48, 128, 64),
+            warp_shape=(48, 32, 64),
+            use_stream_k=False,
+            num_sms=current_device.sm_count,
+            num_stages=4,
+            num_ctas_per_sm=3,
+        )
+
+    @classmethod
     def get_base_config(
         cls,
         a_dtype: dtypes.DataType,
@@ -505,6 +533,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config.update(cls._get_small_m_dense_override(layer_config, shape_m, block_shape_m) or {})
         elif is_moe and not use_batch_invariant:
             cls._tune_long_k_moe_residency(layer_config, shape_m, gemm_type, config)
+            cls._tune_large_mxfp4_grouped_contiguous(layer_config, gemm_type, config)
 
         if use_batch_invariant:
             warp_shape_k = 512 // layer_config.a_dtype.num_bits
