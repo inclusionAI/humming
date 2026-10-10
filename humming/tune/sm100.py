@@ -34,10 +34,41 @@ class Sm100MmaHeuristics(Sm80Heuristics):
         )
         block_m, block_n, _ = config["block_shape"]
         warp_m = config["warp_shape"][0]
-        # This four-warp schedule targets small M tiles.
-        if use_batch_invariant or block_m > 32:
+        if use_batch_invariant:
             return config
 
+        if block_m > 32:
+            is_a16_fp32 = layer_config.a_dtype.num_bits == 16 and not use_f16_accum
+            use_long_stream_k = layer_config.shape_k > 4096 and config["use_stream_k"]
+            if not is_a16_fp32 or not use_long_stream_k or block_m < 64:
+                return config
+
+            # Long K benefits from K-parallel warps and a deeper pipeline after splitting M.
+            block_k = config["block_shape"][2]
+            warp_k = 32
+            if block_m < block_n and block_k < 128 and layer_config.shape_k % 128 == 0:
+                block_k = 128
+                warp_k = 64
+            candidate = config | {
+                "block_shape": (block_m, block_n, block_k),
+                "warp_shape": (warp_m, min(block_n, 64), warp_k),
+                "num_stages": 3,
+            }
+            num_warps = block_m * block_n * block_k // math.prod(candidate["warp_shape"])
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                candidate["block_shape"],
+                gemm_type,
+                3,
+                mma_type=MmaType.MMA,
+                warp_shape=candidate["warp_shape"],
+                output_chunk_rows=config["output_chunk_rows"],
+            )
+            if num_warps <= 8 and smem_size * config["num_ctas_per_sm"] <= cls.max_smem_size:
+                return candidate
+            return config
+
+        # This four-warp schedule targets small M tiles.
         warp_k = 1024 // layer_config.a_dtype.num_bits
         num_stages = config["num_stages"]
         # Long Stream-K slices can amortize a wider weight tile and a deeper
@@ -108,7 +139,6 @@ class Sm100MmaHeuristics(Sm80Heuristics):
 class Sm100UmmaHeuristics(DeviceHeuristics):
     max_smem_size = 227 * 1024
     sm_version = 100
-    expert_probability_cv = 0.25
     b16_allowed_dtypes = [dtypes.float16, dtypes.bfloat16]
     b8_allowed_dtypes = [dtypes.int8, dtypes.float8e4m3, dtypes.float8e5m2, dtypes.float8e3m4]
     b4_allowed_dtypes = [dtypes.float4e2m1, dtypes.float4e0m3]
@@ -512,25 +542,6 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                         return cls._select_dequant_warpgroups(layer_config, shape_m, config)
 
         raise ValueError("no resource-feasible dense UMMA tile for this layer")
-
-    @staticmethod
-    @functools.lru_cache(maxsize=128)
-    def _sample_expert_rows(shape_m: int, num_experts: int, probability_cv: float) -> np.ndarray:
-        """Sample total routed rows, including top-k, without changing global RNG state."""
-        if not math.isfinite(probability_cv) or probability_cv < 0:
-            raise ValueError("expert probability CV must be finite and nonnegative")
-        random_state = np.random.RandomState(0)
-        counts = []
-        for _ in range(16):
-            if probability_cv == 0:
-                probabilities = np.full(num_experts, 1 / num_experts)
-            else:
-                weights = random_state.gamma(1 / probability_cv**2, size=num_experts)
-                probabilities = weights / weights.sum()
-            counts.append(random_state.multinomial(shape_m, probabilities))
-        result = np.asarray(counts)
-        result.flags.writeable = False
-        return result
 
     @classmethod
     @functools.lru_cache(maxsize=64)
