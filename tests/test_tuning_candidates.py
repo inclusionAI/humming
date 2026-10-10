@@ -536,6 +536,8 @@ def test_heuristic_tests_prefer_available_backend(
     from humming.config import ComputeConfig
     from humming.device import DeviceInfo, current_device
     from humming.testing import tuning
+    from humming.tune import get_heuristics_class
+    from humming.tune.sm90 import Sm90Heuristics
 
     if current_device.sm_version != sm_version:
         pytest.skip(f"Requires SM{sm_version}, got SM{current_device.sm_version}")
@@ -553,7 +555,10 @@ def test_heuristic_tests_prefer_available_backend(
     )
     compute = ComputeConfig(gemm_type=GemmType.DENSE, use_f16_accum=use_f16_accum)
     configs = tuning.generate_heuristics_configs(layer, compute, (1, 17, 257))
-    assert {config["mma_type"] for config in configs} == {expected}
+    expected_backends = {expected}
+    if get_heuristics_class() is Sm90Heuristics:
+        expected_backends.add("mma")
+    assert {config["mma_type"] for config in configs} == expected_backends
 
 
 @pytest.mark.parametrize("a_dtype,expected", [("int4", "mma"), ("int8", "wgmma"), ("bfloat16", "wgmma")])

@@ -272,15 +272,19 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         while block_shape_n // warp_shape_n * (block_shape_k // warp_shape_k) > 8:
             block_shape_k //= 2
 
-    dense_small_fp4 = (
+    # Extra K partitions inflate the producer and dequantization state without
+    # enough reduction work to amortize them. Preserve the long-K schedules.
+    needs_smaller_k_tile = layer_config.shape_k <= 2048 and block_shape_k > 64
+    dense_small_wna16 = (
         problem.gemm_type == GemmType.DENSE
         and layer_config.a_dtype.num_bits == 16
-        and layer_config.b_dtype.num_bits == 4
+        and layer_config.b_dtype.num_bits < 16
+        and (layer_config.b_dtype.num_bits == 4 or needs_smaller_k_tile)
         and problem.shape_m <= 128
         and layer_config.shape_n % 128 == 0
         and layer_config.shape_k % 64 == 0
     )
-    if dense_small_fp4:
+    if dense_small_wna16:
         block_shape_n = 128
         block_shape_k = 64
         warp_shape_n = 32
@@ -302,7 +306,7 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
     if problem.gemm_type != GemmType.INDEXED:
         config["use_warp_spec"] = True
         config["use_tma"] = True
-        if dense_small_fp4:
+        if dense_small_wna16:
             config["num_ctas_per_sm"] = 2
 
         if (

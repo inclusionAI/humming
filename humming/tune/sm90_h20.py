@@ -521,4 +521,24 @@ class Sm90H20Heuristics(DeviceHeuristics):
             config["warp_shape"] = (warp_m, warp_n, 128)
             config["block_shape"] = (block_m, block_n, 128 if use_batch_invariant else max(block_k, 128))
 
+        is_wna16 = a_dtype.num_bits == 16 and layer_config.b_dtype.num_bits < 16
+        can_overlap_output = config.get("use_warp_spec", False) and config["block_shape"][0] >= 32
+        if is_wna16 and not is_moe and can_overlap_output:
+            # Keep stage addressing static during dequantization while overlapping
+            # output with the next tile. Very small M tiles can spill with split waits.
+            config["wgmma_split_issue_wait"] = True
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                config["block_shape"],
+                gemm_type,
+                config["num_stages"],
+                warp_shape=config["warp_shape"],
+                smem_reuse_mode="last_stage",
+                use_tma=config.get("use_tma", False),
+                use_warp_spec=True,
+                mma_accum_bits=16 if use_f16_accum else 32,
+            )
+            if smem_size * config["num_ctas_per_sm"] <= cls.max_smem_size:
+                config["smem_reuse_mode"] = "last_stage"
+
         return config
