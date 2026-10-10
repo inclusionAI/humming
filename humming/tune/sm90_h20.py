@@ -255,9 +255,15 @@ class Sm90H20Heuristics(DeviceHeuristics):
     ) -> None:
         """Use higher CTA residency once expert tiles are sufficiently full."""
         block_m = config["block_shape"][0]
+        has_mxfp4_weights = (
+            layer_config.b_dtype == dtypes.float4e2m1
+            and layer_config.bs_dtype == dtypes.float8e8m0
+            and layer_config.weight_scale_group_size == 32
+        )
         if (
             gemm_type != GemmType.GROUPED_CONTIGUOUS
-            or not layer_config.use_fused_e8m0_scale
+            or layer_config.a_dtype.num_bits != 16
+            or not has_mxfp4_weights
             or layer_config.shape_k <= 1024
             or layer_config.shape_n % 128
             or layer_config.shape_k % 64
