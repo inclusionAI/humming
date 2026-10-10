@@ -301,6 +301,8 @@ def get_problem_rejection_reasons(
         return tuple(reasons)
     if layer_config.a_dtype.num_bits != 16 and layer_config.as_dtype != dtypes.float32:
         reasons.append(f"WGMMA input scales must use float32 storage, got {layer_config.as_dtype}")
+    if layer_config.is_block_weight_scale and layer_config.bs_dtype != dtypes.float32:
+        reasons.append(f"WGMMA block weight scales must use float32 storage, got {layer_config.bs_dtype}")
     mma_k = 256 // layer_config.a_dtype.num_bits
     scale_groups = (
         ("input scale group", layer_config.input_scale_group_size),

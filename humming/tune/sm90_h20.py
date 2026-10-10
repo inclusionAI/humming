@@ -6,6 +6,7 @@ from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import current_device
 from humming.tune.base import DeviceHeuristics
+from humming.tune.sm90_policies import get_block_scaled_moe_config
 from humming.utils.math import ceil_div, round_up
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -310,6 +311,17 @@ class Sm90H20Heuristics(DeviceHeuristics):
         gemm_type: GemmType = GemmType.DENSE,
         use_m_major_input_scale: bool = False,
     ):
+        block_scaled_config = get_block_scaled_moe_config(
+            layer_config,
+            shape_m,
+            gemm_type,
+            use_f16_accum,
+            use_batch_invariant,
+            is_h20=True,
+            expert_probability_cv=cls.expert_probability_cv,
+        )
+        if block_scaled_config is not None:
+            return block_scaled_config
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
         a_dtype = layer_config.a_dtype

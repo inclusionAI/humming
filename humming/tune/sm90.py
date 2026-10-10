@@ -11,6 +11,7 @@ from humming.tune.sm90_policies import (
     Sm90CandidatePolicy,
     build_sm90_seed_config,
     calc_sm90_num_block_list,
+    get_block_scaled_moe_config,
     select_grouped_scale,
     select_indexed_a16,
 )
@@ -168,6 +169,16 @@ class Sm90Heuristics(Sm80Heuristics):
         gemm_type: GemmType = GemmType.DENSE,
         use_m_major_input_scale: bool = False,
     ):
+        block_scaled_config = get_block_scaled_moe_config(
+            layer_config,
+            shape_m,
+            gemm_type,
+            use_f16_accum,
+            use_batch_invariant,
+            expert_probability_cv=cls.expert_probability_cv,
+        )
+        if block_scaled_config is not None:
+            return block_scaled_config
         if layer_config.a_dtype == dtypes.int4:
             return super().get_config(
                 layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type, use_m_major_input_scale

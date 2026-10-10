@@ -8,6 +8,8 @@ import torch
 from humming import dtypes
 from humming.config import GemmType, LayerConfig, MmaType
 from humming.config.mma import get_default_mma_type
+from humming.device import current_device
+from humming.tune.base import DeviceHeuristics
 from humming.tune.candidate import (
     CandidateAnalysis,
     ScheduleCandidate,
@@ -15,7 +17,114 @@ from humming.tune.candidate import (
     TuningProblem,
     analyze_candidate,
     fit_pipeline_stages,
+    get_problem_rejection_reasons,
 )
+from humming.utils.smem import estimate_smem_size_layer
+
+
+def get_block_scaled_moe_config(
+    layer_config: LayerConfig,
+    shape_m: int,
+    gemm_type: GemmType,
+    use_f16_accum: bool,
+    use_batch_invariant: bool,
+    *,
+    is_h20: bool = False,
+    expert_probability_cv: float = DeviceHeuristics.expert_probability_cv,
+) -> dict | None:
+    fp8_dtypes = (dtypes.float8e4m3, dtypes.float8e5m2)
+    has_fp8_operands = layer_config.a_dtype in fp8_dtypes and layer_config.b_dtype == layer_config.a_dtype
+    has_block_scales = layer_config.is_block_weight_scale
+    is_grouped = gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED)
+    if not (has_fp8_operands and has_block_scales and is_grouped):
+        return None
+    if use_f16_accum or use_batch_invariant or not layer_config.num_experts:
+        return None
+    if get_problem_rejection_reasons(layer_config, MmaType.WGMMA):
+        return None
+
+    shape_n, shape_k = layer_config.shape_n, layer_config.shape_k
+    if shape_n % 128 or shape_k % 128:
+        return None
+
+    # Separate output storage lets the stage ring continue across expert tiles.
+    # H20 favors two resident CTAs; the full Hopper compute throughput benefits
+    # from a wider tile with more accumulator registers per CTA.
+    block_m, block_n, warp_n = (48, 128, 16) if is_h20 else (80, 256, 32)
+    stages, resident_ctas = (3, 2) if is_h20 else (4, 1)
+    use_warp_spec = True
+    use_stream_k = False
+    short_k = shape_k <= 512
+    if short_k:
+        block_m = 64 if is_h20 else 96
+        stages = 3
+    elif is_h20 and shape_n <= 1024 and shape_k >= 4096 and shape_n % 256 == 0:
+        block_m, block_n, warp_n = 64, 256, 32
+        resident_ctas = 1
+        use_stream_k = True
+    elif is_h20 and shape_k <= 2048:
+        stages = 4
+
+    # Narrow output widths cannot form the wider tile. Removing the producer
+    # warpgroup makes two smaller CTAs fit without sacrificing register space.
+    if shape_n % block_n:
+        block_m, block_n, warp_n = 80, 128, 16
+        stages, resident_ctas = 3, 2
+        use_warp_spec = False
+
+    # Use the same routing samples as the SM100 MoE policy. Round each expert
+    # independently: empty experts, padding and incomplete waves all affect
+    # whether these larger tiles can amortize their pipeline and output storage.
+    counts = DeviceHeuristics._sample_expert_rows(shape_m, layer_config.num_experts, expert_probability_cv)
+    resident_blocks = current_device.sm_count * resident_ctas
+    block_m_candidates = (80, 96) if block_m == 96 else (block_m,)
+    best = None
+    for candidate_m in block_m_candidates:
+        m_tiles = ((counts + candidate_m - 1) // candidate_m).sum(axis=1)
+        tiles = m_tiles * (shape_n // block_n)
+        utilization = counts.sum(axis=1) / (m_tiles * candidate_m)
+        if utilization.mean() < 2 / 3 or tiles.mean() < resident_blocks * 2 / 3:
+            continue
+        waves = (tiles + resident_blocks - 1) // resident_blocks
+        # As in SM100, balance tile rounds against padded math per tile.
+        score = float(waves.mean() * math.sqrt(candidate_m))
+        if best is None or score < best[0]:
+            best = score, candidate_m
+    if best is None:
+        return None
+    block_m = best[1]
+
+    config = {
+        "mma_type": MmaType.WGMMA.value,
+        "block_shape": (block_m, block_n, 128),
+        "warp_shape": (block_m, warp_n, 128),
+        "num_stages": stages,
+        "num_ctas_per_sm": resident_ctas,
+        "use_stream_k": use_stream_k,
+        "use_warp_spec": use_warp_spec,
+        "use_tma": True,
+        "use_tma_c": use_warp_spec and not short_k,
+        "smem_reuse_mode": "none",
+        "wgmma_split_issue_wait": not use_warp_spec,
+        "raster_group_m": 1,
+    }
+    if short_k or use_stream_k:
+        config["producer_stage_unroll"] = 2
+        config["consumer_stage_unroll"] = 2 if short_k else 1
+
+    smem_size = estimate_smem_size_layer(
+        layer_config,
+        config["block_shape"],
+        gemm_type,
+        stages,
+        warp_shape=config["warp_shape"],
+        smem_reuse_mode="none",
+        use_tma=True,
+        use_warp_spec=use_warp_spec,
+    )
+    if smem_size * resident_ctas > 227 * 1024:
+        return None
+    return config
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
