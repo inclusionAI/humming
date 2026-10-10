@@ -166,9 +166,12 @@ class Sm90Heuristics(Sm80Heuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         if layer_config.a_dtype == dtypes.int4:
-            return super().get_config(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+            return super().get_config(
+                layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type, use_m_major_input_scale
+            )
 
         use_grouped_scale_candidates = cls._uses_grouped_scale_candidates(layer_config)
         use_indexed_a16_policy = cls._uses_indexed_a16_policy(layer_config, use_batch_invariant, gemm_type)

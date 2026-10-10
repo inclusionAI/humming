@@ -1,316 +1,434 @@
-# HummingKernel Configuration
+# Humming Configuration
 
-HummingKernel configurations are divided into three categories:
+Humming divides GEMM configuration into `LayerConfig`, `ComputeConfig`, and `TuningConfig`.
 
-- **LayerConfig**: Parameters that affect weight layout, data types, and shapes.
-- **ComputeConfig**: Parameters that do not directly affect weights but significantly impact kernel behavior or computation precision.
-- **TuningConfig**: Parameters that only affect performance.
+| Configuration | Describes | Main effects |
+|---|---|---|
+| `LayerConfig` | Layer shapes, data types, quantization, and weight layout | Data representation, weight preprocessing, and available compute paths |
+| `ComputeConfig` | GEMM type, precision, and computation behavior | Input organization, accumulation, and batch invariant behavior |
+| `TuningConfig` | Kernel tiling, pipelines, data transfers, and scheduling | Execution efficiency and resource usage |
+
+`LayerConfig` is determined when weights are transformed. Changing an option that affects storage requires transforming the weights and associated scales again.
+`ComputeConfig` and `TuningConfig` can be selected at invocation time, but must remain compatible with the existing data layouts.
+For example, changing `mma_type` does not necessarily require another weight transformation, provided the selected backend supports the stored weight and scale layouts.
+
+Throughout this guide, M is the number of input rows, N is the number of output features, and K is the reduction dimension.
+Parameter definitions are in [config.py](../humming/config/config.py); additional compatibility checks run during kernel initialization.
 
 ## LayerConfig
 
-| Parameter | Description |
-|-----------|-------------|
-| `a_dtype`, `b_dtype` | Activation and weight data types. See the project README for supported combinations. |
-| `c_dtype` | Output matrix data type. Only `float16` and `bfloat16` are supported. |
-| `bs_dtype` | Weight scale data type. Supports `float16` / `bfloat16` / `float8e8m0` / `float8e4m3` / `float8e5m2` / `float8e5m3`. |
-| `shape_n`, `shape_k` | The N and K dimensions of the GEMM after padding. |
-| `pad_shape_n`, `pad_shape_k` | Humming pads the weight matrix to a suitable shape (e.g., `shape_n` is typically padded to a multiple of 256, `shape_k` to a multiple of 128). These parameters specify the size of the padded portion, i.e., the actual effective weight shape is `shape_n - pad_shape_n` and `shape_k - pad_shape_k`. Note that the last dimension of input and output matrices should match the unpadded shape. |
-| `num_experts` | Number of experts for MoE. Set to `0` or `None` for non-MoE. |
-| `input_scale_group_size` | Group size for activation quantization. Not applicable when using FP16/BF16. Must be a power of 2 and greater than the minimum group size requirement for the activation type. Set to `0` for channelwise/tokenwise quantization. |
-| `weight_scale_type` | Supports several modes: `group`, `channel`, `block`, `tensor`, `group_tensor`. `group_tensor` means both groupwise scale and tensorwise scale (global scale) are present. |
-| `weight_scale_group_size` | For groupwise or blockwise, this specifies the quantization group size along the K dimension. Ignored for channelwise or tensorwise. |
-| `weight_scale_group_size_n` | Only used for blockwise quantization. Specifies the quantization group size along the N dimension. |
-| `use_int_weight_scale` | Whether to use integer-type scale. Only applicable for INT8 or INT4 activations with `weight_scale_group_size > 0`. Used to accelerate computation in certain cases. The weight scale must be preprocessed as follows: |
-| `has_zero_point` | Whether to enable zero point. When enabled, the dequantization changes from `x * scale` to `(x - zp) * scale`. Humming supports two zero point types (see below). |
-| `is_fp_zero_point` | Whether to use FP-type zero point. See `has_zero_point` for details. |
-| `has_bias` | Whether to use fused bias addition. |
-| `use_fused_e8m0_scale` | Fuse E8M0 group scales into MXFP4-to-FP8/INT8 weight conversion. Weight preprocessing extracts a secondary scale. |
-| `use_packed_k_layout` | Pack K slabs for WGMMA with 8-bit activations and even-bit weights. Can be explicitly enabled together with `use_fused_e8m0_scale`; transformed weights must use the same setting as the kernel. |
+`LayerConfig` describes how a layer's data is represented. The same transformed weights can serve inputs with different M dimensions, while their data types, N/K shapes, quantization parameters, and layouts remain fixed.
 
-Ordinary E4M3/E5M2 scales use the software dequantization path before SM89 and
-native `cvt` conversions on SM89 and newer (via FP16 when needed).
-Unsigned E5M3 scales are stored as `torch.uint8` and use software dequantization.
-Their exponent bits retain the existing conversion semantics: exponent 31 is
-finite in BF16/FP32 and maps to Inf/NaN in FP16.
+### Shapes and Target Device
 
-For ordinary FP16 layers, E8M0 scales are rebased from bias 127 to bias 15 and
-packed as E5M0 in the high five bits of a byte; the low three bits are zero and
-ignored. Scales within `[2^-14, 2^15]` need no extra secondary scale. Weight
-preprocessing extracts a tensorwise `weight_scale_2` only when this range is
-exceeded, merging it with an existing secondary scale. When both ends cannot
-fit, it preserves the largest scales and lets the smallest scales underflow.
-Native block-scaled MMA and fused E8M0 weight paths retain their own formats.
+#### `sm_version`
 
-Weight preprocessing is independent of the tuning backend. `use_block_scaled_mma`
-and `use_native_dequant` are derived from the architecture, data types, quantization
-parameters, and (for native dequantization) compiler support.
+The target GPU's SM version, such as `90` for SM90. Defaults to the current device when omitted.
 
-Equal-bit-width A/B operands retain K-contiguous packed B rows, with padding and
-integer encoding conversion where needed. MMA/MXMMA load these rows into swizzled
-shared memory and use `ldmatrix`; WGMMA and UMMA use SS operands. Native E2M1,
-E3M2, and E2M3 weights paired with FP8 inputs on SM10x/SM11x automatically use raw rows when
-the data types and quantization parameters support UMMA. These weights require
-the UMMA SS TMA expansion path. Other mixed-width operands use repacking.
-`use_umma_ss` is now derived by the kernel and is not a layer configuration option.
-UMMA SS requires `use_tma_b=True`.
+It affects weight layout, dequantization, and available instructions. A transformed layer must run on the same SM version it targets; prepare separate layer configurations and weights when deploying across architectures.
 
-Ordinary mixed-width weights use the same MMA repack layout across backends,
-including SM90. WGMMA adapts the register order during dequantization, including
-integer zero points. Weight transformation no longer takes `use_wgmma`.
-Re-transform ordinary weights previously repacked with the WGMMA mini-block order.
-Packed-K weights retain their existing layout and require WGMMA. Ordinary
-per-group scales use the shared layout described below; block scales and fused
-E8M0 scales have separate storage rules. A tuning override must be compatible
-with all stored tensors, including the scales.
+#### `shape_n`, `shape_k`, `pad_shape_n`, and `pad_shape_k`
 
-`umma` requires SM10x/SM11x GPUs and CUDA 12.9+, with FP16/BF16 outputs and FP32
-accumulation. TS continues to handle repacked mixed-width operands. Native SS
-uses 256 threads and retains dense/MoE, Stream-K and cooperative CTA scheduling.
-SS keeps the input-scale global-memory layout unchanged. It rearranges scales
-in the existing AS shared-memory storage when the M tile is 128-row aligned,
-and uses scratch storage otherwise. Scale copies and MMA instructions share
-one issuer and one TMEM scale buffer. With separate TMA loading warps, AS has
-its own completion barrier. When scales can be prepared without reading B/BS,
-two-CTA SS loads publish A/B completion to the issuer through cooperative TMA;
-the scale warp can prepare AS before those operands finish loading. Indexed SS
-keeps all activation-loading threads on cp.async and tracks TMA weight completion
-separately, so scale preparation can overlap B/BS loading.
+`shape_n` and `shape_k` are the N/K dimensions **after padding**. `pad_shape_n` and `pad_shape_k` specify how many elements were added, both defaulting to `0`.
 
-With 32-row chunked output, separate output storage and non-indexed scheduling, SS
-uses the available TMEM capacity for an overlapping accumulator pair. The
-epilogue reads overlapping rows first so the next tile can begin computing.
-Native FP4 SS stages whose K size is a multiple of 256 use K64+96+96 issues
-per 256 elements. Other stage sizes retain the standard instruction shape.
-Indexed SS also overlaps 32-row chunked output with the next accumulator tile; row-index
-buffers are released separately after output scatter finishes. MoE selection
-accounts for SS's single scale buffer, chunked output, and cooperative CTA pairs.
-It retains whole-tile output for small M tiles and uses sampled expert sizes and
-available work to avoid underfilled tiles and short cooperative pipelines.
-These optimizations are selected internally; TS keeps its existing schedule.
-SS is selected from the fixed weight layout and the tuning backend.
+- The effective output feature count is `shape_n - pad_shape_n`.
+- The effective input feature count is `shape_k - pad_shape_k`.
+- Input and output tensors use the effective feature counts; transformed weights use the padded shapes.
 
-**`use_int_weight_scale` preprocessing:**
+For example, `shape_n=1024` and `pad_shape_n=24` represent 1000 output channels.
+Padding satisfies layout and kernel alignment requirements, but also increases storage and some computation. Use the values established by weight transformation rather than changing the configuration without updating storage.
 
-```python
-dtype = weight_scale.dtype
-assert dtype in [torch.bfloat16, torch.float16]
-weight_scale = (weight_scale / weight_scale.max() * 2048).round()
-weight_scale = weight_scale.to(torch.int16).view(dtype)
-```
+#### `num_experts`
 
-**Zero point types (`has_zero_point`):**
+The number of MoE experts. Use `0` for ordinary GEMM. This determines the expert dimension of weights and associated parameters.
 
-- **INT type**: Only supports INT-type quantized weights, with the same bit width as the quantization bit width.
-- **FP type**: FP16/BF16 type, only supported when using FP16/BF16 as the activation type.
+It does not specify top-k or the actual token count for each expert; those come from the inputs and routing data supplied at invocation time.
+
+### Data Types
+
+#### `a_dtype`, `b_dtype`
+
+The activation and weight types used by the GEMM kernel, respectively. They affect quantization precision, storage size, dequantization cost, and available backends.
+
+- `a_dtype` is the activation type supplied to GEMM after quantization. The caller's original input may first pass through input quantization.
+- `b_dtype` matches the transformed weight representation. Low-bit data is typically packed in storage.
+- Supported combinations also depend on the SM version, scales, and zero points; see the [README](../README.md).
+
+#### `c_dtype`
+
+The output type: `float16` or `bfloat16`. This is separate from accumulator precision; FP16 output does not imply FP16 intermediate accumulation.
+
+#### `as_dtype`, `bs_dtype`
+
+The activation scale and weight scale types, respectively. For group quantization, these determine the precision and storage format of group scales.
+
+- `as_dtype` is usually selected automatically: `None` when no input scale is present, typically FP32 for ordinary paths, and formats such as E8M0 or E4M3 for block-scaled paths, depending on the quantization format.
+- `bs_dtype` defaults to `c_dtype`. Low-precision scales must satisfy both quantization format and backend requirements.
+- Block-scaled paths that use both activation and weight group scales require matching scale data types.
+
+Scale dtype does not directly determine output dtype. Reducing scale bit width saves scale storage, but also changes the representable range and quantization error.
+
+### Input Quantization
+
+#### `input_quant_mode`
+
+The input quantization method and organization of input scales.
+
+| Value | Scale organization |
+|---|---|
+| `none` | No input quantization; used for FP16/BF16 activations. |
+| `static_tensor` | A supplied tensor scale. |
+| `dynamic_token` | One dynamically computed scale per token. |
+| `dynamic_group` | One dynamically computed scale per K group within each token. |
+| `static_tensor_dynamic_group` | A static tensor scale combined with dynamic group scales. |
+| `dynamic_group_token` | Dynamic group scales combined with a secondary token scale. |
+
+When omitted, 16-bit activations use `none`. Lower-precision activations use `dynamic_group` when `input_scale_group_size > 0`, or `dynamic_token` otherwise.
+
+The two combined modes with secondary input scales require block-scaled MMA.
+`dynamic_group_token` is available for supported FP4 activations and requires group size `16` with E4M3 group scales.
+
+#### `input_scale_group_size`
+
+The quantization group size along K for each token. Use `0` when there are no group scales.
+For example, K=4096 with group size 128 gives each token 32 K groups, each with its own group scale.
+
+Smaller groups can usually adapt more closely to the value distribution, but increase the number of scales and processing overhead. Values must also satisfy quantization format, backend, and tile alignment requirements.
+Block-scaled paths that use both activation and weight group scales require matching group sizes.
+
+### Weight Quantization
+
+#### `weight_scale_type`
+
+The sharing granularity of primary weight scales. The table below describes a logical weight matrix `[N, K]`; each MoE expert uses its own corresponding scales.
+
+| Value | Scale organization |
+|---|---|
+| `group` | One scale per K group within each output channel. |
+| `block` | One scale shared by a block spanning N and K. |
+| `channel` | One scale per output channel. |
+| `tensor` | One scale for the entire weight matrix. |
+
+When omitted, `weight_scale_group_size_n > 1` selects `block`. Otherwise, a K group size of `0` selects `channel`, and a positive size selects `group`.
+These modes describe the logical meaning of scales; their transformed physical storage may also be packed or reordered.
+
+#### `weight_scale_group_size`, `weight_scale_group_size_n`
+
+The scale sharing granularity along K and N, respectively.
+
+- `group` and `block` require `weight_scale_group_size > 0`.
+- `channel` and `tensor` require `weight_scale_group_size=0`.
+- `weight_scale_group_size_n` is used for block scales and specifies how many adjacent output channels share a scale.
+
+For example, N/K group sizes of 128/128 in `block` mode assign one scale to each logical `[128, 128]` weight block.
+Group sizes are part of the quantized weight format and cannot be changed like ordinary tuning parameters.
+
+#### `weight_scale_2_type`
+
+The secondary weight scale type: `none`, `channel`, or `tensor`, defaulting to `none`.
+It combines with the primary scale to provide additional channel or tensor scaling.
+
+Supported combinations include:
+
+- A `group` primary scale with a `channel` or `tensor` secondary scale.
+- A `channel` primary scale with a `tensor` secondary scale.
+
+Some preprocessing paths automatically extract a secondary scale, so the resulting configuration may differ from the original input. Supply the complete transformed parameter set when invoking the kernel.
+
+#### `has_zero_point`, `is_fp_zero_point`
+
+`has_zero_point` enables zero-point correction during dequantization and defaults to `False`. When enabled, the corresponding zero-point tensor is required.
+
+`is_fp_zero_point` selects the representation:
+
+- `False`: integer zero points with the same bit width as the quantized weights; supported only for integer weights.
+- `True`: FP16/BF16 zero points; requires FP16/BF16 activations.
+
+The zero-point type and layout must match weight quantization and preprocessing. These options cannot be changed only at kernel invocation time.
+
+### Preprocessing and Other Options
+
+#### `use_int_weight_scale`
+
+Converts group weight scales to an integer representation to accelerate some INT8/INT4 activation paths. This transformation can introduce additional scale rounding error and extracts a secondary scale.
+
+Usually leave this to automatic selection. The main requirements are group weight scales, no input group scales, and no channel secondary weight scale.
+The transformed scales use a special storage representation and should be generated by the corresponding preprocessing path.
+
+#### `use_fused_e8m0_scale`
+
+Fuses E8M0 group scales into FP4-to-FP8/INT8 weight conversion and extracts a secondary scale, reducing the work needed to apply group scales separately.
+
+Usually selected automatically for supported 8-bit activation and E2M1 weight paths. It changes how scales are preprocessed and consumed, and must match the transformed weight parameters.
+
+#### `use_packed_k_layout`
+
+Uses a packed-K weight layout that organizes K data for WGMMA.
+
+- Requires SM90, 8-bit activations, weights with an even bit width, and a path that does not use raw weights.
+- The transformed weights require WGMMA and must satisfy its warp K and scale group constraints.
+- When omitted, it is selected from the quantization parameters and layer shape. Changing it requires transforming weights again.
+
+Usually leave this to automatic selection. It determines data layout and cannot be freely switched as a backend tuning option on the same stored weights.
+
+#### `has_bias`
+
+Fuses bias addition into the epilogue. Defaults to `False`. When enabled, supply bias for the effective output channels; MoE uses the corresponding expert's bias.
 
 ## ComputeConfig
 
-| Parameter | Description |
-|-----------|-------------|
-| `gemm_type` | Supports `dense`, `indexed`, `grouped_contiguous`, `grouped_masked`. |
-| `use_f16_accum` | Whether to use FP16 accumulator for MMA. Applicable when activation type is `fp16` / `float8e4m3` and output type is `float16`. |
-| `use_batch_invariant` | Whether to enable batch invariance support. |
+### `gemm_type`
+
+The input organization and scheduling form of GEMM.
+
+| Value | Usage |
+|---|---|
+| `dense` | Ordinary matrix multiplication, with input rows sharing the same weights. |
+| `indexed` | Reads inputs through routing indices and writes results to the corresponding positions. |
+| `grouped_contiguous` | Stores each expert's inputs contiguously along the row dimension, with expert boundaries describing the groups. |
+| `grouped_masked` | Uses a fixed-capacity storage region per expert and supplies the actual valid row counts. |
+
+Ordinary layers can automatically select `dense`. MoE requires an explicit type and the routing or expert layout data required by that type.
+These forms differ in TMA support, tile alignment, and output handling; switching also requires matching input organization.
+
+### `use_f16_accum`
+
+Uses FP16 accumulators. Defaults to `False`. This controls intermediate accumulation precision, not the output tensor type.
+
+- Can reduce accumulator storage and some computation overhead on supported paths.
+- Has higher rounding error and overflow risk than FP32 accumulation. Check precision carefully for long K dimensions or wide value ranges.
+- Supports only specific activation/backend combinations; the precision constraints of UMMA, MXMMA, and block-scaled paths also apply.
+
+### `use_batch_invariant`
+
+Enables batch invariant behavior by constraining reduction and tuning choices, preventing changes in computation organization across batch sizes from producing different numerical results. Defaults to `False`.
+
+Requires Stream-K to be disabled, `warp_shape_k == block_shape_k`, and the same `mma_type` to be used across batch sizes. Heuristics adjust the configuration accordingly; manual tuning must also follow these constraints, which may reduce performance.
+
+### `use_m_major_input_scale`
+
+Uses an M-major input scale layout. Defaults to `False`. For group scales, this places scales from different tokens for the same K group contiguously along M.
+
+Input preprocessing and GEMM must use the same layout; changing only the GEMM configuration does not convert existing scale tensors.
+`indexed` GEMM does not support this option. Enabling `use_tma_as` requires it to be `True`, except for UMMA group scales (see `use_tma_as`).
 
 ## TuningConfig
 
-`mma_type` selects `mma`, `wgmma`, `umma`, or `mxmma`. Heuristics resolve it per
-shape; explicit tuning configurations can override it without changing LayerConfig
-or transforming weights again, provided the selected backend supports the fixed
-weight and scale layouts. Block-scaled layers require UMMA on SM10x/SM11x or MXMMA
-on SM12x. Move `mma_type` from old layer dictionaries into tuning dictionaries and
-re-transform weights created with the old packing convention.
+Start from a configuration generated by the heuristics and adjust parameters that could benefit the target workload.
+The suggested values below are starting points. Backend, quantization format, alignment, and resource constraints still apply; measure performance on the actual workload.
 
-On NVIDIA GPUs, ordinary per-group weight scales use the WGMMA layout for both
-MMA and WGMMA. For low-bit activations, MMA loads even and odd N channels into
-separate register sequences and applies the converted values to the corresponding
-accumulators. FP32 and integer accumulation need no intermediate scale repacking;
-FP16 accumulation assembles half2 pairs when applying scales. These MMA group-scale
-configurations require block N >= 64, matching the scale packing block.
+### Compute Backend
 
-Re-transform group scales previously stored in the MMA layout. Fused E8M0, native
-block-scaled, channel, tensor, and block-scale layouts are unchanged.
+#### `mma_type`
 
-### Block and Warp Shapes
+Selects the MMA backend, determining the compute instructions and the associated thread, data-loading, and accumulator organization.
 
-`block_shape` and `warp_shape` are 3D tuples representing the M/N/K dimensions, with the following constraints:
+| Value | Main usage |
+|---|---|
+| `mma` | Ordinary MMA paths; dtype support depends on the architecture. |
+| `wgmma` | WGMMA on SM90. |
+| `umma` | Supported SM10x/SM11x configurations; requires CUDA 12.9+. |
+| `mxmma` | Supported SM12x block-scaled configurations. |
 
-- `block_shape[i]` must be a power-of-2 multiple of `warp_shape[i]`.
-- `block_shape_n` must be at least 64.
-- When using WGMMA, `block_shape_n` must be at least 4x `warp_shape_n`.
-- When using UMMA, block M/K must equal warp M/K, warp N is 32, M is a multiple of 8 in [8, 256], and K is a power of two of at least 32. Block N can be 128, 256, or 512; the tile must fit SMEM and TMEM.
-- For indexed GEMMs, align `sorted_ids` and `expert_ids` to each projection's `block_shape_m`.
-- `warp_shape_m` must be a multiple of MMA shape M.
-- Valid values for `warp_shape_n` and `warp_shape_k` depend on the activation type:
+Block-scaled layers require UMMA or MXMMA for the corresponding architecture; packed-K layouts require WGMMA.
+Usually retain the heuristic choice. When multiple backends support the same layout, compare their performance using tile and pipeline configurations supported by each backend.
 
-| Activation Type | `warp_shape_n` | `warp_shape_k` |
-|----------------|----------------|----------------|
-| `float16` / `bfloat16` | 32, 64 | 32, 64 |
-| `float8e4m3` / `float8e5m2` / `int8` | 16, 32, 64 | 64, 128 |
-| `float4e2m1` / `int4` | 16, 32, 64 | 128, 256 |
+### Tiling and Thread Organization
 
-With `use_packed_k_layout`, warp K must be 128 and warp N can start at 16. Activation scale groups,
-when present, must cover warp K. Weight scale groups must also cover warp K unless
-`use_fused_e8m0_scale` is enabled; fused conversion applies each K32 slab's weight
-scale before WGMMA, so GS32 weights can use packed warp K128. Fused packed-K
-remains opt-in; the default layout selection is unchanged.
+#### `block_shape`
 
-`raster_group_m` controls M tile grouping for dense and grouped-contiguous GEMMs.
-For grouped-contiguous GEMMs, values greater than 1 automatically use an expert
-tile prefix table and binary lookup, allowing M tile IDs to move backwards as N
-advances. A value of 1 uses the existing forward warp scan without the prefix table.
+The CTA's `(M, N, K)` tile. Affects data reuse, parallelism, and shared-memory (SMEM) and register usage.
 
-### Pipeline and Synchronization
+- **M**: prefer smaller tiles for small batches or few rows per expert to reduce padding and wasted computation. Larger tiles can improve weight reuse when enough rows are available.
+- **N**: larger tiles improve activation reuse but require more resources for accumulators and weight tiles.
+- **K**: larger tiles reduce stage iterations, but each stage consumes more storage, potentially limiting pipeline depth or concurrent CTAs.
 
-| Parameter | Description |
-|-----------|-------------|
-| `num_stages` | Number of pipeline stages. Must be at least 2. Must be at least 3 when using `use_warp_spec` with WGMMA. |
-| `producer_stage_unroll` | Producer stage loop unroll factor, including prefill and tail. `None` (default) uses `num_stages` when the tuning config is initialized; explicit values must be positive integers. |
-| `consumer_stage_unroll` | Consumer stage loop unroll factor. Same default and range as `producer_stage_unroll`; 1 disables unrolling. Does not change fragment loop unrolling or pipeline depth. Without warp specialization, also controls the loads interleaved in the compute loop. |
-| `use_warp_spec` | Whether to enable Warp Specialization. Requires SM90+. Required for UMMA. |
-| `wgmma_use_late_as` | Delay per-group input-scale register loads until WGMMA accumulator promotion. Defaults to `False`; requires WGMMA with per-group input scales. |
-| `wgmma_split_issue_wait` | Prefetch the next fragment between WGMMA issue and wait. Defaults to `False`; independent of input-scale granularity and `wgmma_use_late_as`. |
-| `use_mbarrier` | Whether to use MBarrier. Requires SM80+. |
-| `use_cp_async` | Whether to use CP Async. Requires SM80+. |
-| `num_ctas_per_sm` | Number of CTAs (Cooperative Thread Arrays / Thread Blocks) launched per SM. |
-| `umma_cta_group_size` | `1` (default) or `2`. With `2`, a cluster of two CTAs cooperatively executes UMMA for adjacent N tiles. This is independent of CTA residency and TMA multicast. |
-| `output_chunk_rows` | Output rows per shared-memory chunk for every MMA backend. `0` (default) writes a full tile; positive values must be multiples of 32 up to 256 and are clamped to tile M. Partial final chunks are supported. UMMA alternates two buffers; other backends reuse one buffer. Supports TMA and regular stores, Stream-K, and MoE scatter. Replaces `num_write_splits` (use half of tile M to reproduce two splits). |
+Start with adjustments near the heuristic configuration. Larger tiles also reduce the number of independent output tiles, which can leave SMs underutilized for small matrices.
 
-WGMMA output with multiple output warpgroups and `output_chunk_rows=0` uses one
-Stream-K lock per output warpgroup. Each group initializes and accumulates its own
-output region independently. K reduction, shared scratch reuse and indexed row
-buffer reuse still synchronize the math threads that share those resources.
-Layer-owned lock buffers reserve space for the maximum number of warpgroups per
-CTA. The launcher checks supplied lock capacity against the grid and kernel's
-lock count per tile.
+#### `warp_shape`
 
-Stage unroll factors apply to all MMA backends and do not need to divide `num_stages`.
-UMMA heuristics explicitly choose 4 for both factors, including when fewer than four
-stages are used. Other backends unroll within one stage cycle, so factors at least
-as large as the cycle length fully unroll that cycle.
-For example, `num_stages=5, producer_stage_unroll=2, consumer_stage_unroll=1`
-keeps all five pipeline slots while requesting partial producer unrolling and no
-consumer stage unrolling. Fragment loops remain fully unrolled. Reducing these
-factors can reduce register pressure, but can also add dynamic stage addressing;
-measure them together with tile shapes and pipeline depth.
+The warp's `(M, N, K)` compute tile. WGMMA uses four cooperating warps, while UMMA uses this field to express its specific thread organization constraints.
+For ordinary MMA/WGMMA paths, the ratios between block and warp dimensions determine the number of compute threads, so a smaller warp tile does not necessarily reduce total CTA resource usage.
 
-The two `wgmma_*` options apply only to WGMMA and support both warp-specialized
-and non-warp-specialized kernels. Per-group inputs support all four combinations;
-per-token and per-tensor inputs must leave `wgmma_use_late_as` disabled. They keep
-the existing weight layout and weight-scale consumption order; scale prefetches
-that would overwrite a live scale buffer wait until the current promotion finishes.
-Tune these options together with tile shapes, pipeline stages, and Stream-K.
+Usually retain the backend's recommended values. Try smaller warp M/N dimensions when register pressure is high. More warps along K can increase reduction parallelism, but require additional partial-result reduction.
 
-### TMA (Tensor Memory Accelerator)
+Main shape constraints:
 
-| Parameter | Description |
-|-----------|-------------|
-| `use_tma` | Whether to use TMA. Requires SM90+. When set to `True`, all parameters use TMA by default. Fine-grained control is available via the parameters below. |
-| `use_tma_a` | Enable TMA for matrix A loading. |
-| `use_tma_b` | Enable TMA for matrix B loading. |
-| `use_tma_c` | Enable TMA for output matrix storing. |
-| `use_tma_bs` | Enable TMA for weight scale loading. |
-| `use_tma_bzp` | Enable TMA for zero point loading. |
-| `use_tma_bias` | Enable TMA for bias loading. |
-| `multi_cast_size_a` | When greater than 1, enables TMA MultiCast for matrix A. Currently only supports Dense GEMM. Only one of `multi_cast_size_a` and `multi_cast_size_b` can be greater than 1. |
-| `multi_cast_size_b` | When greater than 1, enables TMA MultiCast for matrix B. Only one of `multi_cast_size_a` and `multi_cast_size_b` can be greater than 1. |
+- For ordinary MMA/WGMMA, each block dimension must be a power-of-two multiple of the corresponding warp dimension, with the required instruction, quantization group, and layout alignment.
+- WGMMA requires complete groups of four warps along N: `block_shape_n / warp_shape_n` must be a multiple of `4`.
+- UMMA requires block M/K to equal warp M/K, warp N to be `32`, and block N to be `128`, `256`, or `512`. Each activation row must contain at least 64 bytes across block K.
+- Packed-K requires warp K to be `128`. Input scale groups must cover warp K, as must weight scale groups unless fused E8M0 conversion is enabled.
+- For `indexed` GEMM, align `sorted_ids` and `expert_ids` to the corresponding projection's block M.
 
-### UMMA pipeline and cooperative output
+### Pipelines and Concurrency
 
-Both one-CTA and two-CTA execution use the same continuous stage ring and three
-warp groups per CTA. WG0 contains two loading warps, an issuing warp (active only
-in the leader CTA for cooperative execution), and an activation readiness warp.
-For cp.async activation tiles of at least 12 KiB, WG0 instead uses three loading
-warps and one issuing warp. Dequantization's combined load barrier supplies A
-readiness in this case. The choice depends on bytes per tile, not token count.
-WG1 writes output; WG2 converts the weights. Accumulator ready/free barriers
-separate issuing from output. Indexed loading retires the preceding tile before
-reusing its row-index buffer. With two CTAs, each loads half of A and its own N
-tile of B. Both CTAs retain the existing compressed weight
-layout and register-to-TMEM conversion. MMA completion releases operands in both
-CTAs through multicast barrier commits; this does not enable TMA multicast.
+#### `num_stages`
 
-Chunked output supports dense, indexed, and grouped GEMMs, TMA or ordinary
-stores, and all `smem_reuse_mode` values. Block N can be 128, 256, or 512;
-block M is a multiple of 8 for one CTA, or 16 for two CTAs, subject to SMEM and
-TMEM capacity. The two-CTA M alignment comes from the transposed `tcgen05.mma`
-instruction's N dimension. Indexed output uses ordinary stores and preserves
-row indices until all chunks have been written. Grouped TMA output uses the
-existing per-CTA descriptor buffer and expert row offset.
+The number of pipeline buffer stages, generally at least `2`; WGMMA requires at least `3`. More stages allow data to be prepared further ahead of computation, but each additional stage consumes SMEM.
 
-Positive output chunk heights are multiples of 32, clamped to block M.
-The TMA box retains that height. When it does not divide block M, the per-CTA
-descriptor's global M boundary is updated for each tile so excess tail rows are
-masked. Updates wait for outstanding stores and publish the descriptor through
-the tensor-map proxy fences. Dense tiles with evenly dividing chunks need no updates.
-When the actual output N (excluding padding) is divisible by 64, a 3D descriptor
-combines 64-column SMEM slabs into one store. UMMA chunked output combines 128
-columns per partition; other output paths combine the entire block N. Otherwise,
-2D stores retain exact N bounds and mask padded columns. Stream-K uses matching
-3D or 2D reduction stores.
-Each N partition writes only its own columns; the accumulator is released only
-after the last partition has been read. Reusing stage SMEM waits for output
-completion before loading the next tile, reducing load/epilogue overlap.
+For long K dimensions, try increasing from `2` / `3` to `4` or more to hide memory latency. Prefer fewer stages for short K dimensions or when SMEM limits concurrency. Consider `block_shape_k` when determining how many iterations can actually use these buffers.
 
-Two-CTA execution requires N divisible by twice block N,
-and `num_ctas_per_sm=1`. Both TMA and cp.async stage loads are supported,
-including indexed A gathers. Each CTA loads only its own half of A; both CTAs
-publish operand readiness before the leader issues UMMA.
-Cooperative instructions support FP16/BF16, ordinary FP8 with FP8/FP6/FP4
-weights, and MXFP8 with MXFP8/MXFP6/MXFP4 weights and group-32 E8M0 scales.
-FP4 activations use native `mxf4nvf4` instructions with packed FP4 weights:
-MXFP4 uses group-32 E8M0, while group-16 supports E8M0 or E4M3 (NVFP4).
-Both one-CTA and two-CTA execution support these formats. The SM100 dispatcher
-also selects UMMA for supported FP4 activation configurations.
+#### `producer_stage_unroll`, `consumer_stage_unroll`
 
-TS also supports lower-bit integer weights, such as INT2 with MXFP4 or NVFP4
-activations, through the existing register conversion and TMEM store path.
-Hardware group scales must be nonnegative (E8M0 or unsigned E4M3).
-Either operand may omit group scales: its hardware scales are filled with one,
-while tensor/token activation scales and tensor/channel weight scales are applied
-in the epilogue. This includes tokenwise FP4 with channelwise FP4 in TS and SS.
+Control producer and consumer stage loop unrolling independently. `None` (default) resolves to `num_stages` when the tuning config is initialized; explicit values must be positive integers. A value of `1` disables unrolling.
 
-SM100-family UMMA also supports the undocumented `float8e3m4` and
-`float4e0m3` formats. E3M4 supports ordinary FP8 and group-32 E8M0 scaling;
-E0M3 requires group-16 E8M0 or E4M3 scales (group-32 faults in hardware).
-Activation and weight formats may differ, including E3M4 with ordinary
-FP8/FP6/FP4 weights and E0M3 with E2M1 weights, in either FP4 operand.
-UMMA selects these formats directly in its instruction descriptor. Input
-quantization uses the existing F2FP cubin patcher, extended to SM100/103;
-SM120/121 MMA patching remains unchanged.
+The producer factor includes prefill and tail loops. Without warp specialization, the consumer factor also controls loads interleaved in the compute loop. Neither factor changes pipeline depth or fragment loop unrolling.
 
-Tensor/token activation scales and MX activation scales use the existing
-loaders. `static_tensor_dynamic_group` applies the secondary tensor scale in
-the UMMA epilogue; NVFP4 `dynamic_group_token` similarly applies the secondary
-per-token scale before output conversion. Input-scale GMEM layout is unchanged.
-The TMEM scale allocation pads small M tiles to keep successive K scale words
-aligned. The resource estimator accounts for the scale group size and padding.
-Channel weight scales, channel secondary scales,
-bias, and channel/group zero points reuse the existing loaders and arithmetic.
-Channel parameters are released once all consuming threads have read them.
-Both output paths support Stream-K: the first slice stores each chunk, later
-slices reduce into it, and partial writes complete before releasing the output
-lock. Bias is applied only by the first slice.
+These factors apply to all MMA backends and do not need to divide `num_stages`. UMMA heuristics explicitly choose `4` for both, including when fewer than four stages are used. Other backends unroll within one stage cycle, so factors at least as large as that cycle fully unroll it.
 
-SM100 FP16/BF16 dense heuristics select two CTAs with six stages when the tile is suitable,
-K is long enough to amortize the pipeline, and the estimated shared-memory
-allocation fits. The existing Stream-K decision is preserved for CTA pairs.
-Without Stream-K, underfilled output waves retain single-CTA execution. Chunked
-output remains opt-in for single-CTA execution because it did not improve the
-measured large dense cases by itself. FP8/FP4 cooperative execution is currently
-explicitly configured with `umma_cta_group_size=2`; automatic cooperative selection
-remains limited to FP16/BF16. All output chunk heights, including full-tile output,
-are supported. The heuristics use `output_chunk_rows=32`, which also enables
-overlapping accumulator reuse when the tile and scheduling support it.
+For example, `num_stages=5, producer_stage_unroll=2, consumer_stage_unroll=1` keeps all five pipeline slots while requesting partial producer unrolling and no consumer stage unrolling. Smaller factors can reduce register pressure, but can add dynamic stage addressing; measure them together with tile shapes and pipeline depth.
 
-### SM100 MoE tile selection
+#### `num_ctas_per_sm`
 
-UMMA MoE selection samples expert row counts from total routed rows (including
-top-k), the expert count, and the configured probability CV (default 0.25).
-It scores M/N tiles with Stream-K already included, balancing scheduled work
-against padded rows. A small fixed per-tile cost accounts for activation loading
-and synchronization shared by wider N tiles. Stream-K must predict at least a
-50% reduction in work, including its startup allowance, before it is selected.
-The candidate pipeline has at least three stages unless K has fewer than three
-iterations. These are conservative heuristic choices, not kernel restrictions;
-explicit configurations may still use two stages. No token-specific or
-weight-dtype-specific tuning cases are used in this rule.
+The number of CTAs scheduled per SM. It also affects launch bounds and resource budgets, but does not guarantee actual hardware occupancy.
+Increasing it tightens each CTA's register and SMEM budgets, potentially requiring smaller tiles or fewer stages.
+
+Usually start with `1`. Try `2` for small tiles with sufficient resources to improve concurrency; large tiles or deep pipelines usually favor `1`.
+
+#### `use_warp_spec`
+
+Uses warp specialization to assign loading and computation to different threads. Requires architecture and backend support; UMMA uses this organization.
+
+On SM90, compare `True` and `False`: longer pipelines may benefit, but the extra threads consume resources and may not pay off for small workloads.
+
+### Data Transfers and Synchronization
+
+The kernel selects the following behavior automatically, without configuration switches:
+
+- cp.async is enabled on SM80+ and disabled on earlier architectures.
+- MBarrier is enabled for UMMA, warp specialization, or TMA, and disabled otherwise.
+
+#### `use_tma`
+
+The master switch for TMA (Tensor Memory Accelerator). Requires SM90+ and defaults to `False`.
+
+- When `use_tma=False`, no `use_tma_*` option may be explicitly set to `True`.
+- When `use_tma=True`, unspecified tensor-specific switches generally inherit it. `use_tma_as` is an exception and still defaults to `False`.
+- The kernel also adjusts the TMA paths used according to tensor presence, scale granularity, and GEMM type.
+
+Try `True` for large, regular tiles. Compare ordinary loads for small or irregular transfers. TMA has descriptor and synchronization overhead, so individual tensor switches are also worth comparing after enabling the master switch.
+
+#### `use_tma_a`, `use_tma_b`
+
+Control TMA loads for activations and weights, respectively.
+
+Prefer enabling them for large, contiguous, aligned transfers. Disable the corresponding switch for unsupported paths such as indexed A gathers. UMMA SS requires `use_tma_b=True`.
+
+#### `use_tma_c`
+
+Controls TMA stores for the output.
+
+Try `True` for regular, contiguous output; indexed scatter uses ordinary stores. For small outputs, compare the TMA setup and synchronization overhead.
+
+#### `use_tma_as`, `use_tma_as2`
+
+Control TMA loads for input scales and secondary input scales, respectively.
+`use_tma_as` defaults to `False` and requires `use_m_major_input_scale=True` when enabled. UMMA can also load row-major group scales with TMA when a stage holds whole 4-byte scale words and each row of the scale tensor is 16-byte aligned. `indexed` GEMM does not support either TMA scale switch.
+Try enabling them when the scale layout is supported and transfers are sufficiently large. Paths such as tensor scaling do not use the corresponding TMA loads.
+
+#### `use_tma_bs`, `use_tma_bs2`
+
+Control TMA loads for weight scales and secondary weight scales, respectively.
+
+Try enabling them when there are many group/channel scales. The secondary scale TMA path handles channel scales; tensor scales do not need this transfer method.
+
+#### `use_tma_bzp`, `use_tma_bias`
+
+Control TMA loads for zero points and bias, respectively.
+
+Usually follow `use_tma`. Try disabling them for small parameter transfers to reduce synchronization overhead. They have no effect when the corresponding tensor is absent.
+
+### Output and Shared Memory
+
+#### `output_chunk_rows`
+
+The number of rows written through SMEM per output chunk. Defaults to `0`.
+
+- `0`: write the entire tile.
+- Positive values: must be multiples of `32`, no greater than `256`. The actual chunk height is capped at tile M; a partial final chunk is supported.
+
+This changes output chunking, not the output tensor's logical shape.
+Try `32` or `64` when SMEM pressure is high. Chunking can reduce output buffer requirements and improve overlap on some paths, but may increase synchronization and store overhead.
+
+#### `smem_reuse_mode`
+
+How the output buffer reuses pipeline SMEM.
+
+| Value | Storage arrangement |
+|---|---|
+| `none` | Allocate output storage separately from stage storage. |
+| `last_stage` | Reuse storage starting at the last stage's position. |
+| `all_stages` | Reuse the entire stage storage region for the output buffer. |
+
+Defaults to `none` for UMMA and `all_stages` for other backends.
+Try `last_stage` or `all_stages` when SMEM is tight. With sufficient resources, try `none` to reduce waiting between loads and output. Combine this with `output_chunk_rows` to shrink the output buffer and reassess whether reuse is needed.
+
+### Work Scheduling and Data Reuse
+
+#### `use_stream_k`
+
+Partitions work along K so multiple CTAs can share computation for an output tile, improving load distribution when there are too few output tiles or uneven waves. Partial results require additional reduction and synchronization.
+
+Enabling it changes the loop iteration count from a compile-time constant to a runtime variable. This can limit compiler loop optimizations and make some cases slower.
+
+Try `True` for small M/N and long K. Try `False` when there are already enough tiles or K is short to avoid partial-result reduction and synchronization overhead. Must be disabled for batch invariant behavior.
+
+WGMMA output with multiple output warpgroups and `output_chunk_rows=0` uses one Stream-K lock per output warpgroup. Each group initializes and accumulates its own output region independently. K reduction, shared scratch reuse and indexed row buffer reuse still synchronize the math threads that share those resources.
+
+Layer-owned lock buffers contain 2048 int32 elements. The launcher checks supplied lock capacity against the grid and kernel's lock count per tile.
+
+#### `raster_group_m`
+
+Controls grouped traversal of M tiles for dense and grouped-contiguous GEMM.
+
+Defaults to `1`. Try `2`, `4`, or `8` to improve cache locality when adjacent M tiles can reuse weight data. Larger groups also change A reuse, and add expert tile lookup overhead in the grouped-contiguous path.
+
+#### `multi_cast_size_a`, `multi_cast_size_b`
+
+The number of CTAs sharing a TMA multicast. Defaults to `1`, which disables multicast.
+
+- `multi_cast_size_a` shares activation data across different N tiles.
+- `multi_cast_size_b` shares weight data across different M tiles. The current kernel requires dense GEMM for B multicast.
+- Both cannot exceed `1` at the same time. Multicast requires the corresponding tensor's TMA load, warp specialization, and cluster/tile alignment. UMMA currently requires both to be `1`.
+
+Try `2` on supported backends when multiple CTAs repeatedly read the same A/B tile. Keep `1` when reuse is limited to avoid cluster scheduling constraints.
+
+### Backend-Specific Options
+
+#### `wgmma_use_late_as`
+
+Delays input group scale register loads until accumulator promotion. Defaults to `False` and applies only to WGMMA with input group scales.
+
+Try `True` when register pressure is high, but note that delayed loads can also increase waiting for scales.
+
+#### `wgmma_split_issue_wait`
+
+Prefetches the next fragment between WGMMA issue and wait. Defaults to `False`. It can be selected independently of `wgmma_use_late_as`; both apply to WGMMA paths with or without warp specialization.
+
+Try `True` to increase overlap between loading and computation. It extends the lifetime of some operands and accumulators. When register budgets are tight, prefer disabling it, or reduce tile sizes or the number of compute threads per CTA before comparing pipeline depths.
+
+#### `umma_num_dequant_warpgroups`
+
+The number of warp groups performing weight dequantization in UMMA TS. Supports `1` or `2`.
+
+Usually use `1`. Try `2` when weight conversion is a bottleneck, at the cost of more threads and resource usage. The SS path for raw weights does not need this value increased.
+
+#### `umma_cta_group_size`
+
+The number of cooperating UMMA CTAs: `1` or `2`, defaulting to `1`. With `2`, two CTAs cooperate on adjacent N tiles. This is separate from TMA multicast and CTA residency.
+
+Two-CTA mode requires:
+
+- Block M to be a multiple of `16`.
+- N to be divisible by twice block N.
+- `num_ctas_per_sm=1`, along with the applicable data type and resource constraints.
+
+Try `2` for large, regular matrices with long K. Prefer `1` for small workloads to avoid cooperation overhead. Also compare output chunk sizes to tune overlap between cooperative computation and output.
+
+### Scheduling Between Kernels
+
+#### `use_pdl`
+
+Enables Programmatic Dependent Launch. Defaults to `False`.
+
+Try `True` when the calling pipeline supports PDL and adjacent kernels have work that can overlap, measuring end-to-end latency. Usually keep `False` for isolated GEMM benchmarks.

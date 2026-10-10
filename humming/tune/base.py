@@ -1,3 +1,4 @@
+import functools
 import math
 
 import numpy as np
@@ -35,6 +36,7 @@ class DeviceHeuristics:
     b8_allowed_dtypes: list[dtypes.DataType] = []
     b4_allowed_dtypes: list[dtypes.DataType] = []
     sm_version: int = 0
+    expert_probability_cv: float = 0.25
 
     @classmethod
     def should_use_pdl_for_input(cls, layer_config: LayerConfig, shape_m: int) -> bool:
@@ -61,8 +63,10 @@ class DeviceHeuristics:
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         compute_bound_min_shape_m = _estimate_compute_bound_threshold(layer_config, use_f16_accum)
+        is_moe_a16 = gemm_type != GemmType.DENSE and layer_config.a_dtype.num_bits == 16
 
         # 1. base config
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
@@ -80,6 +84,7 @@ class DeviceHeuristics:
         num_ctas_per_sm = config.get("num_ctas_per_sm", 1)
         num_stages = config.get("num_stages", 3 if cls.sm_version != 75 else 2)
         output_chunk_rows = config.get("output_chunk_rows", 0)
+        max_num_stages = 5 if cls.sm_version == 80 else 3
         num_warps_m = block_shape_m // warp_shape_m
 
         # 2. block_shape_m and warp_shape_m
@@ -128,7 +133,13 @@ class DeviceHeuristics:
         num_blocks_m = cls.estimate_num_blocks_m(layer_config, shape_m, block_shape_m)
 
         num_sms = current_device.sm_count
-        while num_blocks_n * num_blocks_m * 2 < num_sms * num_ctas_per_sm:
+        min_grid_blocks = math.ceil(num_sms * num_ctas_per_sm / 2)
+        # Large expert tiles need more than half a wave to amortize their
+        # register footprint; small M tiles benefit more from a wider N.
+        is_short_moe = is_moe_a16 and layer_config.shape_k <= 1024
+        if is_short_moe and block_shape_m >= 64 and cls.sm_version < 100:
+            min_grid_blocks = max(min_grid_blocks, math.ceil(num_sms * 2 / 3))
+        while num_blocks_n * num_blocks_m < min_grid_blocks:
             prefer_m_split = shape_m > block_shape_m >= block_shape_n and num_blocks_m < num_blocks_n
             fitted_block_m = cls._fit_dense_block_m_to_grid(
                 (block_shape_m, block_shape_n),
@@ -165,6 +176,13 @@ class DeviceHeuristics:
         if num_warps < 8:
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
             smem_size = estimate_smem_size_layer(layer_config, block_shape, gemm_type, num_stages)
+            has_one_to_two_waves = num_sms <= num_blocks_n * num_blocks_m < 2 * num_sms
+            prefer_two_ctas = num_ctas_per_sm == 1 and has_one_to_two_waves
+            prefer_two_ctas &= not is_moe_a16 or block_shape_m < 64
+            if prefer_two_ctas and smem_size * 2 <= cls.max_smem_size:
+                num_ctas_per_sm = 2
+                num_warps *= 2
+
             while num_warps < 8:
                 if layer_config.shape_k % (block_shape_k * 2) != 0:
                     break
@@ -197,35 +215,55 @@ class DeviceHeuristics:
                 warp_shape_k = warp_shape_k // 2
                 block_shape_k = block_shape_k // 2
 
-        dense_block_m = cls._fit_dense_block_m_to_grid(
+        fitted_block_m = cls._fit_dense_block_m_to_grid(
             (block_shape_m, block_shape_n),
             layer_config,
             shape_m,
             gemm_type,
             num_ctas_per_sm,
         )
+        # SM120 and later select MoE M tiles in their own architecture policy.
+        has_enough_tiles = num_blocks_n * num_blocks_m * 2 >= num_sms * num_ctas_per_sm
+        has_heavy_weights = layer_config.shape_n >= 4096 and layer_config.b_dtype.num_bits >= 8
+        has_heavy_weights &= block_shape_m <= 32
+        has_deep_pipeline = max_num_stages >= 4 and block_shape_m >= 64
+        prefer_weight_reuse = has_enough_tiles and layer_config.shape_k > 4096
+        prefer_weight_reuse &= has_heavy_weights or has_deep_pipeline
+        if is_moe_a16 and cls.sm_version < 120 and not prefer_weight_reuse:
+            tokens_per_expert = shape_m / layer_config.num_experts
+            if tokens_per_expert <= 64:
+                max_block_m = 16 if tokens_per_expert <= 16 else 32
+                fitted_block_m = min(fitted_block_m, max_block_m)
+
         use_dense_output_grid = False
-        if dense_block_m != block_shape_m:
-            num_warps_n = block_shape_n // warp_shape_n
-            num_warps_m = 2 if dense_block_m > 32 and dense_block_m % 32 == 0 else 1
+        if fitted_block_m != block_shape_m:
+            fitted_warp_shape_n = warp_shape_n
+            if layer_config.a_dtype.num_bits == 16:
+                fitted_warp_shape_n = min(warp_shape_n, 32)
+            num_warps_n = block_shape_n // fitted_warp_shape_n
+            num_warps_m = 2 if fitted_block_m > 32 and fitted_block_m % 32 == 0 else 1
             target_k_warps = max(1, 4 // (num_warps_m * num_warps_n))
             min_warp_shape_k = 1024 // layer_config.a_dtype.num_bits
-            dense_warp_shape_k = min(
+            if layer_config.a_dtype.num_bits == 16:
+                min_warp_shape_k = min(min_warp_shape_k, warp_shape_k)
+            fitted_warp_shape_k = min(
                 block_shape_k,
                 max(min_warp_shape_k, block_shape_k // target_k_warps),
             )
-            num_warps_k = block_shape_k // dense_warp_shape_k
+            num_warps_k = block_shape_k // fitted_warp_shape_k
             if num_warps_m * num_warps_n * num_warps_k < 4:
-                dense_block_m = block_shape_m
+                fitted_block_m = block_shape_m
             else:
-                block_shape_m = dense_block_m
-                num_blocks_m = math.ceil(shape_m / block_shape_m)
+                block_shape_m = fitted_block_m
+                num_blocks_m = cls.estimate_num_blocks_m(layer_config, shape_m, block_shape_m)
                 warp_shape_m = block_shape_m // num_warps_m
-                warp_shape_k = dense_warp_shape_k
+                warp_shape_n = fitted_warp_shape_n
+                warp_shape_k = fitted_warp_shape_k
                 min_grid_blocks = math.ceil(num_sms * num_ctas_per_sm / 2)
-                use_dense_output_grid = num_blocks_n * num_blocks_m >= min_grid_blocks
+                has_long_a16_k = layer_config.a_dtype.num_bits == 16 and layer_config.shape_k > 4096
+                use_dense_output_grid = gemm_type == GemmType.DENSE and cls.sm_version >= 120
+                use_dense_output_grid &= not has_long_a16_k and num_blocks_n * num_blocks_m >= min_grid_blocks
 
-        max_num_stages = 5 if cls.sm_version == 80 else 3
         for num_stages_new in range(num_stages + 1, max_num_stages + 1):
             block_shape = (block_shape_m, block_shape_n, block_shape_k)
             smem_size = estimate_smem_size_layer(
@@ -257,13 +295,51 @@ class DeviceHeuristics:
                 assert block_shape_k >= warp_shape_k
 
         use_stream_k = layer_config.shape_k > 1024 and use_stream_k and not use_dense_output_grid
+        use_fp32_accum = layer_config.a_dtype.is_floating_point_type and not use_f16_accum
+        can_use_output_grid = gemm_type == GemmType.DENSE or is_moe_a16 and layer_config.shape_k > 4096
+        if use_fp32_accum and can_use_output_grid:
+            blocks_per_wave = num_sms * num_ctas_per_sm
+            num_output_tiles = num_blocks_m * num_blocks_n
+            num_waves = math.ceil(num_output_tiles / blocks_per_wave)
+            wave_utilization = num_output_tiles / (num_waves * blocks_per_wave)
+            has_full_wave = num_waves == 1 and wave_utilization >= 0.9
+            if is_moe_a16 and num_waves == 1 and num_stages >= 4:
+                # Account for Scheduler's aligned slices and pipeline startup,
+                # as in SM100's work estimate, before splitting a single wave.
+                stream_stages = min(num_stages, max_num_stages - 1) if block_shape_m >= 64 else num_stages
+                k_iters = layer_config.shape_k // block_shape_k
+                scale_group = max(layer_config.input_scale_group_size, layer_config.weight_scale_group_size)
+                alignment = math.lcm(max(1, scale_group // block_shape_k), stream_stages)
+                slice_iters = math.ceil(num_output_tiles * k_iters / blocks_per_wave)
+                slice_iters = max(slice_iters, math.ceil((k_iters - 1) / 9))
+                slice_iters = round_up(slice_iters, alignment)
+                has_full_wave = slice_iters + 2 * stream_stages >= k_iters * 0.9
+            has_many_full_waves = gemm_type == GemmType.DENSE and num_waves >= 8 and wave_utilization >= 0.98
+            if has_full_wave or has_many_full_waves:
+                use_stream_k = False
+
+        has_small_dense_tile = gemm_type == GemmType.DENSE and block_shape_m * block_shape_n < 16384
+        has_long_wide_weights = layer_config.shape_k > 4096 and layer_config.b_dtype.num_bits >= 7
+        keep_full_pipeline = has_small_dense_tile and has_long_wide_weights and max_num_stages == 3
+        has_large_a16_tile = layer_config.a_dtype.num_bits == 16 and block_shape_m >= 64
+        has_large_a16_tile &= not keep_full_pipeline
+        if use_fp32_accum and use_stream_k and has_large_a16_tile:
+            num_stages = min(num_stages, max_num_stages - 1)
+        if is_moe_a16 and use_stream_k:
+            # A fifth stage needs enough K work to amortize its startup and
+            # Scheduler's coarser stage-aligned Stream-K slices.
+            num_stages = min(num_stages, max(4, layer_config.shape_k // block_shape_k // 2))
         if use_batch_invariant:
             assert not use_stream_k
             assert block_shape_k == warp_shape_k
 
-        if num_ctas_per_sm == 1:
-            factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
-            num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
+        if not use_stream_k:
+            max_blocks_m = num_blocks_m
+            if gemm_type != GemmType.DENSE:
+                # Expert boundaries can each add a partially filled M tile.
+                max_blocks_m = math.ceil(shape_m / block_shape_m) + layer_config.num_experts - 1
+                max_blocks_m = min(shape_m, max_blocks_m)
+            num_sms = min(num_sms, math.ceil(num_blocks_n * max_blocks_m / num_ctas_per_sm))
 
         return {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
@@ -277,16 +353,34 @@ class DeviceHeuristics:
             "use_pdl": cls.sm_version >= 90,
         }
 
+    @staticmethod
+    @functools.lru_cache(maxsize=128)
+    def _sample_expert_rows(shape_m: int, num_experts: int, probability_cv: float) -> np.ndarray:
+        """Sample total routed rows, including top-k, without changing global RNG state."""
+        if not math.isfinite(probability_cv) or probability_cv < 0:
+            raise ValueError("expert probability CV must be finite and nonnegative")
+        random_state = np.random.RandomState(0)
+        counts = []
+        for _ in range(16):
+            if probability_cv == 0:
+                probabilities = np.full(num_experts, 1 / num_experts)
+            else:
+                weights = random_state.gamma(1 / probability_cv**2, size=num_experts)
+                probabilities = weights / weights.sum()
+            counts.append(random_state.multinomial(shape_m, probabilities))
+        result = np.asarray(counts)
+        result.flags.writeable = False
+        return result
+
     @classmethod
     def estimate_num_blocks_m(cls, layer_config: LayerConfig, shape_m: int, block_shape_m: int):
         if not layer_config.num_experts:
-            estimated_num_blocks_m = math.ceil(shape_m / block_shape_m)
-        elif shape_m < layer_config.num_experts:
-            estimated_num_blocks_m = shape_m
-        else:
-            estimated_num_blocks_m = layer_config.num_experts
+            return math.ceil(shape_m / block_shape_m)
 
-        return estimated_num_blocks_m
+        # Round each expert separately to account for empty experts and uneven padding.
+        counts = cls._sample_expert_rows(shape_m, layer_config.num_experts, cls.expert_probability_cv)
+        m_tiles = ((counts + block_shape_m - 1) // block_shape_m).sum(axis=1)
+        return math.ceil(float(m_tiles.mean()))
 
     @classmethod
     def _fit_dense_block_m_to_grid(
@@ -297,7 +391,32 @@ class DeviceHeuristics:
         gemm_type: GemmType,
         num_ctas_per_sm: int,
     ) -> int:
-        return block_shape[0]
+        block_m, block_n = block_shape
+        is_dense_a16 = gemm_type == GemmType.DENSE and layer_config.a_dtype.num_bits == 16
+        if not is_dense_a16 or block_m <= 16 or shape_m <= block_m <= 32:
+            return block_m
+
+        num_blocks_m = math.ceil(shape_m / block_m)
+        num_blocks_n = layer_config.shape_n // block_n
+        is_short_k = layer_config.shape_k <= 1024
+        wave_fraction = 2 if is_short_k else 4
+        target_blocks = math.ceil(current_device.sm_count * num_ctas_per_sm / wave_fraction)
+        if num_blocks_m * num_blocks_n >= target_blocks:
+            return block_m
+
+        max_blocks_m = num_blocks_m * (8 if is_short_k else 4)
+        target_blocks = min(target_blocks, max_blocks_m * num_blocks_n)
+        candidates = [
+            candidate
+            for candidate in range(16, block_m, 16)
+            if num_blocks_n * math.ceil(shape_m / candidate) >= target_blocks
+            and math.ceil(shape_m / candidate) <= max_blocks_m
+        ]
+        return min(
+            candidates,
+            key=lambda candidate: (round_up(shape_m, candidate), -candidate),
+            default=block_m,
+        )
 
     @classmethod
     def get_configs(
@@ -306,6 +425,7 @@ class DeviceHeuristics:
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         a_dtype = layer_config.a_dtype
         if a_dtype.num_bits == 16:
@@ -348,6 +468,7 @@ class DeviceHeuristics:
                 use_f16_accum=use_f16_accum,
                 use_batch_invariant=use_batch_invariant,
                 gemm_type=gemm_type,
+                use_m_major_input_scale=use_m_major_input_scale,
             )
             config_str = str(config)
 

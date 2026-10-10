@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import json
+import math
 from typing import ClassVar
 
 import jinja2
@@ -586,7 +587,10 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             self.use_tma_as = False
             self.use_tma_as2 = False
         if self.is_grouped_gemm and self.block_shape[0] + 4 > 256:
-            self.use_tma_as = False
+            # UMMA group scales address the padded M-major rows as 64-bit pairs,
+            # and row-major boxes hold no padding rows.
+            if self.mma_type != MmaType.UMMA or not self.is_group_input_scale:
+                self.use_tma_as = False
             self.use_tma_as2 = False
         # UMMA preloads secondary scales directly into epilogue registers.
         if self.mma_type == MmaType.UMMA or not self.has_input_scale_2 or self.is_tensor_input_scale_2:
@@ -609,8 +613,15 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.use_warp_spec, "multicast requires warp specialization"
             assert self.sm_version == 90 or self.sm_version // 10 in (10, 11)
 
-        if self.use_tma_as:
-            assert self.use_m_major_input_scale, "use_tma_as requires use_m_major_input_scale=True"
+        if self.use_tma_as and not self.use_m_major_input_scale:
+            # Row-major group scales load as a 2D box into the row-major UMMA stage layout.
+            scale_words = self.input_scale_group_size * 4
+            row_words = math.ceil((self.shape_k - self.pad_shape_k) / max(1, scale_words))
+            has_row_major_stage = self.mma_type == MmaType.UMMA and self.is_group_input_scale
+            has_row_major_stage = has_row_major_stage and self.block_shape[2] % max(1, scale_words) == 0
+            assert has_row_major_stage and row_words % 4 == 0, (
+                "use_tma_as requires m-major input scales or 16-byte aligned row-major UMMA group scales"
+            )
 
         if self.use_packed_k_layout:
             assert self.mma_type == MmaType.WGMMA, "packed-K weights require WGMMA"
