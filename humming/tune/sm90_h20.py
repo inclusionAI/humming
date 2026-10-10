@@ -256,10 +256,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         block_m = config["block_shape"][0]
         if (
             gemm_type != GemmType.GROUPED_CONTIGUOUS
-            or layer_config.a_dtype.num_bits != 16
-            or layer_config.b_dtype != dtypes.float4e2m1
-            or layer_config.bs_dtype != dtypes.float8e8m0
-            or layer_config.weight_scale_group_size != 32
+            or not layer_config.use_fused_e8m0_scale
             or layer_config.shape_k <= 1024
             or layer_config.shape_n % 128
             or layer_config.shape_k % 64
