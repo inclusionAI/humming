@@ -383,9 +383,7 @@ class LayerConfig(BaseHummingConfig):
                 and has_packed_k_input_scale
             )
             if self.use_fused_e8m0_scale:
-                prefer_packed_k = (
-                    self.num_experts > 0 and self.input_scale_group_size >= 128 and self.shape_n % 64 == 0
-                )
+                prefer_packed_k = self.input_scale_group_size >= 128 and self.shape_n % 64 == 0
             else:
                 prefer_packed_k = self.weight_scale_group_size == 128
             self.use_packed_k_layout = can_use_packed_k and prefer_packed_k

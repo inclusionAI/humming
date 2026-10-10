@@ -6,7 +6,11 @@ from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import current_device
 from humming.tune.base import DeviceHeuristics
-from humming.tune.sm90_policies import get_block_scaled_moe_config
+from humming.tune.sm90_policies import (
+    get_block_scaled_moe_config,
+    get_fused_e8m0_config,
+    get_scaled_w8a8_config,
+)
 from humming.utils.math import ceil_div, round_up
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -311,6 +315,19 @@ class Sm90H20Heuristics(DeviceHeuristics):
         gemm_type: GemmType = GemmType.DENSE,
         use_m_major_input_scale: bool = False,
     ):
+        fused_config = get_fused_e8m0_config(
+            layer_config,
+            shape_m,
+            gemm_type,
+            use_f16_accum,
+            use_batch_invariant,
+            is_h20=True,
+            use_m_major_input_scale=use_m_major_input_scale,
+            expert_probability_cv=cls.expert_probability_cv,
+        )
+        if fused_config is not None:
+            return fused_config
+
         block_scaled_config = get_block_scaled_moe_config(
             layer_config,
             shape_m,
@@ -322,6 +339,19 @@ class Sm90H20Heuristics(DeviceHeuristics):
         )
         if block_scaled_config is not None:
             return block_scaled_config
+
+        scaled_config = get_scaled_w8a8_config(
+            layer_config,
+            shape_m,
+            gemm_type,
+            use_f16_accum,
+            use_batch_invariant,
+            is_h20=True,
+            use_m_major_input_scale=use_m_major_input_scale,
+            expert_probability_cv=cls.expert_probability_cv,
+        )
+        if scaled_config is not None:
+            return scaled_config
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
         a_dtype = layer_config.a_dtype
@@ -519,7 +549,13 @@ class Sm90H20Heuristics(DeviceHeuristics):
             block_m, block_n, block_k = config["block_shape"]
             warp_m, warp_n, _ = config["warp_shape"]
             config["warp_shape"] = (warp_m, warp_n, 128)
-            config["block_shape"] = (block_m, block_n, 128 if use_batch_invariant else max(block_k, 128))
+            # A short reduction cannot fill the wider packed pipeline. Keep
+            # one K warp there; long reductions retain the wider decode stage.
+            has_short_fused_pipeline = (
+                layer_config.use_fused_e8m0_scale and block_k * config["num_stages"] > layer_config.shape_k
+            )
+            keep_single_k_warp = use_batch_invariant or has_short_fused_pipeline
+            config["block_shape"] = (block_m, block_n, 128 if keep_single_k_warp else max(block_k, 128))
 
         is_wna16 = a_dtype.num_bits == 16 and layer_config.b_dtype.num_bits < 16
         can_overlap_output = config.get("use_warp_spec", False) and config["block_shape"][0] >= 32

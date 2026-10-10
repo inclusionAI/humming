@@ -169,6 +169,8 @@ Uses a packed-K weight layout that organizes K data for WGMMA.
 - The transformed weights require WGMMA and must satisfy its warp K and scale group constraints.
 - When omitted, it is selected from the quantization parameters and layer shape. Changing it requires transforming weights again.
 
+On SM90, fused E8M0 layers use packed-K by default when input scale groups cover K128 and N is a multiple of 64, for both dense and MoE GEMMs. Dense weights transformed with the previous unpacked default must be transformed again, or keep `use_packed_k_layout=False` explicitly.
+
 Usually leave this to automatic selection. It determines data layout and cannot be freely switched as a backend tuning option on the same stored weights.
 
 #### `has_bias`

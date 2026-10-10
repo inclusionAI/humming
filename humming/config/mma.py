@@ -180,7 +180,10 @@ def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, 
             # The packed B buffer holds one N=64 WGMMA fragment across all K slabs.
             buffer_registers = warp_k * layer_config.a_dtype.num_bits / 64
     if has_group_accumulator:
-        accumulator_registers *= 1.25
+        partial_accumulator_registers = accumulator_registers * 0.25
+        if mma_type == MmaType.WGMMA and layer_config.use_raw_weight:
+            partial_accumulator_registers = max(partial_accumulator_registers, instruction_accumulators)
+        accumulator_registers += partial_accumulator_registers
         if mma_type == MmaType.WGMMA and tuning_config.wgmma_split_issue_wait:
             accumulator_registers = max(accumulator_registers, 2 * instruction_accumulators)
     input_scale_registers = 0
