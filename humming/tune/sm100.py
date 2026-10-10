@@ -27,8 +27,11 @@ class Sm100MmaHeuristics(Sm80Heuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
-        config = super().get_config(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+        config = super().get_config(
+            layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type, use_m_major_input_scale
+        )
         block_m, block_n, _ = config["block_shape"]
         warp_m = config["warp_shape"][0]
         # This four-warp schedule targets small M tiles.
@@ -150,6 +153,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         gemm_type=GemmType.DENSE,
         cta_group_size=1,
         output_chunk_rows=0,
+        use_m_major_input_scale=False,
     ):
         tmem_columns = cls._get_tmem_columns(
             layer_config, block_shape, num_stages, num_ctas_per_sm, cta_group_size
@@ -171,6 +175,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
             umma_cta_group_size=cta_group_size,
             output_chunk_rows=output_chunk_rows,
             use_tma_c=gemm_type != GemmType.INDEXED,
+            use_m_major_input_scale=use_m_major_input_scale,
         )
         return smem_size * num_ctas_per_sm <= cls.max_smem_size
 
@@ -193,7 +198,9 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         return data_parallel_waves * k_iters + slice_iters
 
     @classmethod
-    def _select_m_tile(cls, layer_config, shape_m, config, use_batch_invariant):
+    def _select_m_tile(
+        cls, layer_config, shape_m, config, use_batch_invariant, use_m_major_input_scale=False
+    ):
         block_m, block_n, block_k = config["block_shape"]
         num_stages = config["num_stages"]
         num_ctas = config["num_ctas_per_sm"]
@@ -240,7 +247,10 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         while candidate_m > 8:
             candidate_m = round_up(math.ceil(candidate_m / 2), 8)
             shape = (candidate_m, block_n, block_k)
-            if not cls._fits_resources(layer_config, shape, num_stages, num_ctas):
+            fits_resources = cls._fits_resources(
+                layer_config, shape, num_stages, num_ctas, use_m_major_input_scale=use_m_major_input_scale
+            )
+            if not fits_resources:
                 continue
             score, use_stream_k = evaluate(candidate_m)
             if score < best_score:
@@ -255,24 +265,72 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         return best if best_score < baseline_score * 0.9 else config
 
     @classmethod
-    def _select_cooperative_ctas(cls, layer_config, shape_m, config):
-        if layer_config.a_dtype.num_bits != 16:
+    def _select_low_bit_m_tile(cls, layer_config, shape_m, config, use_m_major_input_scale=False):
+        a_dtype = layer_config.a_dtype
+        if a_dtype.num_bits == 16:
+            return config
+        stage_k = 1024 // a_dtype.num_bits
+        k_iters = layer_config.shape_k // stage_k
+        # Every M tile re-reads the weights; long K keeps the Stream-K tile.
+        if layer_config.shape_k % stage_k or k_iters >= 64:
+            return config
+
+        def align_m(rows):
+            # INT8 UMMA needs M divisible by 16 above M32.
+            alignment = 16 if a_dtype == dtypes.int8 and rows > 32 else 8
+            return round_up(rows, alignment)
+
+        num_sms = current_device.sm_count
+        n_blocks = layer_config.shape_n // 128
+        full_m = align_m(math.ceil(shape_m / math.ceil(shape_m / 256)))
+        if math.ceil(shape_m / full_m) * n_blocks >= num_sms:
+            return config
+
+        # Halve M while one data-parallel wave still holds every tile.
+        block_m = full_m
+        candidate_m = full_m
+        while candidate_m > 16:
+            candidate_m = align_m(math.ceil(candidate_m / 2))
+            if math.ceil(shape_m / candidate_m) * n_blocks > num_sms:
+                break
+            block_m = candidate_m
+
+        # Short stages leave the tensor cores idle between loads: double K when four stages fit.
+        for block_k, num_stages in ((2 * stage_k, 4), (stage_k, 4), (stage_k, 3), (stage_k, 2)):
+            if layer_config.shape_k % block_k:
+                continue
+            block_shape = (block_m, 128, block_k)
+            fits_resources = cls._fits_resources(
+                layer_config, block_shape, num_stages, 1, use_m_major_input_scale=use_m_major_input_scale
+            )
+            if fits_resources:
+                return config | {
+                    "block_shape": block_shape,
+                    "warp_shape": (block_m, 32, block_k),
+                    "num_stages": num_stages,
+                    "num_ctas_per_sm": 1,
+                    "use_stream_k": False,
+                    "use_tma": True,
+                    "use_tma_a": True,
+                    "use_tma_c": True,
+                }
+        return config
+
+    @classmethod
+    def _select_cooperative_ctas(cls, layer_config, shape_m, config, use_m_major_input_scale=False):
+        activation_bits = layer_config.a_dtype.num_bits
+        is_low_bit = activation_bits < 16
+        # Low-bit cooperative instructions take native operands only.
+        if is_low_bit and not layer_config.use_raw_weight:
             return config
         block_m, block_n, block_k = config["block_shape"]
         has_cooperative_tile = block_m >= 128 and block_m % 32 == 0
-        has_cooperative_tile &= block_n == 128 and block_k == 64
+        has_cooperative_tile &= block_n == 128 and block_k == 1024 // activation_bits
         has_cooperative_tile &= layer_config.shape_n % (2 * block_n) == 0
         uses_tma = config["use_tma"] and config["use_tma_a"] and config["use_tma_c"]
         if not has_cooperative_tile or not uses_tma or config["num_ctas_per_sm"] != 1:
             return config
-
-        has_input_scale = layer_config.has_input_scale or layer_config.has_input_scale_2
-        if has_input_scale or layer_config.is_block_weight_scale:
-            return config
-
-        num_stages = 6
-        k_iters = layer_config.shape_k // block_k
-        if k_iters < 4 * num_stages:
+        if layer_config.is_block_weight_scale:
             return config
 
         # Stream-K balances partial waves across CTA pairs. Without it, retain
@@ -285,24 +343,69 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         if not config["use_stream_k"] and output_tiles < 0.8 * scheduled_tiles:
             return config
 
-        smem_size = estimate_smem_size_layer(
-            layer_config,
-            config["block_shape"],
-            GemmType.DENSE,
-            num_stages,
-            mma_type=MmaType.UMMA,
-            warp_shape=config["warp_shape"],
-            smem_reuse_mode=SmemReuseMode.NONE,
-            umma_cta_group_size=2,
-            output_chunk_rows=32,
-        )
-        if smem_size > cls.max_smem_size:
+        # Wider low-bit stages may not fit six; FP16 keeps its measured depth.
+        min_stages = 4 if is_low_bit else 6
+        k_iters = layer_config.shape_k // block_k
+        pipeline_iters = k_iters
+        if is_low_bit and config["use_stream_k"]:
+            # An underfilled Stream-K grid gives each CTA only a slice of K.
+            pipeline_iters = min(k_iters, output_tiles * k_iters // num_sms)
+        for num_stages in range(6, min_stages - 1, -1):
+            if pipeline_iters < 4 * num_stages:
+                continue
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                config["block_shape"],
+                GemmType.DENSE,
+                num_stages,
+                mma_type=MmaType.UMMA,
+                warp_shape=config["warp_shape"],
+                smem_reuse_mode=SmemReuseMode.NONE,
+                umma_cta_group_size=2,
+                output_chunk_rows=32,
+                use_m_major_input_scale=use_m_major_input_scale,
+            )
+            tmem_columns = cls._get_tmem_columns(layer_config, config["block_shape"], num_stages, 1, 2)
+            if smem_size <= cls.max_smem_size and (not is_low_bit or tmem_columns <= 512):
+                return config | {
+                    "umma_cta_group_size": 2,
+                    "output_chunk_rows": 32,
+                    "num_stages": num_stages,
+                }
+        return config
+
+    @classmethod
+    def _select_stream_k(cls, layer_config, shape_m, config):
+        if not config["use_stream_k"]:
             return config
-        return config | {
-            "umma_cta_group_size": 2,
-            "output_chunk_rows": 32,
-            "num_stages": num_stages,
-        }
+        block_m, block_n, _ = config["block_shape"]
+        cta_group_size = config.get("umma_cta_group_size", 1)
+        resident_ctas = (current_device.sm_count // cta_group_size) * config["num_ctas_per_sm"]
+        output_tiles = math.ceil(shape_m / block_m) * (layer_config.shape_n // (block_n * cta_group_size))
+        num_waves = math.ceil(output_tiles / resident_ctas)
+        last_wave_tiles = output_tiles % resident_ctas or resident_ctas
+        # Many waves with a nearly full tail leave Stream-K little idle time to recover.
+        if num_waves > 10 and last_wave_tiles > 0.75 * resident_ctas:
+            return config | {"use_stream_k": False}
+        return config
+
+    @classmethod
+    def _select_dequant_warpgroups(cls, layer_config, shape_m, config):
+        # Native conversion keeps up with one warpgroup; register dequantization does not.
+        if layer_config.use_raw_weight or layer_config.use_native_dequant:
+            return config
+        # Aligned integers convert to FP16/BF16 with one logic op and one subtraction.
+        a_dtype, b_dtype = layer_config.a_dtype, layer_config.b_dtype
+        is_aligned_integer = b_dtype.is_integer_type and b_dtype.num_bits in (1, 2, 4, 8)
+        fits_mantissa = a_dtype.num_bits == 16 and b_dtype.num_bits <= a_dtype.mantissa_bits
+        has_stage_scale = layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
+        if is_aligned_integer and fits_mantissa and not has_stage_scale:
+            return config
+        # Two resident CTAs on a single output group already contend for the SM.
+        has_narrow_resident_pair = config["block_shape"][1] == 128 and config["num_ctas_per_sm"] == 2
+        if has_narrow_resident_pair:
+            return config
+        return config | {"umma_num_dequant_warpgroups": 2}
 
     @classmethod
     def get_config(
@@ -312,9 +415,12 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         if layer_config.num_experts:
-            return cls._get_moe_config(layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type)
+            return cls._get_moe_config(
+                layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type, use_m_major_input_scale
+            )
         if gemm_type != GemmType.DENSE:
             raise ValueError("non-dense UMMA requires experts")
         if use_f16_accum:
@@ -353,7 +459,14 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                     target_stages = 5 - output_groups - (num_ctas_per_sm - 1)
                     target_stages = min(target_stages, max(2, k_iters))
                     for num_stages in range(target_stages, 1, -1):
-                        if not cls._fits_resources(layer_config, block_shape, num_stages, num_ctas_per_sm):
+                        fits_resources = cls._fits_resources(
+                            layer_config,
+                            block_shape,
+                            num_stages,
+                            num_ctas_per_sm,
+                            use_m_major_input_scale=use_m_major_input_scale,
+                        )
+                        if not fits_resources:
                             continue
                         stream_k_work = cls._get_stream_k_work(
                             layer_config, output_tiles, k_iters, block_k, num_stages, resident_ctas
@@ -385,8 +498,18 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                             "use_pdl": False,
                             "raster_group_m": 1,
                         }
-                        config = cls._select_m_tile(layer_config, shape_m, config, use_batch_invariant)
-                        return cls._select_cooperative_ctas(layer_config, shape_m, config)
+                        config = cls._select_m_tile(
+                            layer_config, shape_m, config, use_batch_invariant, use_m_major_input_scale
+                        )
+                        if not use_batch_invariant:
+                            config = cls._select_low_bit_m_tile(
+                                layer_config, shape_m, config, use_m_major_input_scale
+                            )
+                        config = cls._select_cooperative_ctas(
+                            layer_config, shape_m, config, use_m_major_input_scale
+                        )
+                        config = cls._select_stream_k(layer_config, shape_m, config)
+                        return cls._select_dequant_warpgroups(layer_config, shape_m, config)
 
         raise ValueError("no resource-feasible dense UMMA tile for this layer")
 
@@ -411,7 +534,9 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
 
     @classmethod
     @functools.lru_cache(maxsize=64)
-    def _get_moe_candidates(cls, layer_config: LayerConfig, gemm_type: GemmType) -> tuple:
+    def _get_moe_candidates(
+        cls, layer_config: LayerConfig, gemm_type: GemmType, use_m_major_input_scale: bool = False
+    ) -> tuple:
         candidates = []
         indexed = gemm_type == GemmType.INDEXED
         for block_n in (256, 128):
@@ -447,6 +572,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
                                     gemm_type,
                                     cta_group_size,
                                     output_chunk_rows,
+                                    use_m_major_input_scale,
                                 ):
                                     continue
                                 config = {
@@ -482,6 +608,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.INDEXED,
+        use_m_major_input_scale: bool = False,
     ) -> dict:
         if not layer_config.num_experts or gemm_type == GemmType.DENSE:
             raise ValueError("UMMA MoE requires an expert GEMM")
@@ -494,7 +621,7 @@ class Sm100UmmaHeuristics(DeviceHeuristics):
         num_sms = current_device.sm_count
         typical_expert_rows = float(np.median(counts))
         best_by_residency = {}
-        for config in cls._get_moe_candidates(layer_config, gemm_type):
+        for config in cls._get_moe_candidates(layer_config, gemm_type, use_m_major_input_scale):
             block_m, block_n, block_k = config["block_shape"]
             num_ctas = config["num_ctas_per_sm"]
             if layer_config.use_raw_weight and num_ctas == 1 and typical_expert_rows < block_m:
@@ -558,9 +685,17 @@ class Sm100Heuristics(Sm100MmaHeuristics):
 
     @classmethod
     def _should_use_mma(cls, layer_config: LayerConfig, shape_m: int) -> bool:
+        # INT8 UMMA exists on SM100/SM110 only; other layers without UMMA use MMA.
+        if not layer_config.is_umma_supported:
+            return True
         # All supported UMMA N tiles are multiples of 128.
         if layer_config.shape_n % 128:
             return True
+        a_dtype = layer_config.a_dtype
+        if a_dtype.num_bits < 16:
+            # FP8/FP4 measurements favor UMMA at every M, dense and MoE,
+            # whenever K divides into UMMA stages. INT8 follows FP8.
+            return layer_config.shape_k % (512 // a_dtype.num_bits) != 0
         effective_m = float(shape_m)
         if layer_config.num_experts:
             counts = Sm100UmmaHeuristics._sample_expert_rows(
@@ -587,6 +722,7 @@ class Sm100Heuristics(Sm100MmaHeuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         if shape_m <= 0:
             raise ValueError("shape_m must be positive")
@@ -611,14 +747,27 @@ class Sm100Heuristics(Sm100MmaHeuristics):
             keep_umma = requires_umma or prefer_umma or not cls._should_use_mma(layer_config, shape_m)
             if not use_f16_accum and keep_umma:
                 return Sm100UmmaHeuristics.get_config(
-                    layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type
+                    layer_config,
+                    shape_m,
+                    use_f16_accum,
+                    use_batch_invariant,
+                    gemm_type,
+                    use_m_major_input_scale,
                 )
         config = Sm100MmaHeuristics.get_config(
-            layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type
+            layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type, use_m_major_input_scale
         )
         return config | {"mma_type": MmaType.MMA.value}
 
     @classmethod
-    def get_umma_config(cls, layer_config: LayerConfig, shape_m: int, gemm_type: GemmType):
+    def get_umma_config(
+        cls,
+        layer_config: LayerConfig,
+        shape_m: int,
+        gemm_type: GemmType,
+        use_m_major_input_scale: bool = False,
+    ):
         # Explicit UMMA entry point bypasses automatic backend selection.
-        return Sm100UmmaHeuristics.get_config(layer_config, shape_m, gemm_type=gemm_type)
+        return Sm100UmmaHeuristics.get_config(
+            layer_config, shape_m, gemm_type=gemm_type, use_m_major_input_scale=use_m_major_input_scale
+        )

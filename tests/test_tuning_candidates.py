@@ -470,8 +470,9 @@ def test_output_chunk_rows_rejects_invalid_heights(output_chunk_rows):
     "a_dtype,b_dtype,small_m_backend",
     (
         (dtypes.bfloat16, dtypes.uint4, "mma"),
+        (dtypes.float16, dtypes.uint4, "mma"),
         (dtypes.int8, dtypes.int8, "mma"),
-        (dtypes.float8e4m3, dtypes.float8e4m3, "mma"),
+        (dtypes.float8e4m3, dtypes.float8e4m3, "umma"),
         (dtypes.float8e4m3, dtypes.float4e2m1, "umma"),
         (dtypes.float4e2m1, dtypes.float4e2m1, "umma"),
         (dtypes.float8e3m4, dtypes.float8e3m4, "umma"),
@@ -510,6 +511,8 @@ def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backe
 
     monkeypatch.delenv("HUMMING_TEST_TUNING_SOURCE", raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    if a_dtype == dtypes.int8:
+        small_m_backend = expected.value
     for shape_m, backend in ((17, small_m_backend), (257, expected.value)):
         tuning = Sm100Heuristics.get_config(config, shape_m)
         assert tuning["mma_type"] == backend

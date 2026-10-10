@@ -308,6 +308,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         use_f16_accum: bool = False,
         use_batch_invariant: bool = False,
         gemm_type: GemmType = GemmType.DENSE,
+        use_m_major_input_scale: bool = False,
     ):
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE

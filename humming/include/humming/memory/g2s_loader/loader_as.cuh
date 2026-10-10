@@ -33,6 +33,8 @@ private:
   static constexpr bool kUseTma = kConfiguredUseTma && kHasInputScale && !kIsIndexedGemm;
   static_assert(!kConfiguredUseTma || !kIsTensorScale);
   static_assert(!kUseTma || kMMajorInputScale || kIsChannelScale || kUseBlockScaledMma);
+  static constexpr bool kUseRowMajorTma = kUseTma && kUseMxScale && !kMMajorInputScale;
+  static_assert(!kUseRowMajorTma || SharedStorage::kUseUmmaRowMajorSmemInputScale);
   static constexpr uint32_t kGroupSize = kIsGroupScale ? Ctx::kInputScaleGroupSize : ProblemShape::K;
 
   static_assert(ProblemShape::K == kGroupSize || (ProblemShape::K - PadShape::K) % kGroupSize == 0);
@@ -46,7 +48,9 @@ private:
   static constexpr uint32_t kScaleBlockM = BlockShape::M + (kIsGroupedGemm ? kScaleMAlignment : 0);
   static constexpr uint32_t kScaleBlockMVecs = kScaleBlockM / kScaleMAlignment;
   static_assert(BlockShape::M % kScaleMAlignment == 0);
-  static_assert(!kUseTma || kScaleBlockM <= 256);
+  // A TMA box holds at most 256 elements per dimension: wider M-major tiles use 64-bit elements.
+  static constexpr bool kUseWideTmaElements = kUseTma && kUseMxScale && kMMajorInputScale && kScaleBlockM > 256;
+  static_assert(!kUseTma || kScaleBlockM <= 256 || kUseMxScale);
 
   // One uint4 gather per routed row covers four single-group stages. Stream-K is
   // excluded so every tile starts on a vector boundary; the plain smem stores
@@ -101,20 +105,30 @@ public:
   }
 
   CUDA_INLINE void load_mx_legacy_row_major(void *smem_ptr) {
-    constexpr uint32_t kNumVectors = BlockShape::K / (sizeof(int4) * kGroupSize);
-    constexpr uint32_t kGmemStride = ProblemShape::K / (sizeof(int4) * kGroupSize);
-    auto *destination = reinterpret_cast<int4 *>(smem_ptr);
-    const auto *source = reinterpret_cast<const int4 *>(gmem_ptr);
+    constexpr uint32_t kRowWords = BlockShape::K / (sizeof(uint32_t) * kGroupSize);
+    constexpr uint32_t kGmemStrideWords = CEIL_DIV(kProblemNumGroups, 4);
+    constexpr bool kHasAlignedRows = kGmemStrideWords % 4 == 0;
+    constexpr bool kUseWideRows = SharedStorage::kUseUmmaWideRowInputScale;
+    constexpr uint32_t kSlotWords = kUseWideRows ? 4 : kRowWords;
+    constexpr uint32_t kLoadWords = kHasAlignedRows && kSlotWords % 4 == 0 ? 4 : 1;
+    using RowLoadType = typename LoadTypeChooser<kLoadWords * 4>::Type;
+    // cp.async bypasses L1 only for 16-byte loads: load the aligned vector holding this stage.
+    const uint32_t vector_word = kUseWideRows ? (col_offset / 4) % 4 : 0;
+    const uint32_t source_shift = kLoadWords == 4 ? vector_word : 0;
+    const uint32_t slot_shift = kLoadWords == 4 ? 0 : vector_word;
+    constexpr uint32_t kRowLoads = (kLoadWords == 4 ? kSlotWords : kRowWords) / kLoadWords;
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < kRowLoadIters; i++) {
       uint32_t row = i * kNumLoadThreads + ctx.load_thread_id();
-      uint32_t source_row = load_row_index[i];
+      uint32_t source_row = kIsIndexedGemm ? load_row_index[i] : row;
+      bool is_valid_row = kIsIndexedGemm ? (row < BlockShape::M && source_row < shape_m) : (row < block_shape_m);
+      const uint32_t *source_words = gmem_ptr + source_row * kGmemStrideWords - source_shift;
+      uint32_t *slot_words = reinterpret_cast<uint32_t *>(smem_ptr) + row * kSlotWords + slot_shift;
+      const auto *source = reinterpret_cast<const RowLoadType *>(source_words);
+      auto *destination = reinterpret_cast<RowLoadType *>(slot_words);
       PRAGMA_UNROLL
-      for (uint32_t vector = 0; vector < kNumVectors; vector++) {
-        legacy_load_pred<kUseCpAsync>(
-            source + source_row * kGmemStride + vector,
-            destination + row * kNumVectors + vector,
-            row < BlockShape::M && source_row < shape_m);
+      for (uint32_t part = 0; part < kRowLoads; part++) {
+        legacy_load_pred<kUseCpAsync>(source + part, destination + part, is_valid_row);
       }
     }
   }
@@ -191,16 +205,25 @@ public:
     }
   }
 
+  CUDA_INLINE uint32_t m_major_tma_row() { return kUseWideTmaElements ? load_row_offset / 2 : load_row_offset; }
+
+  CUDA_INLINE uint32_t row_major_tma_column() {
+    return SharedStorage::kUseUmmaWideRowInputScale ? col_offset / 16 * 4 : col_offset / 4;
+  }
+
   CUDA_INLINE void load_mx_tma(void *smem_ptr, void *mbar_ptr) {
-    static_assert(kMMajorInputScale && !kIsIndexedGemm);
+    static_assert(!kIsIndexedGemm);
     constexpr uint32_t kLoadThread = Ctx::kUseUmmaSplitLoads ? 32 : 0;
-    if (ctx.load_thread_id() == kLoadThread) tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, load_row_offset, col_offset / 4);
+    if (ctx.load_thread_id() != kLoadThread) return;
+    if constexpr (kMMajorInputScale) tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, m_major_tma_row(), col_offset / 4);
+    else tma_load_2d<>(tensor_map_ptr, smem_ptr, mbar_ptr, row_major_tma_column(), load_row_offset);
   }
 
   CUDA_INLINE void prefetch_tma() {
     if constexpr (kUseTma) {
       if (ctx.load_thread_id() == 0) {
-        if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset / 4);
+        if constexpr (kUseRowMajorTma) tma_prefetch_2d(tensor_map_ptr, row_major_tma_column(), load_row_offset);
+        else if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, m_major_tma_row(), col_offset / 4);
         else if constexpr (kIsChannelScale) tma_prefetch_1d(tensor_map_ptr, load_row_offset);
         else tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset);
       }

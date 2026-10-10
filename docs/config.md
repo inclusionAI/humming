@@ -210,7 +210,7 @@ Requires Stream-K to be disabled, `warp_shape_k == block_shape_k`, and the same 
 Uses an M-major input scale layout. Defaults to `False`. For group scales, this places scales from different tokens for the same K group contiguously along M.
 
 Input preprocessing and GEMM must use the same layout; changing only the GEMM configuration does not convert existing scale tensors.
-`indexed` GEMM does not support this option. Enabling `use_tma_as` requires it to be `True`.
+`indexed` GEMM does not support this option. Enabling `use_tma_as` requires it to be `True`, except for UMMA group scales (see `use_tma_as`).
 
 ## TuningConfig
 
@@ -313,7 +313,7 @@ Try `True` for regular, contiguous output; indexed scatter uses ordinary stores.
 #### `use_tma_as`, `use_tma_as2`
 
 Control TMA loads for input scales and secondary input scales, respectively.
-`use_tma_as` defaults to `False` and requires `use_m_major_input_scale=True` when enabled. `indexed` GEMM does not support either TMA scale switch.
+`use_tma_as` defaults to `False` and requires `use_m_major_input_scale=True` when enabled. UMMA can also load row-major group scales with TMA when a stage holds whole 4-byte scale words and each row of the scale tensor is 16-byte aligned. `indexed` GEMM does not support either TMA scale switch.
 Try enabling them when the scale layout is supported and transfers are sufficiently large. Paths such as tensor scaling do not use the corresponding TMA loads.
 
 #### `use_tma_bs`, `use_tma_bs2`

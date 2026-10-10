@@ -35,6 +35,7 @@ def _stage_storage_bytes(
     scale_block_m: int,
     logical_block_m: int,
     mma_type: MmaType,
+    use_wide_row_input_scale: bool = False,
 ) -> int:
     block_m, block_n, block_k = block_shape
     a_bits = layer_config.a_dtype.num_bits
@@ -66,6 +67,8 @@ def _stage_storage_bytes(
             ng_storage = round_up(num_groups_a, 4)
             as_bits = layer_config.as_dtype.num_bits
             as_bytes = round_up(ceil_div(ng_storage * scale_block_m * as_bits, 8), _INT4)
+            if use_wide_row_input_scale:
+                as_bytes = scale_block_m * _INT4
         else:
             as_bytes = (num_groups_a * scale_block_m // 4) * _INT4
         fields.append((as_bytes, 128))
@@ -128,6 +131,7 @@ def estimate_smem_size_layer(
     mma_type: MmaType | str = MmaType.MMA,
     umma_cta_group_size: int = 1,
     output_chunk_rows: int = 0,
+    use_m_major_input_scale: bool = False,
 ) -> int:
     mma_type = MmaType(mma_type)
     if smem_reuse_mode is None:
@@ -146,7 +150,19 @@ def estimate_smem_size_layer(
     zp_bits = 16 if layer_config.is_fp_zero_point else max(4, _next_pow2(layer_config.b_dtype.num_bits))
 
     stage_shape = (block_m // umma_cta_group_size, block_n, block_k)
-    stage_bytes = _stage_storage_bytes(layer_config, stage_shape, is_mxmma, scale_block_m, block_m, mma_type)
+    scale_words_bytes = 4 * max(1, layer_config.input_scale_group_size)
+    has_narrow_scale_stage = block_k % scale_words_bytes == 0 and block_k // scale_words_bytes < 4
+    has_row_major_scale = layer_config.is_group_input_scale and not use_m_major_input_scale
+    use_wide_row_input_scale = mma_type == MmaType.UMMA and has_row_major_scale and has_narrow_scale_stage
+    stage_bytes = _stage_storage_bytes(
+        layer_config,
+        stage_shape,
+        is_mxmma,
+        scale_block_m,
+        block_m,
+        mma_type,
+        use_wide_row_input_scale,
+    )
 
     channel_zp = layer_config.has_zero_point and layer_config.is_channel_weight_scale
     channel_zp_bytes = (block_n * zp_bits // 8) if channel_zp else 0
@@ -263,6 +279,7 @@ def estimate_smem_size_config(
         mma_accum_bits=16 if compute_config.use_f16_accum else 32,
         umma_cta_group_size=tuning_config.umma_cta_group_size,
         output_chunk_rows=tuning_config.output_chunk_rows,
+        use_m_major_input_scale=compute_config.use_m_major_input_scale,
     )
 
 

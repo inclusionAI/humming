@@ -66,7 +66,7 @@ private:
     else legacy_load_bytes += SharedStorage::kStageLoadBytesB;
 
     if constexpr (kIsGroupInputScale) {
-      if constexpr (kUseTmaAS) tma_load_bytes += SharedStorage::kStageBytesAS;
+      if constexpr (kUseTmaAS) tma_load_bytes += SharedStorage::kStageTmaBytesAS;
       else legacy_load_bytes += SharedStorage::kStageBytesAS;
     }
 
@@ -228,7 +228,7 @@ public:
       }
       commit_cp_async_load<true>(stage_id, pred);
       if constexpr (kIsGroupInputScale && kUseTmaAS)
-        if (pred) expect_tma_load<true>(&smem.load_mbar[stage_id], SharedStorage::kStageBytesAS);
+        if (pred) expect_tma_load<true>(&smem.load_mbar[stage_id], SharedStorage::kStageTmaBytesAS);
       return;
     }
 
@@ -293,10 +293,10 @@ public:
       if constexpr (Ctx::kUseUmmaSeparateInputScale) {
         auto *scale_mbar = &ctx.smem.umma_input_scale_ready[stage_id];
         loader_as.template load<kShouldAdvance>(stage.as, scale_mbar);
-        if (ctx.load_thread_id() == 32) tma_expect_tx(scale_mbar, SharedStorage::kStageBytesAS);
+        if (ctx.load_thread_id() == 32) tma_expect_tx(scale_mbar, SharedStorage::kStageTmaBytesAS);
       } else {
         loader_as.template load<kShouldAdvance>(stage.as, activation_mbar);
-        bytes += SharedStorage::kStageBytesAS;
+        bytes += SharedStorage::kStageTmaBytesAS;
       }
     }
     if constexpr (Ctx::kUseUmmaCooperativeTma) {

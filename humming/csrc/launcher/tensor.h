@@ -120,7 +120,7 @@ inline void check_tensor_as(std::optional<Tensor> &tensor, KernelData &kernel_da
   int64_t m_pad = (shape_m + input_scale_m_alignment - 1) / input_scale_m_alignment * input_scale_m_alignment;
   if (kernel_data.use_block_scaled_mma && group_size > 0) {
     std::vector<int64_t> expected_shape;
-    if (kernel_data.use_tma_as || kernel_data.use_m_major_input_scale) {
+    if (kernel_data.use_m_major_input_scale) {
       expected_shape = {(int64_t)CEIL_DIV(num_groups, 4), m_pad};
     } else {
       expected_shape = {shape_m, (int64_t)CEIL_DIV(num_groups, 4)};
@@ -341,7 +341,23 @@ inline CUtensorMap make_tma_desc_as(std::optional<Tensor> &tensor_, KernelData &
   auto tensor = tensor_.value();
   if (kernel_data.use_block_scaled_mma && group_size > 0) {
     tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-    return make_tma_desc(tensor, {block_shape_m, CEIL_DIV(num_groups, 4)}, 0, "as");
+    uint32_t stage_words = CEIL_DIV(num_groups, 4);
+    // Row-major boxes hold the tile's rows only; narrow stages load a whole 16-byte vector.
+    if (!kernel_data.use_m_major_input_scale)
+      return make_tma_desc(tensor, {std::max(stage_words, 4u), kernel_data.block_shape_m}, 0, "as");
+    if (block_shape_m <= 256) return make_tma_desc(tensor, {block_shape_m, stage_words}, 0, "as");
+
+    // A box holds at most 256 elements per dimension: address the M rows as 64-bit pairs.
+    CUtensorMap descriptor = {};
+    uint64_t dimensions[] = {uint64_t(tensor.size(1)) / 2, uint64_t(tensor.size(0))};
+    uint64_t strides[] = {uint64_t(tensor.stride(0)) * tensor.element_size()};
+    uint32_t box[] = {block_shape_m / 2, stage_words};
+    uint32_t element_strides[] = {1, 1};
+    CUresult status = cuTensorMapEncodeTiled(&descriptor, CU_TENSOR_MAP_DATA_TYPE_UINT64, 2,
+        tensor.data_ptr(), dimensions, strides, box, element_strides, CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    ASSERT_CHECK(status == CUDA_SUCCESS, "TMA Encode Failed for wide M-major AS: ", int(status));
+    return descriptor;
   }
   if (group_size == 0) {
     tensor = torch_view_shape(tensor, {-1});
