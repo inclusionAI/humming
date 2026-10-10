@@ -252,10 +252,15 @@ inline void check_tensor_bs2(std::optional<Tensor> &tensor, KernelData &kernel_d
   }
 };
 
-inline void check_tensor_locks(std::optional<Tensor> &tensor, KernelData &kernel_data, int64_t dev) {
+inline void check_tensor_locks(std::optional<Tensor> &tensor, KernelData &kernel_data, int64_t dev, uint32_t num_ctas) {
   if (!kernel_data.use_stream_k) return;
   ASSERT_CHECK(tensor.has_value(), "locks must not be none if use_stream_k");
   check_tensor_common(tensor.value(), "locks", dev, ScalarType::Int);
+  const uint32_t cluster_size = kernel_data.multi_cast_size_a * kernel_data.multi_cast_size_b * kernel_data.umma_cta_group_size;
+  const uint32_t num_cta_groups = num_ctas / cluster_size;
+  const uint64_t max_stream_k_tiles = uint64_t(num_cta_groups + num_cta_groups / 10) * cluster_size;
+  const uint64_t required_locks = max_stream_k_tiles * kernel_data.num_stream_k_locks_per_tile;
+  ASSERT_CHECK(uint64_t(tensor->numel()) >= required_locks, "locks requires at least ", required_locks, " int32 elements, got ", tensor->numel());
 };
 
 inline void check_tensor_moe(
@@ -422,11 +427,10 @@ inline CUtensorMap make_tma_desc_b(Tensor &tensor, KernelData &kernel_data) {
 inline CUtensorMap make_tma_desc_c(Tensor tensor, KernelData &kernel_data) {
   if (!kernel_data.use_tma_c) return CUtensorMap();
   tensor = torch_view_shape(tensor, {-1, tensor.size(-1)});
-  uint32_t rows = kernel_data.output_chunk_rows ? std::min(kernel_data.output_chunk_rows, kernel_data.block_shape_m) : kernel_data.block_shape_m;
+  const uint32_t rows = kernel_data.output_tile_rows;
   if (tensor.size(-1) % 64 != 0) return make_tma_desc(tensor, {64, rows}, 128, "c");
 
-  uint32_t columns = kernel_data.block_shape_n;
-  if (kernel_data.mma_type == MmaType::UMMA && kernel_data.output_chunk_rows) columns = 128;
+  const uint32_t columns = kernel_data.output_tile_columns;
   CUtensorMap descriptor = {};
   uint64_t dimensions[] = {64, uint64_t(tensor.size(0)), uint64_t(tensor.size(1) / 64)};
   uint64_t strides[] = {uint64_t(tensor.size(1) * 2), 128};

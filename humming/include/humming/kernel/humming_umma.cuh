@@ -164,7 +164,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
                       scheduler.k_block_id, scheduler.current_shape_m, scheduler.m_offset);
         producer.prefetch_stage();
 
-        PRAGMA_UNROLL_COUNT(4)
+        PRAGMA_UNROLL_COUNT(TuningConfig::kProducerStageUnroll)
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           auto *free_barrier = &smem.math_mbar[pipeline_stage];
           if constexpr (kEarlyWeightReuse && decltype(is_weight_warp)::value)
@@ -208,7 +208,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         mbarrier_wait(&smem.umma_accumulator_free, tile_index % 2);
         tcgen05_fence_after_thread_sync();
 
-        PRAGMA_UNROLL_COUNT(4)
+        PRAGMA_UNROLL_COUNT(TuningConfig::kConsumerStageUnroll)
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           mbarrier_wait(&smem.umma_operand_ready[pipeline_stage], pipeline_phase);
           if constexpr (kEarlyAsyncScales)
@@ -217,14 +217,12 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             mbarrier_wait(&smem.load_mbar[pipeline_stage], pipeline_phase);
           uint32_t buffer = operand_step % kNumOperandBuffers;
           tcgen05_fence_after_thread_sync();
-          if (tcgen05_elect_leader()) {
+          if (warp_elect_leader()) {
             PRAGMA_UNROLL
             for (uint32_t group = 0; group < kOutputGroups; group++) {
               ctx.math_group = group;
               mma.issue(pipeline_stage, buffer, iter == 0, scheduler.k_block_id + iter);
             }
-            // SS copies and consumes scales on the same tcgen05 issue stream.
-            // Only TS needs to return TMEM buffers to a separate producer.
             if constexpr (!Ctx::kUseUmmaSs)
               tcgen05_commit<Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.umma_operand_free[buffer]));
             tcgen05_commit<Ctx::kUmmaCtaGroupSize>(cast_smem_ptr_to_uint(&smem.math_mbar[pipeline_stage]));
@@ -243,7 +241,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
     MainloopArith arith;
     MMA mma(ctx, arith);
     while (next_tile()) {
-      PRAGMA_UNROLL_COUNT(4)
+      PRAGMA_UNROLL_COUNT(TuningConfig::kConsumerStageUnroll)
       for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
         if constexpr (Ctx::kUseUmmaSeparateInputScale) {
           if constexpr (Ctx::kIsGroupInputScale)
@@ -339,7 +337,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
           }
         };
 
-        PRAGMA_UNROLL_COUNT(4)
+        PRAGMA_UNROLL_COUNT(TuningConfig::kConsumerStageUnroll)
         for (uint32_t iter = 0; iter < scheduler.slice_iters; iter++) {
           uint32_t buffer = operand_step % kNumOperandBuffers;
           auto wait_for_operand = [&]() {

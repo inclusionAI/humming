@@ -21,6 +21,20 @@ private:
   static constexpr bool kIsGroupedGemm = Ctx::kIsGroupedGemm;
   static constexpr bool kHasTensorInputScale = Ctx::kIsTensorInputScale || Ctx::kIsTensorInputScale2;
   static constexpr uint32_t kOutputRows = SharedStorage::kOutputRows;
+  static constexpr uint32_t kNumStreamKSyncThreads = GmemWriter::kUseWarpgroupEpilogue ? 128 : Ctx::kNumMathThreads;
+
+  CUDA_INLINE uint32_t get_output_barrier_id() {
+    return GmemWriter::kUseWarpgroupEpilogue ? 3 + ctx.math_thread_id() / 128 : 1;
+  }
+
+  CUDA_INLINE void sync_output_threads() {
+    if constexpr (GmemWriter::kUseWarpgroupEpilogue) {
+      // Barriers 1 and 2 belong to the math and producer pipelines.
+      sync_part_threads<128, Ctx::kNumThreads>(get_output_barrier_id());
+    } else {
+      ctx.sync_math_threads();
+    }
+  }
 
 public:
   Ctx &ctx;
@@ -53,7 +67,12 @@ public:
     // Issuing threads drain the previous tile before any math thread reuses its output storage.
     if constexpr (Ctx::kUseWarpSpec && Ctx::kUseTmaC && Ctx::kSmemReuseMode == SmemReuseMode::NONE)
       tma_wait_store_group<0, true>();
-    ctx.sync_math_threads();
+    // Reduction scratch and aliased input storage are shared across warpgroups.
+    if constexpr (BlockShape::K > WarpShape::K || Ctx::kSmemReuseMode != SmemReuseMode::NONE) {
+      ctx.sync_math_threads();
+    } else {
+      sync_output_threads();
+    }
     if constexpr (BlockShape::K > WarpShape::K) smem_reducer.reduce(regs_c_ptr);
     if (slice_count > 1) acquire_gmem_barrier();
     PRAGMA_UNROLL
@@ -62,7 +81,7 @@ public:
       if constexpr (Ctx::kUseTmaC) {
         if (ctx.is_math_thread()) tma_fence_async_shared();
       }
-      ctx.sync_math_threads();
+      sync_output_threads();
       if constexpr (Ctx::kOutputChunkRows) {
         gmem_writer.write_chunk(slice_id, slice_count, first_row, MIN(kOutputRows, BlockShape::M - first_row), 0);
         // This path reuses one buffer. Wait before the next chunk overwrites it.
@@ -70,31 +89,47 @@ public:
       } else {
         gmem_writer.write(slice_id, slice_count, 0);
       }
-      ctx.sync_math_threads();
+      sync_output_threads();
     }
     if constexpr (Ctx::kOutputChunkRows && Ctx::kUseTmaC && Ctx::kUseStreamK) {
       if (slice_count > 1 && slice_id != slice_count - 1) tma_wait_store_group<0>();
     }
+    if constexpr (GmemWriter::kUseWarpgroupEpilogue && Ctx::kUseTmaC && !Ctx::kUseWarpSpec) {
+      tma_wait_store_group<0, true>();
+    }
     if (slice_count > 1) release_gmem_barrier();
+    // Independent output locks do not protect scratch, descriptors or row indices
+    // shared with other warpgroups or the next tile.
+    if constexpr (GmemWriter::kUseWarpgroupEpilogue &&
+                  (BlockShape::K > WarpShape::K || Ctx::kIsIndexedGemm || Ctx::kSmemReuseMode != SmemReuseMode::NONE || (Ctx::kUseTmaC && !Ctx::kUseWarpSpec)))
+      ctx.sync_math_threads();
   }
 
   CUDA_INLINE
   void acquire_gmem_barrier() {
+    if constexpr (GmemWriter::kUseWarpgroupEpilogue) {
+      if (ctx.k_warp_id() != 0) return;
+    }
+    const uint32_t thread_id = GmemWriter::kUseWarpgroupEpilogue ? ctx.math_thread_id() % 128 : ctx.math_thread_id();
     if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 0 : -1;
-      barrier_acquire2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val, ctx.math_thread_id());
+      barrier_acquire2<kNumStreamKSyncThreads, Ctx::kNumThreads>(&locks[locks_offset], val, thread_id, get_output_barrier_id());
     } else {
-      barrier_acquire<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id, ctx.math_thread_id());
+      barrier_acquire<kNumStreamKSyncThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id, thread_id, get_output_barrier_id());
     }
   }
 
   CUDA_INLINE
   void release_gmem_barrier() {
+    if constexpr (GmemWriter::kUseWarpgroupEpilogue) {
+      if (ctx.k_warp_id() != 0) return;
+    }
+    const uint32_t thread_id = GmemWriter::kUseWarpgroupEpilogue ? ctx.math_thread_id() % 128 : ctx.math_thread_id();
     if (Ctx::kUseTmaC || slice_count > 3) {
       int32_t val = slice_id == 0 ? 1 - static_cast<int32_t>(slice_count) : 0;
-      barrier_release2<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], val, ctx.math_thread_id());
+      barrier_release2<kNumStreamKSyncThreads, Ctx::kNumThreads>(&locks[locks_offset], val, thread_id, get_output_barrier_id());
     } else {
-      barrier_release<Ctx::kNumMathThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id == slice_count - 1, ctx.math_thread_id());
+      barrier_release<kNumStreamKSyncThreads, Ctx::kNumThreads>(&locks[locks_offset], slice_id == slice_count - 1, thread_id, get_output_barrier_id());
     }
   }
 
@@ -141,5 +176,7 @@ public:
     slice_count = slice_count_;
     slice_id = slice_id_;
     locks_offset = locks_offset_;
+    if constexpr (GmemWriter::kUseWarpgroupEpilogue)
+      locks_offset = locks_offset_ * SharedStorage::kNumStreamKLocksPerTile + ctx.math_thread_id() / 128;
   };
 };

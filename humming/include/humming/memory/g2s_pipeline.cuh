@@ -12,7 +12,7 @@
 #include <humming/utils/all.cuh>
 
 
-template <class Ctx>
+template <class Ctx, bool kEnableContinuousRing = false>
 class ProducerPipeline {
 private:
   using SharedStorage = typename Ctx::SharedStorage;
@@ -125,6 +125,11 @@ public:
   static constexpr bool kHasStageCpAsyncMBarrier = get_stage_load_bytes().y > 0;
   static constexpr bool kHasChannelTmaMBarrier = get_channel_load_bytes().x > 0;
   static constexpr bool kHasChannelCpAsyncMBarrier = get_channel_load_bytes().y > 0;
+  static constexpr bool kHasUniformStageBarriers = kHasFirstStageTmaMBarrier == kHasStageTmaMBarrier && kHasFirstStageCpAsyncMBarrier == kHasStageCpAsyncMBarrier;
+  static constexpr bool kUseContinuousRing = kEnableContinuousRing && kUseMBarrier && kHasUniformStageBarriers;
+  static constexpr bool kHasTileScopedInputs = kHasChannelData || Ctx::kIsIndexedGemm;
+  static constexpr bool kNeedsTileHandshake = !kUseContinuousRing || kHasTileScopedInputs;
+
   static constexpr uint32_t kMultiCastSizeA = Ctx::kMultiCastSizeA;
   static constexpr uint32_t kMultiCastSizeB = Ctx::kMultiCastSizeB;
   static constexpr uint32_t kMultiCastSize = kMultiCastSizeA * kMultiCastSizeB;
@@ -147,8 +152,13 @@ public:
   LoaderBS2 loader_bs2;
   LoaderBZP loader_bzp;
   LoaderBias loader_bias;
-  uint32_t phases[SharedStorage::kNumMathMbarriers] = {0};
+  uint32_t phase_bits = 0;
 
+private:
+  uint32_t ring_stage = 0;
+  uint32_t ring_phase = 1;
+
+public:
   CUDA_INLINE
   ProducerPipeline(Ctx &ctx)
       : ctx(ctx),
@@ -215,7 +225,10 @@ public:
 
   template <bool kShouldAdvance = true, bool kIsFirst = false>
   CUDA_INLINE void load_stage(uint32_t stage_id, bool pred = true) {
-    stage_id = stage_id % kNumStages;
+    if constexpr (kUseContinuousRing) {
+      if (!pred) return;
+      stage_id = ring_stage;
+    } else stage_id = stage_id % kNumStages;
     auto &smem = ctx.smem;
     if constexpr (Ctx::kUseUmmaAsyncActivationLoads) {
       // All loading threads gather A/AS; only the elected TMA loading thread
@@ -232,7 +245,7 @@ public:
       return;
     }
 
-    uint32_t mbar_index = kIsFirst ? kNumStages : stage_id;
+    uint32_t mbar_index = kIsFirst && !kUseContinuousRing ? kNumStages : stage_id;
     constexpr uint2 load_bytes = get_stage_load_bytes<kIsFirst>();
     constexpr bool kHasTmaMBarrier = kIsFirst ? kHasFirstStageTmaMBarrier : kHasStageTmaMBarrier;
 
@@ -261,6 +274,12 @@ public:
       commit_cp_async_load<kHasStageCpAsyncMBarrier>(mbar_index, pred);
     }
     if (pred) expect_tma_load<kHasTmaMBarrier>(mbar_ptr, load_bytes.x);
+    if constexpr (kUseContinuousRing) {
+      if (++ring_stage == kNumStages) {
+        ring_stage = 0;
+        ring_phase ^= 1;
+      }
+    }
   }
 
   template <bool kShouldAdvance = true>
@@ -354,24 +373,36 @@ public:
     }
   }
 
-  CUDA_INLINE void wait_stage(uint32_t stage_id) {
-    mbarrier_wait(&ctx.smem.math_mbar[stage_id], phases[stage_id], "Humming producer waiting for math stage");
+  CUDA_INLINE uint32_t get_phase(uint32_t stage_id) {
+    return (phase_bits >> stage_id) & 1u;
+  }
+
+  CUDA_INLINE void advance_phase(uint32_t stage_id) {
+    phase_bits ^= 1u << stage_id;
+  }
+
+  CUDA_INLINE void wait_stage(uint32_t stage_id, bool pred = true) {
+    if (!pred) return;
+    if constexpr (kUseContinuousRing) stage_id = ring_stage;
+    const uint32_t phase = kUseContinuousRing ? ring_phase : get_phase(stage_id);
+    mbarrier_wait(&ctx.smem.math_mbar[stage_id], phase, "Humming producer waiting for math stage");
     if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
-    phases[stage_id] ^= 1;
+    if constexpr (!kUseContinuousRing) advance_phase(stage_id);
   }
 
   CUDA_INLINE void wait_channel() {
     if constexpr (kHasChannelData && kUseMBarrier) {
-      mbarrier_wait(&ctx.smem.math_mbar[kNumStages], phases[kNumStages], "Humming producer waiting for channel consumer");
+      mbarrier_wait(&ctx.smem.math_mbar[kNumStages], get_phase(kNumStages), "Humming producer waiting for channel consumer");
       if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
-      phases[kNumStages] ^= 1;
+      advance_phase(kNumStages);
     }
   }
 
   CUDA_INLINE void wait_math_epilogue() {
-    mbarrier_wait(&ctx.smem.math_mbar[kNumStages], phases[kNumStages], "Humming producer waiting for epilogue");
+    if constexpr (!kNeedsTileHandshake) return;
+    mbarrier_wait(&ctx.smem.math_mbar[kNumStages], get_phase(kNumStages), "Humming producer waiting for epilogue");
     if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
-    phases[kNumStages] ^= 1;
+    advance_phase(kNumStages);
   }
 
   CUDA_INLINE void seek(
@@ -389,7 +420,7 @@ public:
 };
 
 
-template <class Ctx>
+template <class Ctx, bool kUseContinuousRing = false>
 class ConsumerPipeline {
 private:
   using SharedStorage = typename Ctx::SharedStorage;
@@ -422,12 +453,29 @@ public:
   Ctx &ctx;
   uint32_t phases[kNumStages + 2] = {0};
 
+private:
+  uint32_t ring_stage = 0;
+  uint32_t ring_phase = 0;
+
+public:
+  CUDA_INLINE uint32_t get_stage_id(uint32_t stage_id) const {
+    if constexpr (kUseContinuousRing) return ring_stage;
+    else return stage_id;
+  }
+
   CUDA_INLINE
   ConsumerPipeline(Ctx &ctx) : ctx(ctx) {
   }
 
   template <bool kIsFirst = false>
   CUDA_INLINE void wait_stage(uint32_t stage_id) {
+    if constexpr (kUseContinuousRing) {
+      const uint32_t next_stage = ring_stage + 1 == kNumStages ? 0 : ring_stage + 1;
+      const uint32_t wait_stage = kIsFirst ? ring_stage : next_stage;
+      const uint32_t wait_phase = ring_phase ^ (!kIsFirst && wait_stage == 0);
+      mbarrier_wait(&ctx.smem.load_mbar[wait_stage], wait_phase, "Humming consumer waiting for ring stage");
+      return;
+    }
     stage_id = kIsFirst ? kNumStages : (stage_id % kNumStages);
     if constexpr (kUseMBarrier) {
       mbarrier_wait(&ctx.smem.load_mbar[stage_id], phases[stage_id], "Humming consumer waiting for load stage");
@@ -451,12 +499,21 @@ public:
   }
 
   CUDA_INLINE void arrive(uint32_t stage_id) {
+    if constexpr (!ProducerPipeline<Ctx, kUseContinuousRing>::kNeedsTileHandshake) {
+      if (stage_id == kNumStages) return;
+    }
     auto &smem = ctx.smem;
     mbarrier_arrive(&smem.math_mbar[stage_id]);
     if constexpr (kMultiCastSize > 1) {
       if (ctx.cluster_rank() >= 1 && stage_id < SharedStorage::kNumMathMbarriers) {
         void *aa = __cluster_map_shared_rank(&smem.math_mbar[stage_id], 0);
         mbarrier_arrive<true>(aa);
+      }
+    }
+    if constexpr (kUseContinuousRing) {
+      if (stage_id < kNumStages && ++ring_stage == kNumStages) {
+        ring_stage = 0;
+        ring_phase ^= 1;
       }
     }
   }

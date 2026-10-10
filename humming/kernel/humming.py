@@ -85,6 +85,9 @@ using SharedStorageType = SharedStorage<
 
 
 extern "C" __constant__ uint32_t SMEM_SIZE = sizeof(SharedStorageType);
+extern "C" __constant__ uint32_t OUTPUT_TILE_ROWS = SharedStorageType::kOutputTileRows;
+extern "C" __constant__ uint32_t OUTPUT_TILE_COLUMNS = SharedStorageType::kOutputTileColumns;
+extern "C" __constant__ uint32_t NUM_STREAM_K_LOCKS_PER_TILE = SharedStorageType::kNumStreamKLocksPerTile;
 extern "C" __constant__ uint32_t SMEM_SIZE_A = 
     SharedStorageType::kNumStages * SharedStorageType::kStageSizeA * sizeof(int4);
 extern "C" __constant__ uint32_t SMEM_SIZE_B = 

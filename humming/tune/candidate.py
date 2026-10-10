@@ -70,6 +70,8 @@ class ScheduleCandidate:
     use_stream_k: bool = True
     use_f16_accum: bool = False
     num_stages: int = 2
+    producer_stage_unroll: int | None = None
+    consumer_stage_unroll: int | None = None
     num_ctas_per_sm: int = 1
     multi_cast_size_a: int = 1
     use_warp_spec: bool = False
@@ -80,6 +82,10 @@ class ScheduleCandidate:
     def __post_init__(self) -> None:
         if not self.candidate_id:
             raise ValueError("candidate_id must not be empty")
+        for name in ("producer_stage_unroll", "consumer_stage_unroll"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"{name} must be None or a positive integer")
         if not self._explicit_fields:
             fields = (
                 field.name
@@ -119,6 +125,8 @@ class ScheduleCandidate:
             use_stream_k=_config_bool(config, "use_stream_k", True),
             use_f16_accum=_config_bool(config, "use_f16_accum", False),
             num_stages=_config_positive_int(config, "num_stages", 2),
+            producer_stage_unroll=config.get("producer_stage_unroll"),
+            consumer_stage_unroll=config.get("consumer_stage_unroll"),
             num_ctas_per_sm=_config_positive_int(config, "num_ctas_per_sm", 1),
             multi_cast_size_a=_config_positive_int(config, "multi_cast_size_a", 1),
             use_warp_spec=use_warp_spec,

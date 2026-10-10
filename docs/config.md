@@ -164,6 +164,8 @@ advances. A value of 1 uses the existing forward warp scan without the prefix ta
 | Parameter | Description |
 |-----------|-------------|
 | `num_stages` | Number of pipeline stages. Must be at least 2. Must be at least 3 when using `use_warp_spec` with WGMMA. |
+| `producer_stage_unroll` | Producer stage loop unroll factor, including prefill and tail. `None` (default) uses `num_stages` when the tuning config is initialized; explicit values must be positive integers. |
+| `consumer_stage_unroll` | Consumer stage loop unroll factor. Same default and range as `producer_stage_unroll`; 1 disables unrolling. Does not change fragment loop unrolling or pipeline depth. Without warp specialization, also controls the loads interleaved in the compute loop. |
 | `use_warp_spec` | Whether to enable Warp Specialization. Requires SM90+. Required for UMMA. |
 | `wgmma_use_late_as` | Delay per-group input-scale register loads until WGMMA accumulator promotion. Defaults to `False`; requires WGMMA with per-group input scales. |
 | `wgmma_split_issue_wait` | Prefetch the next fragment between WGMMA issue and wait. Defaults to `False`; independent of input-scale granularity and `wgmma_use_late_as`. |
@@ -172,6 +174,24 @@ advances. A value of 1 uses the existing forward warp scan without the prefix ta
 | `num_ctas_per_sm` | Number of CTAs (Cooperative Thread Arrays / Thread Blocks) launched per SM. |
 | `umma_cta_group_size` | `1` (default) or `2`. With `2`, a cluster of two CTAs cooperatively executes UMMA for adjacent N tiles. This is independent of CTA residency and TMA multicast. |
 | `output_chunk_rows` | Output rows per shared-memory chunk for every MMA backend. `0` (default) writes a full tile; positive values must be multiples of 32 up to 256 and are clamped to tile M. Partial final chunks are supported. UMMA alternates two buffers; other backends reuse one buffer. Supports TMA and regular stores, Stream-K, and MoE scatter. Replaces `num_write_splits` (use half of tile M to reproduce two splits). |
+
+WGMMA output with multiple output warpgroups and `output_chunk_rows=0` uses one
+Stream-K lock per output warpgroup. Each group initializes and accumulates its own
+output region independently. K reduction, shared scratch reuse and indexed row
+buffer reuse still synchronize the math threads that share those resources.
+Layer-owned lock buffers reserve space for the maximum number of warpgroups per
+CTA. The launcher checks supplied lock capacity against the grid and kernel's
+lock count per tile.
+
+Stage unroll factors apply to all MMA backends and do not need to divide `num_stages`.
+UMMA heuristics explicitly choose 4 for both factors, including when fewer than four
+stages are used. Other backends unroll within one stage cycle, so factors at least
+as large as the cycle length fully unroll that cycle.
+For example, `num_stages=5, producer_stage_unroll=2, consumer_stage_unroll=1`
+keeps all five pipeline slots while requesting partial producer unrolling and no
+consumer stage unrolling. Fragment loops remain fully unrolled. Reducing these
+factors can reduce register pressure, but can also add dynamic stage addressing;
+measure them together with tile shapes and pipeline depth.
 
 The two `wgmma_*` options apply only to WGMMA and support both warp-specialized
 and non-warp-specialized kernels. Per-group inputs support all four combinations;

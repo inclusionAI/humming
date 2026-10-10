@@ -28,6 +28,17 @@ CUDA_INLINE void static_for(Func &&func) {
   }
 }
 
+template <uint32_t kBegin, uint32_t kEnd, uint32_t kUnroll, class Func>
+CUDA_INLINE void unroll_for(Func &&func) {
+  static_assert(kUnroll > 0);
+  if constexpr (kUnroll >= kEnd - kBegin) {
+    static_for<kBegin, kEnd>([&](auto index) { func(decltype(index)::value); });
+  } else {
+    PRAGMA_UNROLL_COUNT(kUnroll)
+    for (uint32_t index = kBegin; index < kEnd; ++index) func(index);
+  }
+}
+
 #ifndef HUMMING_DEBUG_KERNEL
 #define HUMMING_DEBUG_KERNEL 0
 #endif

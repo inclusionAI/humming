@@ -128,6 +128,8 @@ public:
     uint32_t buffer_id = iter_id % 2;
 
     const uint32_t smem_base = cast_smem_ptr_to_uint(&ctx.smem);
+    const uint32_t stage_addr = smem_base + offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
+    const uint64_t stage_desc = make_wgmma_smem_desc<kSwizzleBytes>(stage_addr + smem_offset);
     constexpr uint32_t kItersPerHalf = kUsePackedKLayout ? 1 : kWarpIters;
     constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
     constexpr uint32_t kRunKLoop = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? kNumKSlabs : kPackedKFactor;
@@ -141,9 +143,8 @@ public:
     PRAGMA_UNROLL
     for (uint32_t k = 0; k < kRunKLoop; k++) {
       uint32_t k_slab = (kUsePackedKLayout || Ctx::kUseWgmmaSsKBatch) ? k : ((iter_id % kItersPerHalf) * kPackedKFactor + k);
-      uint32_t smem_addr = smem_base + offsetof(SharedStorage, stages) + stage_id * sizeof(typename SharedStorage::StageStorage);
-      smem_addr += k_slab * 2 * sizeof(int4) + smem_offset;
-      uint64_t desc = make_wgmma_smem_desc<kSwizzleBytes>(smem_addr);
+      uint64_t desc = stage_desc;
+      reinterpret_cast<uint32_t *>(&desc)[0] += k_slab * 2;
 
       bool scale_d = true;
       if constexpr (ElementA::kBits != 16 && Ctx::kInputScaleGroupSize > 0) {
@@ -165,8 +166,9 @@ public:
           uint32_t col = ctx.k_warp_offset() + k_slab * kPartMmaShapeK;
           uint32_t offset = (col / kSwizzleK * BlockShape::N + row) * kSwizzleBytes;
           offset += col % kSwizzleK * ElementB::kBits / 8;
-          uint32_t b_addr = cast_smem_ptr_to_uint(ctx.smem.stages[stage_id].b) + offset;
+          const uint32_t b_addr = stage_addr + offsetof(typename SharedStorage::StageStorage, b);
           uint64_t b_desc = make_wgmma_smem_desc<kSwizzleBytes>(b_addr);
+          reinterpret_cast<uint32_t *>(&b_desc)[0] += offset / 16;
           MmaOpClass::fma(desc, b_desc, regs_c[0][delta_j + j][0], scale_d);
         } else {
           MmaOpClass::fma(desc, regs_b[buffer_id][j][k], regs_c[0][delta_j + j][0], scale_d);

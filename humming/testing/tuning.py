@@ -18,6 +18,8 @@ TEST_TUNING_SEED_ENV = "HUMMING_TEST_TUNING_SEED"
 SAMPLED_TUNING_VALUES = {
     "mma_type": tuple(mma_type.value for mma_type in MmaType),
     "num_stages": (2, 3, 4, 5, 6, 8),
+    "producer_stage_unroll": (None, 1, 2),
+    "consumer_stage_unroll": (None, 1, 2),
     "wgmma_use_late_as": (False, True),
     "wgmma_split_issue_wait": (False, True),
     "use_tma": (True, False, 123, 456, 789),
@@ -413,13 +415,13 @@ def _fits_device_resources(
 def _try_combine_candidate(
     layer_config: LayerConfig,
     compute_config: ComputeConfig,
-    items: tuple[tuple[dict, dict], tuple[dict, dict], tuple[dict, dict]],
+    items: tuple[tuple[dict, dict], ...],
 ) -> tuple[dict, dict] | None:
-    geometry_item, transfer_item, scheduling_item = items
-    geometry_config, geometry_signature = geometry_item
-    transfer_config, transfer_signature = transfer_item
-    scheduling_config, scheduling_signature = scheduling_item
-    config = geometry_config | transfer_config | scheduling_config
+    config = {}
+    signature = {}
+    for item_config, item_signature in items:
+        config.update(item_config)
+        signature.update(item_signature)
     mma_type = MmaType(config["mma_type"])
     block_shape = config["block_shape"]
     warp_shape = config["warp_shape"]
@@ -454,7 +456,6 @@ def _try_combine_candidate(
     ):
         return None
 
-    signature = geometry_signature | transfer_signature | scheduling_signature
     candidate = (config, signature)
     return candidate if _fits_device_resources(layer_config, compute_config, candidate) else None
 
@@ -466,10 +467,12 @@ def _enumerate_backend_candidates(
     sample_size: int,
 ) -> list[tuple[dict, dict]]:
     rng = random.Random(_get_seed(layer_config, compute_config))
+    unroll_candidates = _generate_cartesian("producer_stage_unroll", "consumer_stage_unroll")
     groups = (
         _generate_geometry_candidates(layer_config, compute_config, mma_type),
         _generate_transfer_candidates(layer_config, compute_config, mma_type),
         _generate_scheduling_candidates(layer_config, compute_config, mma_type),
+        [(config, config) for config in unroll_candidates],
     )
     candidates = []
     signatures = set()

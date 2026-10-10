@@ -43,6 +43,11 @@ private:
   using LoaderBZP = S2RMemoryLoaderBZP<Ctx>;
   using LoaderBias = S2RMemoryLoaderBias<Ctx>;
 
+  CUDA_INLINE static uint32_t get_fragment_stage(uint32_t stage_id, uint32_t iter_id) {
+    if (iter_id < Ctx::kWarpIters) return stage_id;
+    return stage_id + 1 == kNumStages ? 0 : stage_id + 1;
+  }
+
 public:
   Ctx &ctx;
   MMA &mma;
@@ -75,7 +80,7 @@ public:
   }
 
   CUDA_INLINE void load_stage_iter_data(uint32_t stage_id, uint32_t iter_id) {
-    stage_id = (stage_id + iter_id / Ctx::kWarpIters) % kNumStages;
+    stage_id = get_fragment_stage(stage_id, iter_id);
     iter_id = iter_id % Ctx::kWarpIters;
     uint32_t buffer_id = iter_id % 2;
     auto &smem = ctx.smem;
@@ -88,7 +93,7 @@ public:
 
   template <bool kIsFirst = false>
   CUDA_INLINE void load_stage_iter_scales(uint32_t stage_id, uint32_t iter_id) {
-    stage_id = (stage_id + iter_id / Ctx::kWarpIters) % kNumStages;
+    stage_id = get_fragment_stage(stage_id, iter_id);
     iter_id = iter_id % Ctx::kWarpIters;
     uint32_t buffer_id = iter_id % 2;
     uint32_t k_iter_id = Ctx::kUsePackedKLayout ? 0 : iter_id;

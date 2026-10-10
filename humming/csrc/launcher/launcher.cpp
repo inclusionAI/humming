@@ -161,7 +161,7 @@ Tensor launch_kernel_impl(
     check_tensor_bzp(bzp_, kernel_data, dev);
     check_tensor_bias(bias_, kernel_data, dev);
     check_tensor_bs2(bs2_, kernel_data, dev);
-    check_tensor_locks(locks_, kernel_data, dev);
+    check_tensor_locks(locks_, kernel_data, dev, num_ctas);
     check_tensor_moe(sorted_ids_, expert_ids_, num_tokens_padded_, expert_layout_, kernel_data, dev, shape_m);
   }
 
@@ -301,6 +301,9 @@ std::tuple<int64_t, std::string> register_kernel(const std::string &cubin_path) 
       reader.getUint32("NUM_CTAS_PER_SM"),
       reader.getUint32("UMMA_CTA_GROUP_SIZE"),
       reader.getUint32("OUTPUT_CHUNK_ROWS"),
+      reader.getUint32("OUTPUT_TILE_ROWS"),
+      reader.getUint32("OUTPUT_TILE_COLUMNS"),
+      reader.getUint32("NUM_STREAM_K_LOCKS_PER_TILE"),
       reader.getUint32("MULTI_CAST_SIZE_A"),
       reader.getUint32("MULTI_CAST_SIZE_B"),
       reader.getUint32("GEMM_TYPE_ID"),

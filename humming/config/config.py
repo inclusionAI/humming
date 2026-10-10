@@ -506,6 +506,9 @@ class TuningConfig(BaseHummingConfig):
     wgmma_split_issue_wait: bool = False
 
     num_stages: int = 2
+    # None uses num_stages when the tuning config is initialized.
+    producer_stage_unroll: int | None = None
+    consumer_stage_unroll: int | None = None
     num_ctas_per_sm: int = 1
     umma_num_dequant_warpgroups: int = 1
     umma_cta_group_size: int = 1
@@ -583,6 +586,14 @@ class TuningConfig(BaseHummingConfig):
                 self.smem_reuse_mode = SmemReuseMode.NONE
         self.smem_reuse_mode = SmemReuseMode(self.smem_reuse_mode)
         assert self.block_shape[0] <= 256
+        for name in ("producer_stage_unroll", "consumer_stage_unroll"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"{name} must be None or a positive integer")
+        if self.producer_stage_unroll is None:
+            self.producer_stage_unroll = self.num_stages
+        if self.consumer_stage_unroll is None:
+            self.consumer_stage_unroll = self.num_stages
         assert 0 <= self.output_chunk_rows <= 256 and self.output_chunk_rows % 32 == 0, (
             "output_chunk_rows must be 0 or a multiple of 32 up to 256"
         )
