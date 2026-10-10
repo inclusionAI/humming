@@ -68,14 +68,6 @@ CUDA_INLINE uint64_t tcgen05_smem_desc_k96(uint64_t descriptor, uint64_t swizzle
 }
 
 
-// Elect once for a group of MMA instructions and their completion commits.
-CUDA_INLINE bool tcgen05_elect_leader() {
-  uint32_t leader;
-  asm volatile("{ .reg .pred p; elect.sync _|p, 0xffffffff; selp.u32 %0, 1, 0, p; }" : "=r"(leader));
-  return leader;
-}
-
-
 template <uint32_t kN, bool kUseBf16, uint32_t kCtaGroupSize = 1>
 CUDA_INLINE void tcgen05_mma_f16(uint32_t d, uint32_t a, uint64_t b, bool accumulate) {
   constexpr uint32_t input_format = kUseBf16 ? (1u << 7) | (1u << 10) : 0u;

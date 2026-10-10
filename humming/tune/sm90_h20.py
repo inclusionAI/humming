@@ -6,6 +6,7 @@ from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import current_device
 from humming.tune.base import DeviceHeuristics
+from humming.tune.sm90_policies import get_sm90_specialized_config
 from humming.utils.math import ceil_div, round_up
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -254,9 +255,15 @@ class Sm90H20Heuristics(DeviceHeuristics):
     ) -> None:
         """Use higher CTA residency once expert tiles are sufficiently full."""
         block_m = config["block_shape"][0]
+        has_mxfp4_weights = (
+            layer_config.b_dtype == dtypes.float4e2m1
+            and layer_config.bs_dtype == dtypes.float8e8m0
+            and layer_config.weight_scale_group_size == 32
+        )
         if (
             gemm_type != GemmType.GROUPED_CONTIGUOUS
-            or not layer_config.use_fused_e8m0_scale
+            or layer_config.a_dtype.num_bits != 16
+            or not has_mxfp4_weights
             or layer_config.shape_k <= 1024
             or layer_config.shape_n % 128
             or layer_config.shape_k % 64
@@ -338,6 +345,18 @@ class Sm90H20Heuristics(DeviceHeuristics):
         gemm_type: GemmType = GemmType.DENSE,
         use_m_major_input_scale: bool = False,
     ):
+        specialized_config = get_sm90_specialized_config(
+            layer_config,
+            shape_m,
+            gemm_type,
+            use_f16_accum,
+            use_batch_invariant,
+            is_h20=True,
+            use_m_major_input_scale=use_m_major_input_scale,
+            expert_probability_cv=cls.expert_probability_cv,
+        )
+        if specialized_config is not None:
+            return specialized_config
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
         a_dtype = layer_config.a_dtype
@@ -458,11 +477,11 @@ class Sm90H20Heuristics(DeviceHeuristics):
             warp_shape_m = block_shape_m
             num_blocks_m = math.ceil(shape_m / block_shape_m)
 
-        if num_ctas_per_sm == 1:
+        use_stream_k = layer_config.shape_k > 1024 and not use_batch_invariant
+        if use_stream_k and num_ctas_per_sm == 1:
             factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
-            if layer_config.shape_k > 1024:
-                # Keep at least two stage-4 turns per Stream-K slice.
-                factor = min(9, max(factor, layer_config.shape_k / (8 * block_shape_k)))
+            # Keep at least two stage-4 turns per Stream-K slice.
+            factor = min(9, max(factor, layer_config.shape_k / (8 * block_shape_k)))
             num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
 
         while layer_config.shape_k % block_shape_k != 0:
@@ -481,7 +500,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
-            "use_stream_k": layer_config.shape_k > 1024,
+            "use_stream_k": use_stream_k,
             "use_f16_accum": use_f16_accum,
             "num_sms": num_sms,
             "num_stages": num_stages,
@@ -536,6 +555,32 @@ class Sm90H20Heuristics(DeviceHeuristics):
             block_m, block_n, block_k = config["block_shape"]
             warp_m, warp_n, _ = config["warp_shape"]
             config["warp_shape"] = (warp_m, warp_n, 128)
-            config["block_shape"] = (block_m, block_n, 128 if use_batch_invariant else max(block_k, 128))
+            # A short reduction cannot fill the wider packed pipeline. Keep
+            # one K warp there; long reductions retain the wider decode stage.
+            has_short_fused_pipeline = (
+                layer_config.use_fused_e8m0_scale and block_k * config["num_stages"] > layer_config.shape_k
+            )
+            keep_single_k_warp = use_batch_invariant or has_short_fused_pipeline
+            config["block_shape"] = (block_m, block_n, 128 if keep_single_k_warp else max(block_k, 128))
+
+        is_wna16 = a_dtype.num_bits == 16 and layer_config.b_dtype.num_bits < 16
+        can_overlap_output = config.get("use_warp_spec", False) and config["block_shape"][0] >= 32
+        if is_wna16 and not is_moe and can_overlap_output:
+            # Keep stage addressing static during dequantization while overlapping
+            # output with the next tile. Very small M tiles can spill with split waits.
+            config["wgmma_split_issue_wait"] = True
+            smem_size = estimate_smem_size_layer(
+                layer_config,
+                config["block_shape"],
+                gemm_type,
+                config["num_stages"],
+                warp_shape=config["warp_shape"],
+                smem_reuse_mode="last_stage",
+                use_tma=config.get("use_tma", False),
+                use_warp_spec=True,
+                mma_accum_bits=16 if use_f16_accum else 32,
+            )
+            if smem_size * config["num_ctas_per_sm"] <= cls.max_smem_size:
+                config["smem_reuse_mode"] = "last_stage"
 
         return config

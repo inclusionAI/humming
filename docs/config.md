@@ -169,6 +169,8 @@ Uses a packed-K weight layout that organizes K data for WGMMA.
 - The transformed weights require WGMMA and must satisfy its warp K and scale group constraints.
 - When omitted, it is selected from the quantization parameters and layer shape. Changing it requires transforming weights again.
 
+On SM90, fused E8M0 layers use packed-K by default when input scale groups cover K128 and N is a multiple of 64, for both dense and MoE GEMMs. Dense weights transformed with the previous unpacked default must be transformed again, or keep `use_packed_k_layout=False` explicitly.
+
 Usually leave this to automatic selection. It determines data layout and cannot be freely switched as a backend tuning option on the same stored weights.
 
 #### `has_bias`
@@ -268,6 +270,16 @@ The number of pipeline buffer stages, generally at least `2`; WGMMA requires at 
 
 For long K dimensions, try increasing from `2` / `3` to `4` or more to hide memory latency. Prefer fewer stages for short K dimensions or when SMEM limits concurrency. Consider `block_shape_k` when determining how many iterations can actually use these buffers.
 
+#### `producer_stage_unroll`, `consumer_stage_unroll`
+
+Control producer and consumer stage loop unrolling independently. `None` (default) resolves to `num_stages` when the tuning config is initialized; explicit values must be positive integers. A value of `1` disables unrolling.
+
+The producer factor includes prefill and tail loops. Without warp specialization, the consumer factor also controls loads interleaved in the compute loop. Neither factor changes pipeline depth or fragment loop unrolling.
+
+These factors apply to all MMA backends and do not need to divide `num_stages`. UMMA heuristics explicitly choose `4` for both, including when fewer than four stages are used. Other backends unroll within one stage cycle, so factors at least as large as that cycle fully unroll it.
+
+For example, `num_stages=5, producer_stage_unroll=2, consumer_stage_unroll=1` keeps all five pipeline slots while requesting partial producer unrolling and no consumer stage unrolling. Smaller factors can reduce register pressure, but can add dynamic stage addressing; measure them together with tile shapes and pipeline depth.
+
 #### `num_ctas_per_sm`
 
 The number of CTAs scheduled per SM. It also affects launch bounds and resource budgets, but does not guarantee actual hardware occupancy.
@@ -362,6 +374,10 @@ Partitions work along K so multiple CTAs can share computation for an output til
 Enabling it changes the loop iteration count from a compile-time constant to a runtime variable. This can limit compiler loop optimizations and make some cases slower.
 
 Try `True` for small M/N and long K. Try `False` when there are already enough tiles or K is short to avoid partial-result reduction and synchronization overhead. Must be disabled for batch invariant behavior.
+
+WGMMA output with multiple output warpgroups and `output_chunk_rows=0` uses one Stream-K lock per output warpgroup. Each group initializes and accumulates its own output region independently. K reduction, shared scratch reuse and indexed row buffer reuse still synchronize the math threads that share those resources.
+
+Layer-owned lock buffers contain 2048 int32 elements. The launcher checks supplied lock capacity against the grid and kernel's lock count per tile.
 
 #### `raster_group_m`
 

@@ -378,7 +378,7 @@ class HummingLayer(torch.nn.Module):
 
         # Stream-K synchronization state must not be shared between layers:
         # separate layers may execute concurrently on different CUDA streams.
-        locks = torch.zeros((1024,), dtype=torch.int32, device=torch.cuda.current_device())
+        locks = torch.zeros((2048,), dtype=torch.int32, device=torch.cuda.current_device())
         self.register_buffer("locks", locks)
 
     @property

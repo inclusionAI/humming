@@ -1,5 +1,5 @@
 from humming import dtypes
-from humming.config import GemmType, LayerConfig
+from humming.config import GemmType, LayerConfig, MmaType
 from humming.device import current_device
 from humming.tune.candidate import (
     DeviceProfile,
@@ -11,6 +11,7 @@ from humming.tune.sm90_policies import (
     Sm90CandidatePolicy,
     build_sm90_seed_config,
     calc_sm90_num_block_list,
+    get_sm90_specialized_config,
     select_grouped_scale,
     select_indexed_a16,
 )
@@ -168,6 +169,36 @@ class Sm90Heuristics(Sm80Heuristics):
         gemm_type: GemmType = GemmType.DENSE,
         use_m_major_input_scale: bool = False,
     ):
+        specialized_config = get_sm90_specialized_config(
+            layer_config,
+            shape_m,
+            gemm_type,
+            use_f16_accum,
+            use_batch_invariant,
+            use_m_major_input_scale=use_m_major_input_scale,
+            expert_probability_cv=cls.expert_probability_cv,
+        )
+        if specialized_config is not None:
+            return specialized_config
+
+        is_wna16 = layer_config.a_dtype.num_bits == 16 and layer_config.b_dtype.num_bits < 16
+        has_short_reduction = shape_m <= 32 and layer_config.shape_k <= 1024
+        is_tile_aligned = layer_config.shape_n % 128 == 0 and layer_config.shape_k % 64 == 0
+        can_use_small_mma = gemm_type == GemmType.DENSE and not use_f16_accum and not use_batch_invariant
+        if is_wna16 and has_short_reduction and is_tile_aligned and can_use_small_mma:
+            # A short reduction cannot amortize a producer warpgroup or Stream-K
+            # fixups. Two K warps let MMA dequantize while keeping the M tile small.
+            return {
+                "mma_type": MmaType.MMA.value,
+                "block_shape": (16, 128, 64),
+                "warp_shape": (16, 32, 32),
+                "num_stages": 4,
+                "num_ctas_per_sm": 1,
+                "use_stream_k": False,
+                "use_tma": False,
+                "use_warp_spec": False,
+            }
+
         if layer_config.a_dtype == dtypes.int4:
             return super().get_config(
                 layer_config, shape_m, use_f16_accum, use_batch_invariant, gemm_type, use_m_major_input_scale

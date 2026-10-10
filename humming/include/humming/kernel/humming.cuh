@@ -120,17 +120,15 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       }
     }
     producer.template load_stage<true, true>(0);
-    PRAGMA_UNROLL
-    for (uint32_t stage_id = 1; stage_id < MAX(kNumStages - 1, 2); stage_id++) {
+    unroll_for<1, MAX(kNumStages - 1, 2), TuningConfig::kProducerStageUnroll>([&](uint32_t stage_id) {
       producer.load_stage(stage_id, stage_id < num_slice_iters);
-    };
+    });
 
     consumer.template wait_stage<true>(kNumStages);
     s2r_pipe.template load_stage_iter<true>(0, 0);
     mma.transform_b(0, 0);
 
-    auto consume_stage = [&](auto stage, uint32_t slice_iter) {
-      constexpr uint32_t stage_id = decltype(stage)::value;
+    auto consume_stage = [&](uint32_t stage_id, uint32_t slice_iter) {
       debug_kernel_timeout_check(debug_start_clock);
       const uint32_t remaining_iters = num_slice_iters - slice_iter;
       if (remaining_iters == 1) producer.load_channel();
@@ -191,15 +189,14 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
     const uint32_t num_full_stage_cycles = num_slice_iters / kNumStages;
     for (uint32_t cycle_id = 0; cycle_id < num_full_stage_cycles; cycle_id++) {
-      static_for<0, kNumStages>([&](auto stage) {
-        consume_stage(stage, cycle_id * kNumStages + decltype(stage)::value);
+      unroll_for<0, kNumStages, TuningConfig::kConsumerStageUnroll>([&](uint32_t stage_id) {
+        consume_stage(stage_id, cycle_id * kNumStages + stage_id);
       });
     }
     const uint32_t tail_stage_iters = num_slice_iters % kNumStages;
-    static_for<0, kNumStages>([&](auto stage) {
-      constexpr uint32_t stage_id = decltype(stage)::value;
+    unroll_for<0, kNumStages, TuningConfig::kConsumerStageUnroll>([&](uint32_t stage_id) {
       if (stage_id < tail_stage_iters) {
-        consume_stage(stage, num_full_stage_cycles * kNumStages + stage_id);
+        consume_stage(stage_id, num_full_stage_cycles * kNumStages + stage_id);
       }
     });
 

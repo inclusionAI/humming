@@ -475,7 +475,7 @@ class KernelTestRunner:
         return ops.launch_kernel(
             configs=kernel_config,
             outputs=outputs,
-            locks=torch.zeros((1024,), dtype=torch.int32, device=inputs.device),
+            locks=torch.zeros((2048,), dtype=torch.int32, device=inputs.device),
             top_k=self.test_case.top_k,
             **launch_tensors,
             **self.kernel_tensors,

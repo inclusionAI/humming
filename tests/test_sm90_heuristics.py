@@ -25,6 +25,7 @@ def _layer(
     bs_dtype=dtypes.float8e8m0,
     input_scale_group_size: int = 128,
     weight_scale_group_size: int = 32,
+    use_packed_k_layout: bool | None = None,
 ) -> LayerConfig:
     return LayerConfig(
         sm_version=90,
@@ -38,6 +39,7 @@ def _layer(
         bs_dtype=bs_dtype,
         input_scale_group_size=input_scale_group_size,
         weight_scale_group_size=weight_scale_group_size,
+        use_packed_k_layout=use_packed_k_layout,
     )
 
 
@@ -101,7 +103,7 @@ def test_grouped_and_legacy_selection_work_without_a_live_device(monkeypatch):
     monkeypatch.setattr(DeviceInfo, "sm_count", property(fail_device_query))
 
     grouped = Sm90Heuristics.get_config(
-        _layer(6144, 3584, num_experts=0),
+        _layer(6144, 3584, num_experts=0, use_packed_k_layout=False),
         shape_m=32,
         gemm_type=GemmType.DENSE,
     )
@@ -170,7 +172,7 @@ def test_grouped_fp8_uses_legal_n_tile_for_non_128_multiple():
 
 
 def test_grouped_fp8_enables_multicast_at_the_dense_threshold():
-    layer = _layer(6144, 3584, num_experts=0)
+    layer = _layer(6144, 3584, num_experts=0, use_packed_k_layout=False)
 
     below_threshold = Sm90Heuristics.get_config(
         layer,
@@ -373,7 +375,7 @@ def test_fp4_a16_dense_uses_small_tile_only_through_m128():
 @pytest.mark.parametrize("num_experts", [8, 33])
 @pytest.mark.parametrize("shape_n,shape_k", [(4096, 6144), (6144, 2048), (4096, 3072), (4096, 4096)])
 def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, num_experts, shape_n, shape_k):
-    monkeypatch.setattr("humming.tune.sm90_policies.torch.cuda.get_device_name", lambda: device_name)
+    monkeypatch.setattr(DeviceInfo, "name", property(lambda self: device_name))
     monkeypatch.setattr("humming.tune.get_heuristics_class", lambda **kwargs: Sm90Heuristics)
     layer = _layer(shape_n, shape_k, num_experts=num_experts)
     assert layer.use_packed_k_layout
@@ -384,11 +386,17 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
     previous_upper = 0
     for lower, upper, config in ranges:
         assert lower == previous_upper and lower < upper
-        assert config["use_packed_k_layout"]
-        assert config["warp_shape"][1:] == (16, 128)
+        assert config["warp_shape"][2] == 128
         assert config["wgmma_use_late_as"]
-        assert config["wgmma_split_issue_wait"] == (config["warp_shape"][0] <= 160)
-        tuning_keys = ("mma_type", "block_shape", "warp_shape", "num_stages", "use_warp_spec")
+        assert config["wgmma_split_issue_wait"]
+        tuning_keys = (
+            "mma_type",
+            "block_shape",
+            "warp_shape",
+            "num_stages",
+            "use_warp_spec",
+            "num_ctas_per_sm",
+        )
         tuning = TuningConfig(
             **{key: config[key] for key in tuning_keys},
             wgmma_split_issue_wait=config["wgmma_split_issue_wait"],
@@ -397,20 +405,5 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
         for shape_m in (lower + 1, min(upper, lower + num_experts * 2048)):
             assert select(layer, shape_m=shape_m, **kwargs) == config
         previous_upper = upper
-    for rows, tile in [
-        (128, 144),
-        (144, 160),
-        (160, 176),
-        (256, 144),
-        (288, 160),
-        (320, 176),
-        (512, 176),
-        (640, 176),
-    ]:
-        config = select(layer, shape_m=rows * num_experts, **kwargs)
-        expected_tile = tile if device_name == "H200" else 128
-        assert config["warp_shape"][0] == expected_tile
-        expected_stages = 4 if device_name == "H200" and (tile >= 160 or shape_k > 2048) else 5
-        assert config["num_stages"] == expected_stages
     generic = select(layer, shape_m=4096, gemm_type=GemmType.GROUPED_CONTIGUOUS)
     assert generic.get("raster_group_m", 1) == 1

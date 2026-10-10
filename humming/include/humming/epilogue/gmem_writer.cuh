@@ -34,6 +34,7 @@ private:
   using SharedStorage = typename Ctx::SharedStorage;
   using ProblemShape = typename Ctx::ProblemShape;
   using BlockShape = typename Ctx::BlockShape;
+  using WarpShape = typename Ctx::WarpShape;
   using PadShape = typename Ctx::PadShape;
   using ElementC = typename Ctx::ElementC;
 
@@ -52,6 +53,11 @@ private:
   using scalar_t2 = typename F16Conversion<ElementC>::scalar_t2;
 
 public:
+  // Each WGMMA warpgroup owns its M rows and four warp tiles in N.
+  // Tile-wide dependencies are handled at the epilogue's entry/exit boundaries.
+  static constexpr uint32_t kWarpgroupColumns = WarpShape::N * 4;
+  static constexpr bool kUseWarpgroupEpilogue = SharedStorage::kUseWarpgroupOutput;
+
   Ctx &ctx;
   ArithClass &arith;
   int4 *gmem_ptr_raw;
@@ -80,24 +86,66 @@ public:
 
   CUDA_INLINE
   void write(uint32_t slice_id, uint32_t slice_count, uint32_t first_row) {
-    if constexpr (kUseTmaC) {
+    if constexpr (kUseWarpgroupEpilogue) {
+      if (ctx.k_warp_id() != 0) return;
+      if constexpr (kUseTmaC) {
+        write_warpgroup_tma(slice_id, slice_count);
+      } else {
+        uint32_t first_column = ctx.n_warp_id() / 4 * kWarpgroupColumns;
+        uint32_t first_partition_row = ctx.m_warp_offset();
+        write_legacy<WarpShape::M, kWarpgroupColumns, kOutputRows, 128>(
+            slice_id, slice_count, first_row + first_partition_row, first_column, first_partition_row * 8);
+      }
+    } else if constexpr (kUseTmaC) {
       write_tma(slice_id, slice_count);
     } else {
       write_legacy(slice_id, slice_count, first_row);
     }
   };
 
+  CUDA_INLINE void write_warpgroup_tma(uint32_t slice_id, uint32_t slice_count) {
+    bool is_leader = false;
+    if (ctx.math_thread_id() % 128 < 32) is_leader = warp_elect_leader();
+    if (is_leader) {
+      uint32_t first_column = ctx.n_warp_id() / 4 * kWarpgroupColumns;
+      uint32_t first_row = ctx.m_warp_offset();
+      constexpr uint32_t kStoreColumns = kUseTma3d ? SharedStorage::kOutputTileColumns : 64;
+      PRAGMA_UNROLL
+      for (uint32_t column = 0; column < kWarpgroupColumns; column += kStoreColumns) {
+        uint32_t smem_offset = ((first_column + column) / 64 * kOutputRows + first_row) * 8;
+        uint32_t output_column = col_offset + first_column + column;
+        if constexpr (kUseTma3d) {
+          if (!kUseStreamK || slice_count == 1 || slice_id == 0)
+            tma_store_3d(ctx.smem.reduce + smem_offset, tensor_map_ptr, 0, row_offset + first_row, output_column / 64);
+          else
+            tma_reduce_add_3d(ctx.smem.reduce + smem_offset, tensor_map_ptr, 0, row_offset + first_row, output_column / 64);
+        } else {
+          if (!kUseStreamK || slice_count == 1 || slice_id == 0)
+            tma_store_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, output_column, row_offset + first_row);
+          else
+            tma_reduce_add_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, output_column, row_offset + first_row);
+        }
+      }
+      tma_commit_store_group();
+    }
+    if constexpr (kUseStreamK) {
+      if (slice_count > 1 && slice_id != slice_count - 1) tma_wait_store_group<0>();
+    }
+  }
+
   template <uint32_t kRows = kOutputRows,
-            uint32_t kColumns = BlockShape::N, uint32_t kStorageRows = kRows>
+      uint32_t kColumns = BlockShape::N, uint32_t kStorageRows = kRows, uint32_t kWriterThreads = kNumMathThreads>
   CUDA_INLINE void write_legacy(uint32_t slice_id, uint32_t slice_count, uint32_t first_row = 0, uint32_t first_column = 0,
-                                uint32_t buffer_offset = 0, uint32_t valid_rows = kRows) {
+      uint32_t buffer_offset = 0, uint32_t valid_rows = kRows) {
     constexpr uint32_t total_write_int4s = kRows * kColumns / 8;
-    constexpr uint32_t iters = CEIL_DIV(total_write_int4s, kNumMathThreads);
+    constexpr uint32_t iters = CEIL_DIV(total_write_int4s, kWriterThreads);
     uint32_t smem_base = offsetof(SharedStorage, reduce) / 128 % 8;
+    uint32_t writer_thread = ctx.math_thread_id();
+    if constexpr (kWriterThreads != kNumMathThreads) writer_thread %= kWriterThreads;
 
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < iters; i++) {
-      uint32_t index = ctx.math_thread_id() + kNumMathThreads * i;
+      uint32_t index = writer_thread + kWriterThreads * i;
       if (index < total_write_int4s) {
         uint32_t local_row = index / 8 % kRows;
         if (local_row >= valid_rows) continue;
@@ -128,7 +176,7 @@ public:
 
   template <uint32_t kColumns = BlockShape::N>
   CUDA_INLINE void write_chunk(uint32_t slice_id, uint32_t slice_count, uint32_t first_row,
-                               uint32_t rows, uint32_t buffer_offset, uint32_t first_column = 0) {
+      uint32_t rows, uint32_t buffer_offset, uint32_t first_column = 0) {
     constexpr uint32_t kRows = kOutputRows;
     if constexpr (kUseTmaC) {
       if constexpr (kUseTma3d) {
@@ -147,7 +195,7 @@ public:
         if (column_block < kColumns / 64) {
           uint32_t smem_offset = buffer_offset + (first_column / 64 + column_block) * kRows * 8;
           write_tma_tile(slice_id, slice_count, smem_offset,
-                         col_offset + first_column + column_block * 64, row_offset + first_row);
+              col_offset + first_column + column_block * 64, row_offset + first_row);
         }
       }
     } else {
@@ -156,8 +204,7 @@ public:
   }
 
   CUDA_INLINE
-  void write_tma_tile(uint32_t slice_id, uint32_t slice_count, uint32_t smem_offset,
-                      uint32_t column, uint32_t row) {
+  void write_tma_tile(uint32_t slice_id, uint32_t slice_count, uint32_t smem_offset, uint32_t column, uint32_t row) {
     if (!kUseStreamK || slice_count == 1 || slice_id == 0)
       tma_store_2d(ctx.smem.reduce + smem_offset, tensor_map_ptr, column, row);
     else
@@ -202,13 +249,14 @@ public:
       }
     }
 
-    uint32_t offset;
-    offset = n_block_id * (BlockShape::N * 2 / 16);
-    if constexpr (!kIsIndexedGemm) {
-      constexpr uint32_t kShapeN = ProblemShape::N - PadShape::N;
-      offset += MIN(row_offset, output_shape_m) * (kShapeN / 8);
+    if constexpr (!kUseTmaC) {
+      uint32_t offset = n_block_id * (BlockShape::N * 2 / 16);
+      if constexpr (!kIsIndexedGemm) {
+        constexpr uint32_t kShapeN = ProblemShape::N - PadShape::N;
+        offset += MIN(row_offset, output_shape_m) * (kShapeN / 8);
+      }
+      gmem_ptr = gmem_ptr_raw + offset;
     }
-    gmem_ptr = gmem_ptr_raw + offset;
   };
 
   CUDA_INLINE

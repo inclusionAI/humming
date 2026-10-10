@@ -3,6 +3,13 @@
 #include <humming/utils/base.cuh>
 
 
+CUDA_INLINE bool warp_elect_leader() {
+  uint32_t leader;
+  asm volatile("{ .reg .pred p; elect.sync _|p, 0xffffffff; selp.u32 %0, 1, 0, p; }" : "=r"(leader));
+  return leader;
+}
+
+
 CUDA_INLINE uint32_t warp_reduce_add(uint32_t local_count) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
   local_count += __shfl_down_sync(0xFFFFFFFF, local_count, 16);
