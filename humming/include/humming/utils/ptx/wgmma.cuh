@@ -22,3 +22,8 @@ CUDA_INLINE void warpgroup_fence_operand(uint32_t &reg) {
   asm volatile(""
                : "+r"(reg)::"memory");
 }
+
+CUDA_INLINE void warpgroup_fence_operand(float &reg) {
+  asm volatile(""
+      : "+f"(reg)::"memory");
+}

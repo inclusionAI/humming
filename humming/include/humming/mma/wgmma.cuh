@@ -225,7 +225,7 @@ public:
   CUDA_INLINE void fence_regs(T &regs) {
     PRAGMA_UNROLL
     for (uint32_t r = 0; r < sizeof(T) / 4; r++) {
-      warpgroup_fence_operand(reinterpret_cast<uint32_t *>(regs)[r]);
+      warpgroup_fence_operand(regs[r]);
     }
   };
 
