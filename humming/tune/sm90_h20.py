@@ -6,11 +6,7 @@ from humming import dtypes
 from humming.config import GemmType, LayerConfig
 from humming.device import current_device
 from humming.tune.base import DeviceHeuristics
-from humming.tune.sm90_policies import (
-    get_block_scaled_moe_config,
-    get_fused_e8m0_config,
-    get_scaled_w8a8_config,
-)
+from humming.tune.sm90_policies import get_sm90_specialized_config
 from humming.utils.math import ceil_div, round_up
 from humming.utils.smem import estimate_smem_size_layer
 
@@ -315,7 +311,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         gemm_type: GemmType = GemmType.DENSE,
         use_m_major_input_scale: bool = False,
     ):
-        fused_config = get_fused_e8m0_config(
+        specialized_config = get_sm90_specialized_config(
             layer_config,
             shape_m,
             gemm_type,
@@ -325,33 +321,8 @@ class Sm90H20Heuristics(DeviceHeuristics):
             use_m_major_input_scale=use_m_major_input_scale,
             expert_probability_cv=cls.expert_probability_cv,
         )
-        if fused_config is not None:
-            return fused_config
-
-        block_scaled_config = get_block_scaled_moe_config(
-            layer_config,
-            shape_m,
-            gemm_type,
-            use_f16_accum,
-            use_batch_invariant,
-            is_h20=True,
-            expert_probability_cv=cls.expert_probability_cv,
-        )
-        if block_scaled_config is not None:
-            return block_scaled_config
-
-        scaled_config = get_scaled_w8a8_config(
-            layer_config,
-            shape_m,
-            gemm_type,
-            use_f16_accum,
-            use_batch_invariant,
-            is_h20=True,
-            use_m_major_input_scale=use_m_major_input_scale,
-            expert_probability_cv=cls.expert_probability_cv,
-        )
-        if scaled_config is not None:
-            return scaled_config
+        if specialized_config is not None:
+            return specialized_config
         group_size = layer_config.input_scale_group_size or layer_config.weight_scale_group_size
         is_moe = gemm_type != GemmType.DENSE
         a_dtype = layer_config.a_dtype
@@ -472,11 +443,11 @@ class Sm90H20Heuristics(DeviceHeuristics):
             warp_shape_m = block_shape_m
             num_blocks_m = math.ceil(shape_m / block_shape_m)
 
-        if num_ctas_per_sm == 1:
+        use_stream_k = layer_config.shape_k > 1024 and not use_batch_invariant
+        if use_stream_k and num_ctas_per_sm == 1:
             factor = min(4.5, layer_config.shape_k / (3 * block_shape_k))
-            if layer_config.shape_k > 1024:
-                # Keep at least two stage-4 turns per Stream-K slice.
-                factor = min(9, max(factor, layer_config.shape_k / (8 * block_shape_k)))
+            # Keep at least two stage-4 turns per Stream-K slice.
+            factor = min(9, max(factor, layer_config.shape_k / (8 * block_shape_k)))
             num_sms = min(num_sms, math.ceil(num_blocks_n * num_blocks_m * factor))
 
         while layer_config.shape_k % block_shape_k != 0:
@@ -495,7 +466,7 @@ class Sm90H20Heuristics(DeviceHeuristics):
         config = {
             "block_shape": (block_shape_m, block_shape_n, block_shape_k),
             "warp_shape": (warp_shape_m, warp_shape_n, warp_shape_k),
-            "use_stream_k": layer_config.shape_k > 1024,
+            "use_stream_k": use_stream_k,
             "use_f16_accum": use_f16_accum,
             "num_sms": num_sms,
             "num_stages": num_stages,

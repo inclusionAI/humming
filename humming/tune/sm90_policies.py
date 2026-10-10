@@ -21,6 +21,126 @@ from humming.tune.candidate import (
 from humming.utils.smem import estimate_smem_size_layer
 
 
+def get_sm90_specialized_config(
+    layer_config: LayerConfig,
+    shape_m: int,
+    gemm_type: GemmType,
+    use_f16_accum: bool,
+    use_batch_invariant: bool,
+    *,
+    is_h20: bool = False,
+    use_m_major_input_scale: bool = False,
+    expert_probability_cv: float = DeviceHeuristics.expert_probability_cv,
+) -> dict | None:
+    short_config = get_short_k_config(
+        layer_config,
+        shape_m,
+        gemm_type,
+        use_f16_accum,
+        use_batch_invariant,
+        is_h20=is_h20,
+        use_m_major_input_scale=use_m_major_input_scale,
+    )
+    if short_config is not None:
+        return short_config
+    packed_config = get_packed_wna8_config(
+        layer_config,
+        shape_m,
+        gemm_type,
+        use_f16_accum,
+        use_batch_invariant,
+        is_h20=is_h20,
+        use_m_major_input_scale=use_m_major_input_scale,
+        expert_probability_cv=expert_probability_cv,
+    )
+    if packed_config is not None:
+        return packed_config
+    block_scaled_config = get_block_scaled_moe_config(
+        layer_config,
+        shape_m,
+        gemm_type,
+        use_f16_accum,
+        use_batch_invariant,
+        is_h20=is_h20,
+        expert_probability_cv=expert_probability_cv,
+    )
+    if block_scaled_config is not None:
+        return block_scaled_config
+    return get_scaled_w8a8_config(
+        layer_config,
+        shape_m,
+        gemm_type,
+        use_f16_accum,
+        use_batch_invariant,
+        is_h20=is_h20,
+        use_m_major_input_scale=use_m_major_input_scale,
+        expert_probability_cv=expert_probability_cv,
+    )
+
+
+def get_short_k_config(
+    layer_config: LayerConfig,
+    shape_m: int,
+    gemm_type: GemmType,
+    use_f16_accum: bool,
+    use_batch_invariant: bool,
+    *,
+    is_h20: bool = False,
+    use_m_major_input_scale: bool = False,
+) -> dict | None:
+    if gemm_type != GemmType.DENSE or use_f16_accum or use_batch_invariant:
+        return None
+    if layer_config.a_dtype.num_bits != 8 or layer_config.shape_k > 512:
+        return None
+    if layer_config.shape_n % 128 or layer_config.shape_k % 128:
+        return None
+    if get_problem_rejection_reasons(layer_config, MmaType.WGMMA):
+        return None
+    if is_h20 and layer_config.use_raw_weight and layer_config.shape_k > 256 and shape_m > 64:
+        return None
+    if layer_config.use_fused_e8m0_scale and layer_config.use_packed_k_layout and shape_m > 64:
+        return None
+
+    alignment = 16 if layer_config.a_dtype.is_integer_type else 8
+    n_tiles = layer_config.shape_n // 128
+    block_m = int(shape_m * n_tiles / current_device.sm_count) // alignment * alignment
+    block_m = min(64, max(16, block_m))
+    has_unpacked_group_weights = (
+        not layer_config.use_raw_weight
+        and not layer_config.use_packed_k_layout
+        and layer_config.is_group_weight_scale
+        and not layer_config.use_fused_e8m0_scale
+    )
+    warp_n = 32 if has_unpacked_group_weights else 16
+    config = {
+        "mma_type": MmaType.WGMMA.value,
+        "block_shape": (block_m, 128, 128),
+        "warp_shape": (block_m, warp_n, 128),
+        "num_stages": 3,
+        "num_ctas_per_sm": 2,
+        "use_tma": False,
+        "use_warp_spec": False,
+        "use_stream_k": False,
+        "smem_reuse_mode": "all_stages",
+        "raster_group_m": 1,
+    }
+    tuning = TuningConfig(**config)
+    if get_register_budget_error(layer_config, tuning, registers_per_sm=65536):
+        return None
+    smem_size = estimate_smem_size_layer(
+        layer_config,
+        config["block_shape"],
+        gemm_type,
+        config["num_stages"],
+        warp_shape=config["warp_shape"],
+        use_tma=False,
+        use_warp_spec=False,
+        mma_type=MmaType.WGMMA,
+        use_m_major_input_scale=use_m_major_input_scale,
+    )
+    return config if smem_size * config["num_ctas_per_sm"] <= 227 * 1024 else None
+
+
 def get_block_scaled_moe_config(
     layer_config: LayerConfig,
     shape_m: int,
@@ -408,8 +528,7 @@ def get_scaled_w8a8_config(
     has_raw_w8a8 = layer_config.a_dtype.num_bits == 8 and layer_config.a_dtype == layer_config.b_dtype
     has_group_scales = layer_config.is_group_input_scale or layer_config.is_group_weight_scale
     has_group_scales |= layer_config.is_block_weight_scale
-    has_short_dense_reduction = gemm_type == GemmType.DENSE and layer_config.shape_k <= 512
-    if not has_raw_w8a8 or not (has_group_scales or has_short_dense_reduction):
+    if not has_raw_w8a8 or not has_group_scales:
         return None
     if gemm_type not in (GemmType.DENSE, GemmType.INDEXED) or use_f16_accum or use_batch_invariant:
         return None
@@ -457,17 +576,17 @@ def get_scaled_w8a8_config(
         return smem_size * config["num_ctas_per_sm"] <= 227 * 1024
 
     if gemm_type == GemmType.DENSE:
+        if short_k:
+            return None
         n_tiles = layer_config.shape_n // 128
         has_wide_short_grid = layer_config.shape_k <= 1024 and n_tiles >= num_sms / 4 and shape_m <= 128
-        if is_h20 and 256 < layer_config.shape_k <= 512 and shape_m > 64:
+        if is_h20 and shape_m < 32:
             return None
-        if is_h20 and not short_k and shape_m < 32:
-            return None
-        if has_wide_short_grid and not short_k and shape_m >= 32:
+        if has_wide_short_grid and shape_m >= 32:
             m_tiles = max(1, math.ceil(num_sms * 2 / 3 / n_tiles))
             block_m = min(64, math.ceil(shape_m / m_tiles / alignment) * alignment)
             config = make_config(block_m, 128, 16, True, False)
-        elif short_k or has_wide_short_grid:
+        elif has_wide_short_grid:
             block_m = int(shape_m * n_tiles / num_sms) // alignment * alignment
             block_m = min(64, max(16, block_m))
             config = make_config(block_m, 128, 16, False, False, stages=3, ctas=2)
@@ -521,7 +640,7 @@ def get_scaled_w8a8_config(
     return config
 
 
-def get_fused_e8m0_config(
+def get_packed_wna8_config(
     layer_config: LayerConfig,
     shape_m: int,
     gemm_type: GemmType,
@@ -532,8 +651,10 @@ def get_fused_e8m0_config(
     use_m_major_input_scale: bool = False,
     expert_probability_cv: float = DeviceHeuristics.expert_probability_cv,
 ) -> dict | None:
-    """Select packed fused-scale tiles from routing work and SM90 resources."""
-    if not layer_config.use_fused_e8m0_scale or not layer_config.use_packed_k_layout:
+    """Select packed weight tiles from routing work and SM90 resources."""
+    if not layer_config.use_packed_k_layout:
+        return None
+    if is_h20 and gemm_type == GemmType.DENSE and not layer_config.use_fused_e8m0_scale:
         return None
     if use_f16_accum or use_batch_invariant:
         return None
@@ -583,6 +704,11 @@ def get_fused_e8m0_config(
             shape_m, layer_config.num_experts, expert_probability_cv
         )
 
+    has_indexed_weight_groups = (
+        gemm_type == GemmType.INDEXED
+        and layer_config.is_group_weight_scale
+        and not layer_config.use_fused_e8m0_scale
+    )
     max_block_m = 64 if is_h20 else 160
     num_sms = current_device.sm_count
     best_config = None
@@ -603,7 +729,8 @@ def get_fused_e8m0_config(
         is_small_tile = block_m <= 32
         block_n = 256 if is_small_tile and layer_config.shape_n % 256 == 0 else 128
         warp_n = 32 if block_n == 256 else 16
-        use_warp_spec = not is_h20 and not is_small_tile and gemm_type != GemmType.INDEXED
+        can_use_warp_spec = gemm_type != GemmType.INDEXED or has_indexed_weight_groups
+        use_warp_spec = not is_h20 and not is_small_tile and can_use_warp_spec
         resident_ctas = 1 if use_warp_spec else 2
         stages = 3 if is_small_tile else (5 if is_h20 else 4)
         config = {
@@ -616,7 +743,7 @@ def get_fused_e8m0_config(
             "use_warp_spec": use_warp_spec,
             "use_stream_k": False,
             "wgmma_use_late_as": layer_config.is_group_input_scale,
-            "wgmma_split_issue_wait": True,
+            "wgmma_split_issue_wait": not (use_warp_spec and has_indexed_weight_groups),
             "smem_reuse_mode": "none" if use_warp_spec else "all_stages",
             "raster_group_m": 1,
         }
@@ -674,9 +801,11 @@ def get_fused_e8m0_config(
             return None
         if is_h20 and block_m == 8 and block_n == 256:
             return None
-        if gemm_type == GemmType.DENSE:
-            tiles = math.ceil(shape_m / block_m) * (layer_config.shape_n // block_n)
-            if tiles < num_sms / 2:
+        if gemm_type == GemmType.DENSE or not layer_config.use_fused_e8m0_scale:
+            m_tiles = ((counts + block_m - 1) // block_m).sum(axis=1)
+            tiles = m_tiles * (layer_config.shape_n // block_n)
+            resident_ctas = 1 if layer_config.use_fused_e8m0_scale else best_config["num_ctas_per_sm"]
+            if tiles.mean() < num_sms * resident_ctas / 2:
                 return None
     return best_config
 

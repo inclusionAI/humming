@@ -11,9 +11,7 @@ from humming.tune.sm90_policies import (
     Sm90CandidatePolicy,
     build_sm90_seed_config,
     calc_sm90_num_block_list,
-    get_block_scaled_moe_config,
-    get_fused_e8m0_config,
-    get_scaled_w8a8_config,
+    get_sm90_specialized_config,
     select_grouped_scale,
     select_indexed_a16,
 )
@@ -171,7 +169,7 @@ class Sm90Heuristics(Sm80Heuristics):
         gemm_type: GemmType = GemmType.DENSE,
         use_m_major_input_scale: bool = False,
     ):
-        fused_config = get_fused_e8m0_config(
+        specialized_config = get_sm90_specialized_config(
             layer_config,
             shape_m,
             gemm_type,
@@ -180,31 +178,8 @@ class Sm90Heuristics(Sm80Heuristics):
             use_m_major_input_scale=use_m_major_input_scale,
             expert_probability_cv=cls.expert_probability_cv,
         )
-        if fused_config is not None:
-            return fused_config
-
-        block_scaled_config = get_block_scaled_moe_config(
-            layer_config,
-            shape_m,
-            gemm_type,
-            use_f16_accum,
-            use_batch_invariant,
-            expert_probability_cv=cls.expert_probability_cv,
-        )
-        if block_scaled_config is not None:
-            return block_scaled_config
-
-        scaled_config = get_scaled_w8a8_config(
-            layer_config,
-            shape_m,
-            gemm_type,
-            use_f16_accum,
-            use_batch_invariant,
-            use_m_major_input_scale=use_m_major_input_scale,
-            expert_probability_cv=cls.expert_probability_cv,
-        )
-        if scaled_config is not None:
-            return scaled_config
+        if specialized_config is not None:
+            return specialized_config
 
         is_wna16 = layer_config.a_dtype.num_bits == 16 and layer_config.b_dtype.num_bits < 16
         has_short_reduction = shape_m <= 32 and layer_config.shape_k <= 1024
