@@ -153,9 +153,9 @@ class Sm120Heuristics(Sm89Heuristics):
         if gemm_type != GemmType.DENSE and is_wna16 and layer_config.b_dtype.num_bits <= 8:
             tokens_per_expert = shape_m / layer_config.num_experts
             if tokens_per_expert >= 96:
-                cls._use_m_tile(layer_config, config, gemm_type, 128)
+                cls._use_m_tile(layer_config, config, gemm_type, 128, shape_m)
             elif tokens_per_expert >= 48:
-                cls._use_m_tile(layer_config, config, gemm_type, 64)
+                cls._use_m_tile(layer_config, config, gemm_type, 64, shape_m)
 
         num_b_bits = layer_config.b_dtype.num_bits
         block_m = config["block_shape"][0]
@@ -350,7 +350,7 @@ class Sm120Heuristics(Sm89Heuristics):
         )
 
     @classmethod
-    def _use_m_tile(cls, layer_config, config, gemm_type, block_m: int) -> None:
+    def _use_m_tile(cls, layer_config, config, gemm_type, block_m: int, shape_m: int) -> None:
         _, block_n, block_k = config["block_shape"]
         _, warp_n, warp_k = config["warp_shape"]
         config["block_shape"] = (block_m, block_n, block_k)
@@ -362,6 +362,30 @@ class Sm120Heuristics(Sm89Heuristics):
             gemm_type,
             smem_reuse_mode="all_stages",
         )
+
+        m_tiles = cls.estimate_num_blocks_m(layer_config, shape_m, block_m)
+        min_grid_blocks = math.ceil(current_device.sm_count * 2 / 3)
+        has_sparse_grid = m_tiles * (layer_config.shape_n // block_n) < min_grid_blocks
+        if block_n <= 64 or not has_sparse_grid:
+            return
+
+        # A larger M tile can leave too few output tiles and consume the
+        # shared memory needed for pipelining. Narrow N only if both improve.
+        block_n //= 2
+        warp_n = min(warp_n, 32)
+        k_warps = max(1, 8 // (block_n // warp_n))
+        warp_k = max(32, block_k // k_warps)
+        candidate = config | {
+            "block_shape": (block_m, block_n, block_k),
+            "warp_shape": (block_m, warp_n, warp_k),
+            "num_sms": current_device.sm_count,
+        }
+        candidate["use_warp_spec"] &= cls._has_complete_warpgroups(candidate)
+        candidate["num_stages"] = cls._fit_num_stages(
+            layer_config, candidate, gemm_type, smem_reuse_mode="all_stages"
+        )
+        if candidate["num_stages"] > config["num_stages"]:
+            config.update(candidate)
 
     @classmethod
     def _fit_num_stages(cls, layer_config, config, gemm_type, smem_reuse_mode: str) -> int:
